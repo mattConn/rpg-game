@@ -10,8 +10,8 @@ export interface Projectile {
   vy: number;
 }
 
-/** Ranged fire rate and projectile speed — "moderate" per the design. */
-export const FIRE_INTERVAL_MS = 550;
+/** Ranged fire rate (one dagger per second) and projectile speed. */
+export const FIRE_INTERVAL_MS = 1000;
 export const PROJECTILE_SPEED = 480;
 
 /** A dagger is done once it reaches the target or leaves the room. */

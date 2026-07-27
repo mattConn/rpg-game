@@ -129,7 +129,7 @@ const enemyStart = cellCenter(36, 5); // near the top-right of the start room
 const enemies: Enemy[] = [
   {
     id: "hellhound-1",
-    name: "hellhound",
+    name: "Hellhound",
     glyph: "♞",
     color: "#ff8c1a",
     room: { ...START_ROOM },
@@ -165,6 +165,12 @@ function endCombat() {
   projectiles.length = 0;
 }
 
+/** Manual movement (WASD or click-to-move) drops the target and stops attacking. */
+function disengageCombat() {
+  targetId = null;
+  endCombat();
+}
+
 // ---------------------------------------------------------------------- input
 
 const heldKeys = new Set<string>();
@@ -182,6 +188,7 @@ window.addEventListener("keydown", (event) => {
   if (!"wasd".includes(key) || key.length !== 1) return;
   heldKeys.add(key);
   moveTarget = null; // keyboard input cancels a pending click destination
+  disengageCombat(); // moving under your own power breaks off the attack
   event.preventDefault();
 });
 
@@ -284,8 +291,7 @@ canvas.addEventListener("click", (event) => {
   }
 
   // A click on open ground cancels combat, drops the target, and walks there.
-  targetId = null;
-  endCombat();
+  disengageCombat();
   const exit = exitAtPoint(me.room, point);
   moveTarget = exit
     ? doorwayTarget(exit, point)
