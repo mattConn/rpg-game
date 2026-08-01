@@ -12,7 +12,7 @@ export const WORLD_HEIGHT = 900;
 export const PLAYER_RADIUS = 10;
 
 /** Movement speed in pixels per second. */
-export const PLAYER_SPEED = 220;
+export const PLAYER_SPEED = 160;
 
 /** Show the "(You)" tag when the cursor comes within this many units of the player. */
 export const NAME_REVEAL_DISTANCE = 60;

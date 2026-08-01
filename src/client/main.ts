@@ -1,4 +1,5 @@
 import {
+  CELL_SIZE,
   DIRECTIONS,
   NAME_REVEAL_DISTANCE,
   PLAYER_RADIUS,
@@ -40,11 +41,10 @@ import {
   type Projectile,
 } from "./combat.js";
 import { DEFAULT_CURSOR, EXIT_CURSORS } from "./cursors.js";
-import { HUD_DEFAULT_ORIGIN, clampHudOrigin, drawHud } from "./hud.js";
-import { DEFAULT_ORIGIN, clampOrigin, drawMinimap } from "./minimap.js";
+import { HUD_DEFAULT_ORIGIN, HUD_HEIGHT, HUD_WIDTH, drawEnemyHud, drawHud } from "./hud.js";
 import { isOverHandle } from "./panel.js";
-import { type Enemy, drawEnemy, enemyAtPoint } from "./enemies.js";
-import { Dungeon, cellCenter, drawTiles, fillWalls, rectBorder, resolveMove, segmentHitsWall } from "./tilemap.js";
+import { type Enemy, drawEnemy, enemyAtPoint, spawnEnemy, updateEnemy, drawHealthBar } from "./enemies.js";
+import { Dungeon, drawTiles, resolveMove, segmentHitsWall, worldToCell } from "./tilemap.js";
 import { fitToViewport } from "./viewport.js";
 
 /** Stop click-to-move once this close to the target (px). */
@@ -53,9 +53,32 @@ const ARRIVAL_EPSILON = 1.5;
 /** How close a melee attacker walks before stopping to strike. */
 const ATTACK_RANGE = 44;
 
+/** Melee hit cadence in autoplay (ms). */
+const MELEE_INTERVAL = 600;
+
+/** Melee damage per hit. */
+const MELEE_DAMAGE = 10;
+
+/** Ranged (dagger) damage per hit. */
+const RANGED_DAMAGE = 5;
+
+/** Spawn a wave of enemies every this many ms. */
+const SPAWN_INTERVAL = 3000;
+
+/** Floating damage number lifetime in seconds. */
+const DAMAGE_NUMBER_LIFETIME = 1.0;
+
+/** How fast damage numbers rise (px/s). */
+const DAMAGE_NUMBER_SPEED = 50;
+
+/** One in-game minute = this many real ms. 500ms = 1 game minute (12 real min = 1 day). */
+const MS_PER_GAME_MINUTE = 500;
+
 const GLYPH_FONT = "20px monospace";
 const NAME_FONT = "12px monospace";
 const ROOM_LABEL_FONT = "13px monospace";
+const AUTO_LABEL_FONT = "11px monospace";
+const CLOCK_FONT = "13px monospace";
 
 const canvas = document.getElementById("game") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
@@ -113,30 +136,13 @@ let moveTarget: { x: number; y: number } | null = null;
 /** Glyph layer over each room. Rendering only — movement runs straight through it. */
 const dungeon = new Dungeon();
 
-// A solid-walled vault in the centre of the start room, with a doorway on its
-// south side. The player spawns inside it. These walls are solid blocks and
-// block movement (the only other tiles — decoration — never do).
-fillWalls(
-  dungeon.layer(START_ROOM),
-  rectBorder(16, 11, 23, 18, [[19, 18], [20, 18]]), // gap on the south wall = doorway
-  "#5a6b70",
-);
 
 // -------------------------------------------------------------------- enemies
 
-/** Render-only enemies — no stats, no movement yet. */
-const enemyStart = cellCenter(36, 5); // near the top-right of the start room
-const enemies: Enemy[] = [
-  {
-    id: "hellhound-1",
-    name: "Hellhound",
-    glyph: "♞",
-    color: "#ff8c1a",
-    room: { ...START_ROOM },
-    x: enemyStart.x,
-    y: enemyStart.y,
-  },
-];
+const enemies: Enemy[] = [];
+
+/** Monotonically increasing ID counter for spawned enemies. */
+let nextEnemyId = 1;
 
 /** The id of the targeted enemy, or null. Single-clicking never moves the player. */
 let targetId: string | null = null;
@@ -150,6 +156,22 @@ let activeSlot = 0;
 /** Thrown daggers in flight, and the clock for the next shot. */
 const projectiles: Projectile[] = [];
 let lastFireAt = 0;
+
+/** Melee swing timer (autoplay). */
+let lastMeleeAt = 0;
+
+/** Enemy spawning timer (autoplay). */
+let lastSpawnAt = 0;
+
+/** Kill counter and cooldown. After 50 kills, spawns pause for 1 game hour. */
+let killCount = 0;
+const KILLS_PER_COOLDOWN = 50;
+/** 1 game hour in real ms (60 game minutes × MS_PER_GAME_MINUTE). */
+const COOLDOWN_MS = 60 * MS_PER_GAME_MINUTE;
+let cooldownUntil = 0; // real timestamp when cooldown ends
+
+/** Elapsed real ms since game started — drives the in-game clock. */
+let gameElapsedMs = 0;
 
 const activeKind = () => ACTIONS[activeSlot]?.kind ?? "melee";
 
@@ -171,12 +193,50 @@ function disengageCombat() {
   endCombat();
 }
 
+// ---------------------------------------------------------- autoplay mode
+
+let autoMode = false;
+
+// -------------------------------------------------------- damage numbers
+
+interface DamageNumber {
+  x: number;
+  y: number;
+  text: string;
+  color: string;
+  age: number;
+}
+
+const damageNumbers: DamageNumber[] = [];
+
+function spawnDamageNumber(x: number, y: number, amount: number) {
+  damageNumbers.push({
+    x,
+    y,
+    text: String(amount),
+    color: "#ffd633",
+    age: 0,
+  });
+}
+
 // ---------------------------------------------------------------------- input
 
 const heldKeys = new Set<string>();
 
 window.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
+
+  // Space toggles auto-movement (targeting + weapon selection).
+  if (event.code === "Space") {
+    autoMode = !autoMode;
+    if (!autoMode) {
+      // Turning auto off drops the auto-selected target so the player stops.
+      disengageCombat();
+      moveTarget = null;
+    }
+    event.preventDefault();
+    return;
+  }
 
   // Number keys 1-5 select the matching action-bar slot (if it holds an attack).
   if (key.length === 1 && key >= "1" && key <= "5") {
@@ -210,14 +270,15 @@ function toWorld(event: MouseEvent) {
 
 // ----------------------------------------------------------- panel dragging
 
-type PanelName = "map" | "hud" | "bar";
+type PanelName = "bar";
 
 /** Each draggable overlay: its top-left corner and how to keep it on-canvas. */
 const panels: Record<PanelName, { origin: Point; clamp: (o: Point) => Point }> = {
-  map: { origin: { ...DEFAULT_ORIGIN }, clamp: clampOrigin },
-  hud: { origin: { ...HUD_DEFAULT_ORIGIN }, clamp: clampHudOrigin },
   bar: { origin: { ...ACTION_BAR_DEFAULT_ORIGIN }, clamp: clampActionBarOrigin },
 };
+
+/** HUD is fixed in the top-left corner (not draggable). */
+const hudOrigin: Point = { ...HUD_DEFAULT_ORIGIN };
 
 /** Which handle a point grabs — the nearer one, should they ever overlap. */
 function handleUnder(point: Point): PanelName | null {
@@ -372,6 +433,14 @@ function updateCombat(now: number, dt: number) {
         distance > ATTACK_RANGE
           ? { x: target.x - (dx / distance) * ATTACK_RANGE, y: target.y - (dy / distance) * ATTACK_RANGE }
           : null;
+
+      // Melee damage on interval when in range.
+      if (distance <= ATTACK_RANGE && now - lastMeleeAt >= MELEE_INTERVAL) {
+        target.health -= MELEE_DAMAGE;
+        target.aggro = true;
+        spawnDamageNumber(target.x, target.y, MELEE_DAMAGE);
+        lastMeleeAt = now;
+      }
     } else if (now - lastFireAt >= FIRE_INTERVAL_MS) {
       // Ranged: loose a dagger at the enemy on a fixed cadence.
       projectiles.push(spawnDagger({ x: me.x, y: me.y }, { x: target.x, y: target.y }));
@@ -387,9 +456,74 @@ function updateCombat(now: number, dt: number) {
     const px = p.x;
     const py = p.y;
     advanceDagger(p, dt);
-    if (segmentHitsWall(layer, px, py, p.x, p.y) || daggerDone(p, goal)) {
+
+    const hitWall = segmentHitsWall(layer, px, py, p.x, p.y);
+    const reached = daggerDone(p, goal);
+
+    if (hitWall || reached) {
+      // Deal ranged damage when a dagger reaches the target (not when it hits a wall).
+      if (reached && !hitWall && target) {
+        target.health -= RANGED_DAMAGE;
+        target.aggro = true;
+        spawnDamageNumber(target.x, target.y, RANGED_DAMAGE);
+      }
       projectiles.splice(i, 1);
     }
+  }
+}
+
+/**
+ * Autoplay: auto-target closest enemy, select weapon, set attacking, steer
+ * toward melee range.
+ */
+function updateAutoplay(now: number) {
+  // Find closest enemy in the current room.
+  let closest: Enemy | null = null;
+  let closestDist = Infinity;
+
+  for (const e of enemies) {
+    if (!sameRoom(e.room, me.room)) continue;
+    const d = Math.hypot(e.x - me.x, e.y - me.y);
+    if (d < closestDist) {
+      closest = e;
+      closestDist = d;
+    }
+  }
+
+  if (!closest) {
+    // Nothing to fight — idle.
+    if (attacking) endCombat();
+    targetId = null;
+    moveTarget = null;
+    return;
+  }
+
+  targetId = closest.id;
+  attacking = true;
+
+  if (closestDist <= ATTACK_RANGE) {
+    // In melee range — use sword.
+    activeSlot = 0;
+  } else {
+    // Out of melee range — use daggers.
+    activeSlot = 1;
+  }
+
+  // Walk toward closest enemy so melee can connect.
+  const dx = closest.x - me.x;
+  const dy = closest.y - me.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  moveTarget =
+    closestDist > ATTACK_RANGE
+      ? { x: closest.x - (dx / dist) * ATTACK_RANGE, y: closest.y - (dy / dist) * ATTACK_RANGE }
+      : null;
+}
+
+/** Spawn 1-2 hellhounds from random edges of the current room. */
+function spawnWave() {
+  const count = 1 + Math.floor(Math.random() * 2); // 1 or 2
+  for (let i = 0; i < count; i++) {
+    enemies.push(spawnEnemy(`hellhound-${nextEnemyId++}`, me.room));
   }
 }
 
@@ -498,11 +632,75 @@ function drawLabelIfHovered(x: number, y: number, label: string) {
   ctx.fillText(label, x, y + PLAYER_RADIUS + 10);
 }
 
-function render() {
+/** Draw the "Auto" label under the clock in the top-right. */
+function drawAutoLabel(now: number) {
+  const margin = 14;
+  const x = WORLD_WIDTH - margin;
+  const y = margin + 38; // below Day + time lines
+
+  ctx.font = AUTO_LABEL_FONT;
+  ctx.textAlign = "right";
+  ctx.textBaseline = "top";
+
+  if (autoMode) {
+    const blink = Math.floor(now / 500) % 2 === 0;
+    ctx.fillStyle = blink ? "#ffd633" : "#aa8a00";
+  } else {
+    ctx.fillStyle = "#444444";
+  }
+
+  ctx.fillText("Auto", x, y);
+}
+
+/** Format the in-game clock as "Day N" / "HH:MM AM/PM" in the top-right. */
+function drawGameClock() {
+  const totalMinutes = Math.floor(gameElapsedMs / MS_PER_GAME_MINUTE);
+  const totalHours = Math.floor(totalMinutes / 60);
+  const day = Math.floor(totalHours / 24) + 1;
+  const hourOfDay = totalHours % 24;
+  const minute = totalMinutes % 60;
+
+  const ampm = hourOfDay < 12 ? "AM" : "PM";
+  const display12 = hourOfDay === 0 ? 12 : hourOfDay > 12 ? hourOfDay - 12 : hourOfDay;
+  const timeStr = `${display12}:${String(minute).padStart(2, "0")} ${ampm}`;
+
+  const margin = 14;
+  const x = WORLD_WIDTH - margin;
+  const y = margin;
+
+  ctx.font = CLOCK_FONT;
+  ctx.textAlign = "right";
+  ctx.textBaseline = "top";
+  ctx.fillStyle = "#aaaaaa";
+  ctx.fillText(`Day ${day}`, x, y);
+  ctx.fillText(timeStr, x, y + 16);
+}
+
+/** Draw floating damage numbers. */
+function drawDamageNumbers() {
+  ctx.font = "bold 14px monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  for (const dn of damageNumbers) {
+    const alpha = Math.max(0, 1 - dn.age / DAMAGE_NUMBER_LIFETIME);
+    ctx.fillStyle = `rgba(255, 214, 51, ${alpha.toFixed(2)})`;
+    ctx.fillText(dn.text, dn.x, dn.y);
+  }
+}
+
+function render(now: number) {
   drawRoom();
 
   // Glyph tiles sit on the floor, under the player token.
   drawTiles(ctx, dungeon.get(me.room));
+
+  // Grid-snapped cursor highlight.
+  if (cursor) {
+    const { col, row } = worldToCell(cursor.x, cursor.y);
+    ctx.fillStyle = "rgba(255, 255, 255, 0.18)";
+    ctx.fillRect(col * CELL_SIZE, row * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+  }
 
   // Enemies in this room, with the target ring and hover name.
   for (const enemy of enemies) {
@@ -514,6 +712,9 @@ function render() {
       showName,
     });
   }
+
+  // Floating damage numbers above enemies.
+  drawDamageNumbers();
 
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -534,9 +735,24 @@ function render() {
   }
 
   // Overlays, so a player walking underneath can't cover them.
-  drawMinimap(ctx, panels.map.origin, me.room, me.x, me.y, me.color);
-  drawHud(ctx, panels.hud.origin, { name: me.name, color: me.color, ...stats });
+  drawHud(ctx, hudOrigin, { name: me.name, color: me.color, ...stats });
+
+  // Enemy portrait next to player HUD when in combat.
+  const currentTarget = combatTarget();
+  if (attacking && currentTarget) {
+    const enemyHudOrigin = { x: hudOrigin.x + HUD_WIDTH + 16, y: hudOrigin.y };
+    drawEnemyHud(ctx, enemyHudOrigin, {
+      name: currentTarget.name,
+      glyph: currentTarget.glyph,
+      color: currentTarget.color,
+      health: currentTarget.health,
+      maxHealth: currentTarget.maxHealth,
+    });
+  }
+
   drawActionBar(ctx, panels.bar.origin, ACTIONS, activeSlot);
+  drawAutoLabel(now);
+  drawGameClock();
 }
 
 // ------------------------------------------------------------------ game loop
@@ -548,10 +764,67 @@ function frame(now: number) {
   const dt = Math.min((now - lastFrame) / 1000, 0.1);
   lastFrame = now;
 
+  // Advance in-game clock.
+  gameElapsedMs += dt * 1000;
+
+  // Spawn enemies on interval, unless on cooldown.
+  if (now >= cooldownUntil && now - lastSpawnAt >= SPAWN_INTERVAL) {
+    spawnWave();
+    lastSpawnAt = now;
+  }
+
+  const layer = dungeon.get(me.room);
+  const target = combatTarget();
+  const inMelee = attacking && target !== undefined && activeKind() === "melee"
+    && Math.hypot(target.x - me.x, target.y - me.y) <= ATTACK_RANGE;
+
+  // Update enemy AI — the melee target freezes, all others keep moving.
+  for (const e of enemies) {
+    if (!sameRoom(e.room, me.room)) continue;
+    if (inMelee && e.id === targetId) continue; // locked in melee
+    updateEnemy(e, me.x, me.y, dt, layer);
+  }
+
+  // Auto-targeting and weapon selection only when autoMode is on.
+  if (autoMode) {
+    updateAutoplay(now);
+  }
+
+  // Combat (melee hits, dagger firing/advancing).
   updateCombat(now, dt);
+
+  // Player can always move — moving disengages combat (via input handlers).
   applyMovement(dt);
+
+  // Remove dead enemies and count kills.
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    if (enemies[i]!.health <= 0) {
+      const dead = enemies[i]!;
+      if (dead.id === targetId) {
+        targetId = null;
+        endCombat();
+      }
+      enemies.splice(i, 1);
+      killCount++;
+      if (killCount >= KILLS_PER_COOLDOWN) {
+        killCount = 0;
+        cooldownUntil = now + COOLDOWN_MS;
+      }
+    }
+  }
+
+  // Update damage numbers (rise upward, age, remove expired).
+  for (let i = damageNumbers.length - 1; i >= 0; i--) {
+    const dn = damageNumbers[i]!;
+    dn.y -= DAMAGE_NUMBER_SPEED * dt;
+    dn.age += dt;
+    if (dn.age >= DAMAGE_NUMBER_LIFETIME) {
+      damageNumbers.splice(i, 1);
+    }
+  }
+
   updateCursorStyle();
-  render();
+  render(now);
 
   requestAnimationFrame(frame);
 }

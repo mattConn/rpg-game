@@ -1,7 +1,7 @@
-/** Portrait, health/magic bars and name plate — draggable by its gold handle. */
+/** Portrait, health/magic bars and name plate. */
 
 import type { Point } from "../shared/movement.js";
-import { clampPanelOrigin, drawHandle, drawPanelBacking } from "./panel.js";
+import { clampPanelOrigin, drawPanelBacking } from "./panel.js";
 
 const MARGIN = 14;
 
@@ -108,6 +108,62 @@ export function drawHud(ctx: CanvasRenderingContext2D, origin: Point, stats: Hud
   ctx.textBaseline = "top";
   ctx.fillStyle = "#dddddd";
   ctx.fillText(label, origin.x, origin.y + PORTRAIT_SIZE + NAME_GAP);
+}
 
-  drawHandle(ctx, origin);
+// ----------------------------------------------------------- enemy portrait
+
+export interface EnemyHudInfo {
+  name: string;
+  glyph: string;
+  color: string;
+  health: number;
+  maxHealth: number;
+}
+
+const ENEMY_PORTRAIT_RADIUS = 20;
+const ENEMY_PORTRAIT_SIZE = ENEMY_PORTRAIT_RADIUS * 2;
+const ENEMY_BAR_WIDTH = 100;
+const ENEMY_HUD_WIDTH = ENEMY_PORTRAIT_SIZE + BAR_GAP + ENEMY_BAR_WIDTH;
+const ENEMY_HUD_HEIGHT = ENEMY_PORTRAIT_SIZE + NAME_GAP + NAME_HEIGHT;
+const ENEMY_PORTRAIT_FONT = "22px monospace";
+
+/** Draw the targeted enemy's portrait to the right of the player HUD. */
+export function drawEnemyHud(
+  ctx: CanvasRenderingContext2D,
+  origin: Point,
+  enemy: EnemyHudInfo,
+): void {
+  ctx.setLineDash([]);
+  drawPanelBacking(ctx, origin, ENEMY_HUD_WIDTH, ENEMY_HUD_HEIGHT);
+
+  // Portrait circle with enemy glyph.
+  const cx = origin.x + ENEMY_PORTRAIT_RADIUS;
+  const cy = origin.y + ENEMY_PORTRAIT_RADIUS;
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, ENEMY_PORTRAIT_RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = "#0a0a0a";
+  ctx.fill();
+  ctx.strokeStyle = enemy.color;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.font = ENEMY_PORTRAIT_FONT;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = enemy.color;
+  ctx.fillText(enemy.glyph, cx, cy);
+
+  // Health bar to the right of the portrait, vertically centred.
+  const barX = origin.x + ENEMY_PORTRAIT_SIZE + BAR_GAP;
+  const barY = origin.y + (ENEMY_PORTRAIT_SIZE - BAR_HEIGHT) / 2;
+  drawBar(ctx, { x: barX, y: barY, width: ENEMY_BAR_WIDTH, height: BAR_HEIGHT },
+    enemy.health, enemy.maxHealth, "#c0392b");
+
+  // Name below.
+  ctx.font = NAME_FONT;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillStyle = "#dddddd";
+  ctx.fillText(enemy.name, origin.x, origin.y + ENEMY_PORTRAIT_SIZE + NAME_GAP);
 }
