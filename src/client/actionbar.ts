@@ -5,12 +5,8 @@ import type { Point } from "../shared/movement.js";
 import { daggerAngle, drawDagger } from "./combat.js";
 import { clampPanelOrigin, drawHandle, drawPanelBacking } from "./panel.js";
 
-export type AttackKind = "melee" | "ranged";
-
-export interface Action {
-  id: string;
-  kind: AttackKind;
-}
+// Import shared action types/data and re-export for backward compat.
+export { type AttackKind, type Action, ACTIONS } from "../shared/actions.js";
 
 export const ACTION_SLOTS = 5;
 const SQUARE = 44;
@@ -25,15 +21,6 @@ export const ACTION_BAR_DEFAULT_ORIGIN: Point = {
   x: (WORLD_WIDTH - ACTION_BAR_WIDTH) / 2,
   y: WORLD_HEIGHT - MARGIN - SQUARE,
 };
-
-/** The two attacks live in the first two slots; the rest are placeholders. */
-export const ACTIONS: (Action | null)[] = [
-  { id: "attack", kind: "melee" },
-  { id: "ranged", kind: "ranged" },
-  null,
-  null,
-  null,
-];
 
 export function clampActionBarOrigin(origin: Point): Point {
   return clampPanelOrigin(origin, ACTION_BAR_WIDTH, ACTION_BAR_HEIGHT);
@@ -57,7 +44,7 @@ export function squareAtPoint(origin: Point, point: Point): number | null {
 export function drawActionBar(
   ctx: CanvasRenderingContext2D,
   origin: Point,
-  actions: readonly (Action | null)[],
+  actions: readonly (import("../shared/actions.js").Action | null)[],
   activeIndex: number,
 ): void {
   ctx.setLineDash([]);

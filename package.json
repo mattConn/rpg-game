@@ -15,10 +15,12 @@
   "license": "ISC",
   "dependencies": {
     "@fastify/static": "^10.1.2",
-    "fastify": "^5.10.0"
+    "fastify": "^5.10.0",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "@types/ws": "^8.18.1",
     "esbuild": "^0.28.1",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2"

@@ -1,62 +1,23 @@
-/** Thrown-dagger projectiles and the rotatable dagger glyph they share with the bar. */
+/**
+ * Thin client wrapper around the shared combat module. Re-exports all pure
+ * logic and keeps only the drawDagger rendering function.
+ */
 
-import { WORLD_HEIGHT, WORLD_WIDTH } from "../shared/constants.js";
-import type { Point } from "../shared/movement.js";
+// Re-export everything the rest of the client imports from here.
+export {
+  FIRE_INTERVAL_MS,
+  PROJECTILE_SPEED,
+  HIT_RADIUS,
+  daggerAngle,
+  spawnDagger,
+  advanceDagger,
+  daggerDone,
+  type Projectile,
+} from "../shared/combat.js";
 
-export interface Projectile {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-}
-
-/** Ranged fire rate (one dagger per second) and projectile speed. */
-export const FIRE_INTERVAL_MS = 1000;
-export const PROJECTILE_SPEED = 480;
-
-/** A dagger is done once it reaches the target or leaves the room. */
-const HIT_RADIUS = 14;
-const OFF_SCREEN_MARGIN = 40;
+// ------------------------------------------------------------------- rendering
 
 const DAGGER_COLOR = "#d6dbdf";
-
-/**
- * The rotation (radians) that turns the dagger glyph `†` — whose point sits at
- * the bottom (south) — so its blade points along a direction vector, tip
- * leading. Pass (0,-1) for an upright sword, (-1,-1) for the NW throwing pose.
- */
-export function daggerAngle(vx: number, vy: number): number {
-  return Math.atan2(-vx, vy);
-}
-
-export function spawnDagger(from: Point, to: Point, speed: number = PROJECTILE_SPEED): Projectile {
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  const distance = Math.hypot(dx, dy) || 1;
-  return { x: from.x, y: from.y, vx: (dx / distance) * speed, vy: (dy / distance) * speed };
-}
-
-export function advanceDagger(p: Projectile, dt: number): void {
-  p.x += p.vx * dt;
-  p.y += p.vy * dt;
-}
-
-export function daggerDone(p: Projectile, target: Point): boolean {
-  const toTargetX = target.x - p.x;
-  const toTargetY = target.y - p.y;
-
-  // Reached the target, or flew past it — the target now lies behind the
-  // velocity, so a large single step can't tunnel through without retiring.
-  if (Math.hypot(toTargetX, toTargetY) <= HIT_RADIUS) return true;
-  if (toTargetX * p.vx + toTargetY * p.vy <= 0) return true;
-
-  return (
-    p.x < -OFF_SCREEN_MARGIN ||
-    p.x > WORLD_WIDTH + OFF_SCREEN_MARGIN ||
-    p.y < -OFF_SCREEN_MARGIN ||
-    p.y > WORLD_HEIGHT + OFF_SCREEN_MARGIN
-  );
-}
 
 /** Draw the dagger glyph at a point, rotated and sized as asked. */
 export function drawDagger(
@@ -74,6 +35,6 @@ export function drawDagger(
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillStyle = color;
-  ctx.fillText("†", 0, 0);
+  ctx.fillText("\u2020", 0, 0);
   ctx.restore();
 }
