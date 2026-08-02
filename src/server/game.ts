@@ -17,9 +17,6 @@ import {
 import {
   MIN_X, MAX_X, MIN_Y, MAX_Y,
   clamp,
-  crossEdges,
-  doorwayTarget,
-  exitAtPoint,
   type Point,
 } from "../shared/movement.js";
 import { ACTIONS } from "../shared/actions.js";
@@ -376,22 +373,10 @@ export class GameSimulation {
     }
 
     // Slide against solid wall cells in this room, then apply the move.
+    // Player is clamped to the current room boundaries (no room transitions).
     const moved = resolveMove(this.dungeon.get(this.me.room), x0, y0, x1, y1, PLAYER_RADIUS);
-    this.me.x = moved.x;
-    this.me.y = moved.y;
-
-    // Running past an open edge steps into the next room; a closed edge is a wall.
-    const crossed = crossEdges(this.me.room, this.me.x, this.me.y);
-    this.me.room = crossed.room;
-    this.me.x = crossed.x;
-    this.me.y = crossed.y;
-
-    // The old destination was in the room you just left.
-    if (crossed.exited) {
-      this.moveTarget = null;
-      this.manualMoveTarget = null;
-      this.pathCells = [];
-    }
+    this.me.x = clamp(moved.x, MIN_X, MAX_X);
+    this.me.y = clamp(moved.y, MIN_Y, MAX_Y);
   }
 
   // -------------------------------------------------------- input handling
@@ -458,10 +443,7 @@ export class GameSimulation {
         // Left-click on ground: disengage, walk there.
         this.disengageCombat();
         this.manualTarget = false;
-        const exit = exitAtPoint(this.me.room, point);
-        const dest = exit
-          ? doorwayTarget(exit, point)
-          : { x: clamp(point.x, MIN_X, MAX_X), y: clamp(point.y, MIN_Y, MAX_Y) };
+        const dest = { x: clamp(point.x, MIN_X, MAX_X), y: clamp(point.y, MIN_Y, MAX_Y) };
         this.moveTarget = dest;
         this.manualMoveTarget = dest;
         this.computePathCells(this.me.x, this.me.y, dest.x, dest.y);

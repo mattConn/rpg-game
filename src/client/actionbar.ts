@@ -3,7 +3,7 @@
 import { WORLD_HEIGHT, WORLD_WIDTH } from "../shared/constants.js";
 import type { Point } from "../shared/movement.js";
 import { daggerAngle, drawDagger } from "./combat.js";
-import { clampPanelOrigin, drawHandle, drawPanelBacking } from "./panel.js";
+import { clampPanelOrigin, drawPanelBacking } from "./panel.js";
 
 // Import shared action types/data and re-export for backward compat.
 export { type AttackKind, type Action, ACTIONS } from "../shared/actions.js";
@@ -74,5 +74,4 @@ export function drawActionBar(
     }
   }
 
-  drawHandle(ctx, origin);
 }

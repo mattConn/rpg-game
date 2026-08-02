@@ -10,21 +10,18 @@ import {
   PLAYER_RADIUS,
   WORLD_HEIGHT,
   WORLD_WIDTH,
-  neighborRoom,
   roomName,
   sameRoom,
   type Direction,
 } from "../shared/constants.js";
 import {
   clamp,
-  exitAtPoint,
   type Point,
 } from "../shared/movement.js";
 import type { GameSnapshot, InputMessage } from "../shared/protocol.js";
 import { ACTIONS } from "../shared/actions.js";
 import {
   ACTION_BAR_DEFAULT_ORIGIN,
-  clampActionBarOrigin,
   drawActionBar,
   squareAtPoint,
 } from "./actionbar.js";
@@ -32,9 +29,8 @@ import {
   daggerAngle,
   drawDagger,
 } from "./combat.js";
-import { DEFAULT_CURSOR, EXIT_CURSORS } from "./cursors.js";
+import { DEFAULT_CURSOR } from "./cursors.js";
 import { HUD_DEFAULT_ORIGIN, HUD_HEIGHT, HUD_WIDTH, NAME_GAP, NAME_HEIGHT, PORTRAIT_SIZE, drawEnemyHud, drawHud } from "./hud.js";
-import { isOverHandle } from "./panel.js";
 import { drawEnemy, drawHealthBar } from "./enemies.js";
 import { drawTiles } from "./tilemap.js";
 import { worldToCell } from "../shared/tilemap.js";
@@ -150,63 +146,13 @@ function toWorld(event: MouseEvent) {
   };
 }
 
-// ----------------------------------------------------------- panel dragging (local UI)
+// ----------------------------------------------------------- UI layout
 
-type PanelName = "bar";
-
-const panels: Record<PanelName, { origin: Point; clamp: (o: Point) => Point }> = {
-  bar: { origin: { ...ACTION_BAR_DEFAULT_ORIGIN }, clamp: clampActionBarOrigin },
-};
+const barOrigin: Point = { ...ACTION_BAR_DEFAULT_ORIGIN };
 
 const hudOrigin: Point = { ...HUD_DEFAULT_ORIGIN };
 
-function handleUnder(point: Point): PanelName | null {
-  let grabbed: PanelName | null = null;
-  let grabbedDistance = Infinity;
-
-  for (const name of Object.keys(panels) as PanelName[]) {
-    const { origin } = panels[name];
-    const distance = Math.hypot(point.x - origin.x, point.y - origin.y);
-    if (isOverHandle(origin, point) && distance < grabbedDistance) {
-      grabbed = name;
-      grabbedDistance = distance;
-    }
-  }
-
-  return grabbed;
-}
-
-let drag: { panel: PanelName; offsetX: number; offsetY: number } | null = null;
-let swallowNextClick = false;
-
-canvas.addEventListener("mousedown", (event) => {
-  const point = toWorld(event);
-  const panel = handleUnder(point);
-  swallowNextClick = panel !== null;
-
-  if (panel) {
-    const { origin } = panels[panel];
-    drag = { panel, offsetX: point.x - origin.x, offsetY: point.y - origin.y };
-    event.preventDefault();
-  }
-});
-
-window.addEventListener("mousemove", (event) => {
-  if (!drag) return;
-  const point = toWorld(event);
-  const panel = panels[drag.panel];
-  panel.origin = panel.clamp({ x: point.x - drag.offsetX, y: point.y - drag.offsetY });
-});
-
-window.addEventListener("mouseup", () => {
-  drag = null;
-});
-
 canvas.addEventListener("click", (event) => {
-  if (swallowNextClick) {
-    swallowNextClick = false;
-    return;
-  }
 
   const point = toWorld(event);
 
@@ -226,8 +172,14 @@ canvas.addEventListener("click", (event) => {
     }
   }
 
+  // Toggle auto-combat by clicking the Auto label.
+  if (isOverAutoLabel(point)) {
+    send({ type: "keydown", key: " ", code: "Space" });
+    return;
+  }
+
   // Clicking an action-bar slot selects that attack — send as slot message.
-  const slot = squareAtPoint(panels.bar.origin, point);
+  const slot = squareAtPoint(barOrigin, point);
   if (slot !== null) {
     if (ACTIONS[slot]) send({ type: "slot", index: slot });
     return;
@@ -258,8 +210,6 @@ let appliedCursor = DEFAULT_CURSOR;
 
 function updateCursorStyle() {
   const snap = currSnapshot;
-  const room = snap?.player.room ?? { col: 1, row: 1 };
-  const exit = cursor ? exitAtPoint(room, cursor) : null;
 
   // Check if hovering the resurrect button.
   let overResurrect = false;
@@ -275,10 +225,8 @@ function updateCursorStyle() {
   }
 
   let wanted = DEFAULT_CURSOR;
-  if (drag) wanted = "grabbing";
-  else if (overResurrect) wanted = "pointer";
-  else if (cursor && handleUnder(cursor)) wanted = "grab";
-  else if (exit) wanted = EXIT_CURSORS[exit];
+  if (overResurrect) wanted = "pointer";
+  else if (cursor && isOverAutoLabel(cursor)) wanted = "pointer";
 
   if (wanted !== appliedCursor) {
     canvas.style.cursor = wanted;
@@ -361,20 +309,16 @@ function drawRoom(snap: GameSnapshot) {
   };
 
   for (const direction of DIRECTIONS) {
-    const open = neighborRoom(room, direction) !== null;
     const [x1, y1, x2, y2] = edges[direction];
 
-    ctx.strokeStyle = open ? "#2f4f57" : "#3a3a3a";
+    ctx.strokeStyle = "#3a3a3a";
     ctx.lineWidth = 4;
-    ctx.setLineDash(open ? [10, 12] : []);
 
     ctx.beginPath();
     ctx.moveTo(x1, y1);
     ctx.lineTo(x2, y2);
     ctx.stroke();
   }
-
-  ctx.setLineDash([]);
 
   ctx.font = ROOM_LABEL_FONT;
   ctx.textAlign = "left";
@@ -398,16 +342,23 @@ function drawLabelIfHovered(x: number, y: number, label: string) {
   ctx.fillText(label, x, y + PLAYER_RADIUS + 10);
 }
 
-function drawAutoLabel(autoMode: boolean) {
-  const margin = 14;
-  const x = WORLD_WIDTH - margin;
-  const y = margin + 38;
+const AUTO_LABEL_X = WORLD_WIDTH - 14;
+const AUTO_LABEL_Y = 14 + 38;
 
+function isOverAutoLabel(point: { x: number; y: number }): boolean {
+  ctx.font = AUTO_LABEL_FONT;
+  const w = ctx.measureText("Auto").width;
+  const h = 11;
+  return point.x >= AUTO_LABEL_X - w && point.x <= AUTO_LABEL_X
+    && point.y >= AUTO_LABEL_Y && point.y <= AUTO_LABEL_Y + h;
+}
+
+function drawAutoLabel(autoMode: boolean, hovered: boolean) {
   ctx.font = AUTO_LABEL_FONT;
   ctx.textAlign = "right";
   ctx.textBaseline = "top";
-  ctx.fillStyle = autoMode ? "#ffd633" : "#444444";
-  ctx.fillText("Auto", x, y);
+  ctx.fillStyle = hovered ? "#ffffff" : autoMode ? "#ffd633" : "#444444";
+  ctx.fillText("Auto", AUTO_LABEL_X, AUTO_LABEL_Y);
 }
 
 /** Draw a filled time-of-day icon (sun/moon/sunset) centred at (cx, cy). */
@@ -578,13 +529,6 @@ function render(snap: GameSnapshot) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
-  if (snap.moveTarget) {
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
-    ctx.beginPath();
-    ctx.arc(snap.moveTarget.x, snap.moveTarget.y, 5, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
   drawPlayer(snap.player.x, snap.player.y, snap.dead ? "#444444" : snap.player.color);
   drawLabelIfHovered(snap.player.x, snap.player.y, "(You)");
 
@@ -631,8 +575,8 @@ function render(snap: GameSnapshot) {
     }
   }
 
-  drawActionBar(ctx, panels.bar.origin, ACTIONS, snap.activeSlot);
-  drawAutoLabel(snap.autoMode);
+  drawActionBar(ctx, barOrigin, ACTIONS, snap.activeSlot);
+  drawAutoLabel(snap.autoMode, !!cursor && isOverAutoLabel(cursor));
   drawGameClock(snap.gameElapsedMs);
 }
 
