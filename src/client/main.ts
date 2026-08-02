@@ -410,6 +410,38 @@ function drawAutoLabel(autoMode: boolean) {
   ctx.fillText("Auto", x, y);
 }
 
+/** Draw a filled time-of-day icon (sun/moon/sunset) centred at (cx, cy). */
+function drawTimeIcon(c: CanvasRenderingContext2D, cx: number, cy: number, r: number, hourOfDay: number) {
+  if (hourOfDay >= 6 && hourOfDay < 18) {
+    // 6am–6pm: filled yellow sun.
+    c.beginPath();
+    c.arc(cx, cy, r, 0, Math.PI * 2);
+    c.fillStyle = "#ffd633";
+    c.fill();
+  } else if (hourOfDay >= 18 && hourOfDay < 22) {
+    // 6pm–10pm: orange half circle rotated so flat edge is horizontal (sunset).
+    c.save();
+    c.translate(cx, cy + r * 0.45);
+    c.rotate(Math.PI / 2);
+    c.beginPath();
+    c.arc(0, 0, r, Math.PI * 0.5, Math.PI * 1.5);
+    c.fillStyle = "#e68a00";
+    c.fill();
+    c.restore();
+  } else {
+    // Night: filled crescent moon (full circle minus offset cutout).
+    const moonColor = (hourOfDay >= 3 && hourOfDay < 6) ? "#cc3333" : "#ffffff";
+    c.beginPath();
+    c.arc(cx, cy, r, 0, Math.PI * 2);
+    c.fillStyle = moonColor;
+    c.fill();
+    c.beginPath();
+    c.arc(cx + r * 0.65, cy, r, 0, Math.PI * 2);
+    c.fillStyle = "#000000";
+    c.fill();
+  }
+}
+
 function drawGameClock(gameElapsedMs: number) {
   const totalMinutes = Math.floor(gameElapsedMs / MS_PER_GAME_MINUTE);
   const totalHours = Math.floor(totalMinutes / 60);
@@ -429,7 +461,14 @@ function drawGameClock(gameElapsedMs: number) {
   ctx.textAlign = "right";
   ctx.textBaseline = "top";
   ctx.fillStyle = "#aaaaaa";
-  ctx.fillText(`Day ${day}`, x, y);
+  const dayText = `Day ${day}`;
+  ctx.fillText(dayText, x, y);
+
+  // Draw time-of-day icon to the left of "Day N".
+  const dayWidth = ctx.measureText(dayText).width;
+  drawTimeIcon(ctx, x - dayWidth - 12, y + 7, 6, hourOfDay);
+
+  ctx.fillStyle = "#aaaaaa";
   ctx.fillText(timeStr, x, y + 16);
 }
 
@@ -480,7 +519,7 @@ function render(snap: GameSnapshot) {
     if (!sameRoom(t.room, snap.player.room)) continue;
     ctx.fillText("\u2020", t.x, t.y);
 
-    // Show death timestamp on hover.
+    // Show death timestamp on hover with time-of-day icon.
     if (cursor && Math.hypot(cursor.x - t.x, cursor.y - t.y) <= NAME_REVEAL_DISTANCE) {
       const totalMinutes = Math.floor(t.gameElapsedMs / MS_PER_GAME_MINUTE);
       const totalHours = Math.floor(totalMinutes / 60);
@@ -489,11 +528,33 @@ function render(snap: GameSnapshot) {
       const minute = totalMinutes % 60;
       const ampm = hourOfDay < 12 ? "AM" : "PM";
       const display12 = hourOfDay === 0 ? 12 : hourOfDay > 12 ? hourOfDay - 12 : hourOfDay;
-      const label = `Day ${day} - ${display12}:${String(minute).padStart(2, "0")} ${ampm}`;
+      const label = `${day} ${display12}:${String(minute).padStart(2, "0")} ${ampm}`;
       ctx.font = NAME_FONT;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
       ctx.fillStyle = "#999999";
-      ctx.fillText(label, t.x, t.y + 16);
+      const labelWidth = ctx.measureText(label).width;
+      const iconR = 4;
+      const iconGap = 3;
+      const totalWidth = iconR * 2 + iconGap + labelWidth;
+      const startX = t.x - totalWidth / 2;
+      const labelY = t.y + 16;
+
+      // Draw time-of-day icon.
+      const iconCx = startX + iconR;
+      const iconCy = labelY;
+      drawTimeIcon(ctx, iconCx, iconCy, iconR, hourOfDay);
+
+      // Draw label text after the icon.
+      ctx.font = NAME_FONT;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = "#999999";
+      ctx.fillText(label, startX + iconR * 2 + iconGap, labelY);
+
       ctx.font = GLYPH_FONT;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
       ctx.fillStyle = "#666666";
     }
   }
