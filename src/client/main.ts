@@ -33,7 +33,7 @@ import {
   drawDagger,
 } from "./combat.js";
 import { DEFAULT_CURSOR, EXIT_CURSORS } from "./cursors.js";
-import { HUD_DEFAULT_ORIGIN, HUD_HEIGHT, HUD_WIDTH, drawEnemyHud, drawHud } from "./hud.js";
+import { HUD_DEFAULT_ORIGIN, HUD_HEIGHT, HUD_WIDTH, NAME_GAP, NAME_HEIGHT, PORTRAIT_SIZE, drawEnemyHud, drawHud } from "./hud.js";
 import { isOverHandle } from "./panel.js";
 import { drawEnemy, drawHealthBar } from "./enemies.js";
 import { drawTiles } from "./tilemap.js";
@@ -210,6 +210,22 @@ canvas.addEventListener("click", (event) => {
 
   const point = toWorld(event);
 
+  // Resurrect button when dead — check before other click logic.
+  if (currSnapshot?.dead) {
+    const resX = hudOrigin.x + PORTRAIT_SIZE / 2;
+    const resY = hudOrigin.y + PORTRAIT_SIZE + NAME_GAP + NAME_HEIGHT + 4;
+    ctx.font = "12px monospace";
+    const textWidth = ctx.measureText("Resurrect").width;
+    const textHeight = 12;
+    if (
+      point.x >= resX - textWidth / 2 && point.x <= resX + textWidth / 2
+      && point.y >= resY && point.y <= resY + textHeight
+    ) {
+      send({ type: "resurrect" });
+      return;
+    }
+  }
+
   // Clicking an action-bar slot selects that attack — send as slot message.
   const slot = squareAtPoint(panels.bar.origin, point);
   if (slot !== null) {
@@ -245,8 +261,22 @@ function updateCursorStyle() {
   const room = snap?.player.room ?? { col: 1, row: 1 };
   const exit = cursor ? exitAtPoint(room, cursor) : null;
 
+  // Check if hovering the resurrect button.
+  let overResurrect = false;
+  if (snap?.dead && cursor) {
+    const resX = hudOrigin.x + PORTRAIT_SIZE / 2;
+    const resY = hudOrigin.y + PORTRAIT_SIZE + NAME_GAP + NAME_HEIGHT + 4;
+    ctx.font = "12px monospace";
+    const textWidth = ctx.measureText("Resurrect").width;
+    const textHeight = 12;
+    overResurrect =
+      cursor.x >= resX - textWidth / 2 && cursor.x <= resX + textWidth / 2
+      && cursor.y >= resY && cursor.y <= resY + textHeight;
+  }
+
   let wanted = DEFAULT_CURSOR;
   if (drag) wanted = "grabbing";
+  else if (overResurrect) wanted = "pointer";
   else if (cursor && handleUnder(cursor)) wanted = "grab";
   else if (exit) wanted = EXIT_CURSORS[exit];
 
@@ -410,7 +440,11 @@ function drawDamageNumbers(damageNumbers: GameSnapshot["damageNumbers"]) {
 
   for (const dn of damageNumbers) {
     const alpha = Math.max(0, 1 - dn.age / DAMAGE_NUMBER_LIFETIME);
-    ctx.fillStyle = `rgba(255, 214, 51, ${alpha.toFixed(2)})`;
+    // Parse hex color to rgba for alpha fading.
+    const r = parseInt(dn.color.slice(1, 3), 16);
+    const g = parseInt(dn.color.slice(3, 5), 16);
+    const b = parseInt(dn.color.slice(5, 7), 16);
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha.toFixed(2)})`;
     ctx.fillText(dn.text, dn.x, dn.y);
   }
 }
@@ -435,6 +469,33 @@ function render(snap: GameSnapshot) {
     const { col, row } = worldToCell(cursor.x, cursor.y);
     ctx.fillStyle = "rgba(255, 255, 255, 0.18)";
     ctx.fillRect(col * CELL_SIZE, row * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+  }
+
+  // Tombstones in this room.
+  ctx.font = GLYPH_FONT;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#666666";
+  for (const t of snap.tombstones ?? []) {
+    if (!sameRoom(t.room, snap.player.room)) continue;
+    ctx.fillText("\u2020", t.x, t.y);
+
+    // Show death timestamp on hover.
+    if (cursor && Math.hypot(cursor.x - t.x, cursor.y - t.y) <= NAME_REVEAL_DISTANCE) {
+      const totalMinutes = Math.floor(t.gameElapsedMs / MS_PER_GAME_MINUTE);
+      const totalHours = Math.floor(totalMinutes / 60);
+      const day = Math.floor(totalHours / 24) + 1;
+      const hourOfDay = totalHours % 24;
+      const minute = totalMinutes % 60;
+      const ampm = hourOfDay < 12 ? "AM" : "PM";
+      const display12 = hourOfDay === 0 ? 12 : hourOfDay > 12 ? hourOfDay - 12 : hourOfDay;
+      const label = `Day ${day} - ${display12}:${String(minute).padStart(2, "0")} ${ampm}`;
+      ctx.font = NAME_FONT;
+      ctx.fillStyle = "#999999";
+      ctx.fillText(label, t.x, t.y + 16);
+      ctx.font = GLYPH_FONT;
+      ctx.fillStyle = "#666666";
+    }
   }
 
   // Enemies in this room.
@@ -463,7 +524,7 @@ function render(snap: GameSnapshot) {
     ctx.stroke();
   }
 
-  drawPlayer(snap.player.x, snap.player.y, snap.player.color);
+  drawPlayer(snap.player.x, snap.player.y, snap.dead ? "#444444" : snap.player.color);
   drawLabelIfHovered(snap.player.x, snap.player.y, "(You)");
 
   // Daggers in flight.
@@ -472,7 +533,25 @@ function render(snap: GameSnapshot) {
   }
 
   // Overlays.
-  drawHud(ctx, hudOrigin, { name: snap.player.name, color: snap.player.color, ...snap.stats });
+  drawHud(ctx, hudOrigin, { name: snap.player.name, color: snap.player.color, ...snap.stats, dead: snap.dead });
+
+  // "Resurrect" button below the HUD when dead.
+  if (snap.dead) {
+    const resX = hudOrigin.x + PORTRAIT_SIZE / 2;
+    const resY = hudOrigin.y + PORTRAIT_SIZE + NAME_GAP + NAME_HEIGHT + 4;
+    ctx.font = "12px monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+
+    const textWidth = ctx.measureText("Resurrect").width;
+    const textHeight = 12;
+    const hovering = cursor !== null
+      && cursor.x >= resX - textWidth / 2 && cursor.x <= resX + textWidth / 2
+      && cursor.y >= resY && cursor.y <= resY + textHeight;
+
+    ctx.fillStyle = hovering ? "#ffd633" : "#ffffff";
+    ctx.fillText("Resurrect", resX, resY);
+  }
 
   // Enemy portrait next to player HUD when in combat.
   if (snap.attacking && snap.targetId) {

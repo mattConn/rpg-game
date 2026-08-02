@@ -12,6 +12,7 @@ import {
   WORLD_WIDTH,
   sameRoom,
   type PlayerState,
+  type RoomCoord,
 } from "../shared/constants.js";
 import {
   MIN_X, MAX_X, MIN_Y, MAX_Y,
@@ -30,6 +31,9 @@ import {
   type Projectile,
 } from "../shared/combat.js";
 import {
+  ENEMY_ATTACK_INTERVAL,
+  ENEMY_ATTACK_RANGE,
+  ENEMY_DAMAGE,
   enemyAtPoint,
   spawnEnemy,
   updateEnemy,
@@ -134,6 +138,10 @@ export class GameSimulation {
   killCount = 0;
   cooldownUntil = 0;
 
+  // Death
+  dead = false;
+  tombstones: Array<{ x: number; y: number; room: RoomCoord; gameElapsedMs: number; visible: boolean }> = [];
+
   // Clock
   gameElapsedMs = 0;
 
@@ -195,12 +203,12 @@ export class GameSimulation {
     }
   }
 
-  private spawnDamageNumber(x: number, y: number, amount: number) {
+  private spawnDamageNumber(x: number, y: number, amount: number, color = "#ffd633") {
     this.damageNumbers.push({
       x,
       y,
       text: String(amount),
-      color: "#ffd633",
+      color,
       age: 0,
     });
   }
@@ -208,6 +216,7 @@ export class GameSimulation {
   // -------------------------------------------------------- combat update
 
   private updateCombat(now: number, dt: number) {
+    if (this.dead) return;
     const target = this.combatTarget();
 
     // The target died or we walked out of its room — combat is off.
@@ -270,6 +279,7 @@ export class GameSimulation {
   // -------------------------------------------------------- autoplay update
 
   private updateAutoplay(now: number) {
+    if (this.dead) return;
     // Don't override player-chosen targets or manual movement.
     if (this.manualTarget || this.manualMoveTarget) return;
 
@@ -328,6 +338,7 @@ export class GameSimulation {
   // -------------------------------------------------------- movement
 
   private applyMovement(dt: number) {
+    if (this.dead) return;
     const x0 = this.me.x;
     const y0 = this.me.y;
     let x1 = this.me.x;
@@ -386,6 +397,19 @@ export class GameSimulation {
   // -------------------------------------------------------- input handling
 
   handleInput(msg: InputMessage): void {
+    if (msg.type === "resurrect") {
+      if (this.dead) {
+        this.dead = false;
+        this.stats.health = this.stats.maxHealth;
+        this.me.x = WORLD_WIDTH / 2;
+        this.me.y = WORLD_HEIGHT / 2;
+        for (const t of this.tombstones) t.visible = true;
+      }
+      return;
+    }
+
+    if (this.dead) return;
+
     switch (msg.type) {
       case "keydown": {
         const key = msg.key.toLowerCase();
@@ -499,10 +523,42 @@ export class GameSimulation {
       && Math.hypot(target.x - this.me.x, target.y - this.me.y) <= ATTACK_RANGE;
 
     // Update enemy AI — the melee target freezes, all others keep moving.
+    // When dead, feed a far-off position so enemies don't detect the player.
+    const aiPlayerX = this.dead ? -1e5 : this.me.x;
+    const aiPlayerY = this.dead ? -1e5 : this.me.y;
     for (const e of this.enemies) {
       if (!sameRoom(e.room, this.me.room)) continue;
       if (inMelee && e.id === this.targetId) continue; // locked in melee
-      updateEnemy(e, this.me.x, this.me.y, dt, layer);
+      updateEnemy(e, aiPlayerX, aiPlayerY, dt, layer);
+    }
+
+    // Enemy attacks on the player.
+    if (!this.dead) {
+      for (const e of this.enemies) {
+        if (!sameRoom(e.room, this.me.room)) continue;
+        if (!e.chasing) continue;
+        const dist = Math.hypot(e.x - this.me.x, e.y - this.me.y);
+        if (dist <= ENEMY_ATTACK_RANGE && now - e.lastAttackAt >= ENEMY_ATTACK_INTERVAL) {
+          this.stats.health -= ENEMY_DAMAGE;
+          this.spawnDamageNumber(this.me.x, this.me.y, ENEMY_DAMAGE, "#ff4444");
+          e.lastAttackAt = now;
+        }
+      }
+
+      // Death check.
+      if (this.stats.health <= 0) {
+        this.stats.health = 0;
+        this.dead = true;
+        this.tombstones.push({ x: this.me.x, y: this.me.y, room: { ...this.me.room }, gameElapsedMs: this.gameElapsedMs, visible: false });
+        this.disengageCombat();
+        this.moveTarget = null;
+        this.heldKeys.clear();
+        // Enemies lose interest in the dead player.
+        for (const e of this.enemies) {
+          e.aggro = false;
+          e.chasing = false;
+        }
+      }
     }
 
     // Auto-targeting and weapon selection only when autoMode is on.
@@ -593,6 +649,8 @@ export class GameSimulation {
       gameElapsedMs: this.gameElapsedMs,
       killCount: this.killCount,
       cooldownUntil: this.cooldownUntil,
+      dead: this.dead,
+      tombstones: this.tombstones.filter((t) => t.visible).map((t) => ({ x: t.x, y: t.y, room: t.room, gameElapsedMs: t.gameElapsedMs })),
     };
   }
 }

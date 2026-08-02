@@ -30,6 +30,8 @@ export interface GameSnapshot {
   gameElapsedMs: number;
   killCount: number;
   cooldownUntil: number;
+  dead: boolean;
+  tombstones: Array<{ x: number; y: number; room: RoomCoord; gameElapsedMs: number }>;
 }
 
 /** Client -> Server: user input events. */
@@ -38,4 +40,5 @@ export type InputMessage =
   | { type: "keyup"; key: string }
   | { type: "click"; x: number; y: number }
   | { type: "rightclick"; x: number; y: number }
-  | { type: "slot"; index: number };
+  | { type: "slot"; index: number }
+  | { type: "resurrect" };

@@ -88,6 +88,6 @@ export function drawEnemy(
   if (opts.showName) {
     ctx.font = NAME_FONT;
     ctx.fillStyle = "#ffffff";
-    ctx.fillText(enemy.name, enemy.x, enemy.y + ENEMY_RADIUS_LOCAL + 10);
+    ctx.fillText(enemy.name, enemy.x, enemy.y + 20);
   }
 }

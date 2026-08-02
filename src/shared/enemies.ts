@@ -21,10 +21,21 @@ export interface Enemy {
   chasing: boolean;
   /** True once the player has dealt damage — permanently chases. */
   aggro: boolean;
+  /** Timestamp of last attack on the player (ms). */
+  lastAttackAt: number;
 }
 
 /** Click/hit radius around an enemy's glyph — one neighboring cell (~1.5 cells). */
 export const ENEMY_RADIUS = 45;
+
+/** Distance at which enemies can hit the player (matches melee combat range). */
+export const ENEMY_ATTACK_RANGE = 45;
+
+/** Minimum interval between enemy attacks (ms). */
+export const ENEMY_ATTACK_INTERVAL = 1000;
+
+/** Damage dealt per enemy attack. */
+export const ENEMY_DAMAGE = 3;
 
 /** Collision half-size for enemies sliding against walls. */
 export const ENEMY_HALF = 10;
@@ -108,6 +119,7 @@ export function spawnEnemy(id: string, room: RoomCoord): Enemy {
     wanderTarget: null,
     chasing: false,
     aggro: false,
+    lastAttackAt: 0,
   };
 }
 

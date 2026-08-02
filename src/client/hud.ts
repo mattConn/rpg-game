@@ -6,15 +6,15 @@ import { clampPanelOrigin, drawPanelBacking } from "./panel.js";
 const MARGIN = 14;
 
 const PORTRAIT_RADIUS = 26;
-const PORTRAIT_SIZE = PORTRAIT_RADIUS * 2;
+export const PORTRAIT_SIZE = PORTRAIT_RADIUS * 2;
 
 const BAR_GAP = 10;
 const BAR_WIDTH = 130;
 const BAR_HEIGHT = 10;
 const BAR_SPACING = 8;
 
-const NAME_GAP = 6;
-const NAME_HEIGHT = 14;
+export const NAME_GAP = 6;
+export const NAME_HEIGHT = 14;
 
 const PORTRAIT_FONT = "26px monospace";
 const NAME_FONT = "12px monospace";
@@ -37,6 +37,7 @@ export interface HudStats {
   maxHealth: number;
   mana: number;
   maxMana: number;
+  dead?: boolean;
 }
 
 /** The two bars sit to the right of the portrait, vertically centred against it. */
@@ -85,19 +86,20 @@ export function drawHud(ctx: CanvasRenderingContext2D, origin: Point, stats: Hud
   // Portrait: the player's own glyph, ringed in their colour.
   const centerX = origin.x + PORTRAIT_RADIUS;
   const centerY = origin.y + PORTRAIT_RADIUS;
+  const portraitColor = stats.dead ? "#444444" : stats.color;
 
   ctx.beginPath();
   ctx.arc(centerX, centerY, PORTRAIT_RADIUS, 0, Math.PI * 2);
   ctx.fillStyle = "#0a0a0a";
   ctx.fill();
-  ctx.strokeStyle = stats.color;
+  ctx.strokeStyle = portraitColor;
   ctx.lineWidth = 2;
   ctx.stroke();
 
   ctx.font = PORTRAIT_FONT;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillStyle = stats.color;
+  ctx.fillStyle = portraitColor;
   ctx.fillText("@", centerX, centerY);
 
   drawBar(ctx, barRect(origin, 0), stats.health, stats.maxHealth, "#c0392b");
@@ -106,7 +108,7 @@ export function drawHud(ctx: CanvasRenderingContext2D, origin: Point, stats: Hud
   ctx.font = NAME_FONT;
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
-  ctx.fillStyle = "#dddddd";
+  ctx.fillStyle = stats.dead ? "#444444" : "#dddddd";
   ctx.fillText(label, origin.x, origin.y + PORTRAIT_SIZE + NAME_GAP);
 }
 
