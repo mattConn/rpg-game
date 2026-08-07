@@ -136,7 +136,11 @@ the drag doesn't also register as a game click.
 - **HUD** (top-left): circular portrait (the player's `@` in their color), red
   health + blue mana bars, and `Name - lvl N` beneath.
 - **Action bar** (bottom center): 5 squares; slots 0/1 hold the melee sword and
-  ranged dagger, 2–4 are placeholders. Active slot has a yellow border.
+  ranged dagger, 2–4 are placeholders. Unselected slots have a dim border; the
+  selected one is **gold when the attack would land right now and white when it
+  wouldn't** (`selectedCanAttack`). That's range and target only — the cooldown
+  is deliberately excluded, or the border would strobe on every swing, and the
+  cooldown blind already shows it.
 
 ### Enemies + combat
 
@@ -159,16 +163,35 @@ nothing. That is deliberate; both were tried and removed.
 - **Double-click** an enemy → `engageEnemy`: target + `attacking`, leaving
   `activeSlot` alone. `updateCombat` then applies that weapon's range rule:
   - **melee** — strike every `MELEE_INTERVAL` while within `ATTACK_RANGE`.
-  - **ranged** — a dagger every `FIRE_INTERVAL_MS` while within `RANGED_RANGE`
-    (7 cells). Out of range you just hold the target and wait; point-blank you
-    keep throwing rather than closing.
-- **Double-click the engaged enemy again** → disengage and untarget. Together
-  with double-clicking a *different* enemy (which just switches target), that is
-  the **only** way out of combat.
+  - **ranged** — a dagger every `FIRE_INTERVAL_MS` in the band **outside
+    `ATTACK_RANGE` and within `RANGED_RANGE`** (45–420px; the far limit is a
+    third of the room's width). Daggers have a dead zone as well as a limit:
+    anything already in sword reach is too close to throw at, so a hellhound on
+    top of you shuts your daggers off until you draw the sword or back away.
+    Beyond the limit you just hold the target and wait — ranged never moves you.
+- **Tab** → same thing on the nearest enemy in the room, with no range limit.
+  Double-click and Tab both go through `toggleEngage`, so they stay identical by
+  construction — including the toggle back off. The client swallows Tab's
+  auto-repeat (held down it would strobe engage/disengage) and its default, so
+  focus doesn't walk off the canvas.
+- **Double-click the engaged enemy again** (or press Tab again) → disengage and
+  untarget. Together with double-clicking a *different* enemy (which just
+  switches target), that is the **only** way out of combat.
 - **1–5** or clicking a slot selects the weapon, before or during a fight —
   switching mid-fight switches behaviour on the next tick.
 
-**One shared attack cooldown.** There is a single `nextAttackAt`, not a timer
+**One shared attack cooldown**, shown on the action bar as a blind. The square
+that fired goes dark (icon included — the overlay is drawn *after* the glyph),
+then its shade retracts upward over the cooldown so the square refills with
+colour from the bottom. `startCooldown` captures the slot at fire time, so
+switching weapons mid-cooldown leaves the sweep on the square that actually
+attacked. The snapshot carries `cooldown: {slot, remainingMs, totalMs} | null`,
+and the client counts `remainingMs` down from snapshot arrival — at 600ms a
+snapshot-stepped blind visibly stair-steps. Only the firing slot is shaded, so
+the *other* square looks ready when it isn't; that's cosmetic, the gate is
+`nextAttackAt` either way.
+
+There is a single `nextAttackAt`, not a timer
 per weapon, and each attack charges *its own* interval against it: a dagger
 (`FIRE_INTERVAL_MS`, 1s) owes a full second even if you switch to the sword
 (`MELEE_INTERVAL`, 600ms) straight after. **You can never beat the cadence of the

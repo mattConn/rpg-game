@@ -52,8 +52,8 @@ const ARRIVAL_EPSILON = 1.5;
 /** How close a melee attacker walks before stopping to strike. */
 const ATTACK_RANGE = 44;
 
-/** How far a thrown dagger will reach (7 grid squares). */
-const RANGED_RANGE = 7 * CELL_SIZE;
+/** How far a thrown dagger will reach (14 grid squares). */
+const RANGED_RANGE = 14 * CELL_SIZE;
 
 /** Melee hit cadence (ms). */
 const MELEE_INTERVAL = 600;
@@ -130,6 +130,13 @@ export class GameSimulation {
    * even if you switch to a 1s one straight after.
    */
   private nextAttackAt = 0;
+  /** The slot that charged the current cooldown, and how long it charged. */
+  private cooldownSlot = 0;
+  private cooldownTotal = 0;
+  /** Ms left on that cooldown, or null when there is none. Refreshed each tick. */
+  cooldownRemainingMs: number | null = null;
+  /** Whether the selected attack is in range of a live target. Per tick. */
+  selectedCanAttack = false;
   killCount = 0;
   /** Real-ms deadline for replacing the hellhound, or null when one is alive. */
   private respawnAt: number | null = null;
@@ -185,6 +192,30 @@ export class GameSimulation {
     this.endCombat();
   }
 
+  /** Nearest enemy in the player's room, or undefined if the room is empty. */
+  private nearestEnemy(): Enemy | undefined {
+    let nearest: Enemy | undefined;
+    let nearestDistance = Infinity;
+    for (const e of this.enemies) {
+      if (!sameRoom(e.room, this.me.room)) continue;
+      const d = Math.hypot(e.x - this.me.x, e.y - this.me.y);
+      if (d < nearestDistance) {
+        nearest = e;
+        nearestDistance = d;
+      }
+    }
+    return nearest;
+  }
+
+  /**
+   * Engage `enemy`, or drop it if it's the one we're already fighting. Shared
+   * by double-click and Tab so the two stay identical by construction.
+   */
+  private toggleEngage(enemy: Enemy) {
+    if (this.attacking && this.targetId === enemy.id) this.disengageCombat();
+    else this.engageEnemy(enemy);
+  }
+
   private computePathCells(fromX: number, fromY: number, toX: number, toY: number) {
     const dx = toX - fromX;
     const dy = toY - fromY;
@@ -201,6 +232,32 @@ export class GameSimulation {
         this.pathCells.push({ col, row });
       }
     }
+  }
+
+  /**
+   * Would the selected attack land right now? Range and target only — the
+   * cooldown is deliberately excluded, since folding it in would strobe the
+   * border on every swing, and the action-bar blind already shows it.
+   */
+  private computeSelectedCanAttack(): boolean {
+    if (this.dead || !this.attacking) return false;
+    const target = this.combatTarget();
+    if (!target) return false;
+    const distance = Math.hypot(target.x - this.me.x, target.y - this.me.y);
+    return this.activeKind() === "melee"
+      ? distance <= ATTACK_RANGE
+      : distance > ATTACK_RANGE && distance <= RANGED_RANGE;
+  }
+
+  /**
+   * Charge the shared cooldown with `interval`, remembering which slot did it
+   * so the action bar can sweep that square — the slot is captured at fire
+   * time, so switching weapons mid-cooldown doesn't move the sweep.
+   */
+  private startCooldown(now: number, interval: number) {
+    this.nextAttackAt = now + interval;
+    this.cooldownSlot = this.activeSlot;
+    this.cooldownTotal = interval;
   }
 
   private spawnDamageNumber(x: number, y: number, amount: number, color = "#ffd633") {
@@ -236,13 +293,15 @@ export class GameSimulation {
           target.health -= MELEE_DAMAGE;
           target.aggro = true;
           this.spawnDamageNumber(target.x, target.y, MELEE_DAMAGE);
-          this.nextAttackAt = now + MELEE_INTERVAL;
+          this.startCooldown(now, MELEE_INTERVAL);
         }
-      } else if (distance <= RANGED_RANGE && now >= this.nextAttackAt) {
-        // Throw from where you stand, never closing the gap. Out of range you
-        // simply hold the target and wait for it to come.
+      } else if (distance > ATTACK_RANGE && distance <= RANGED_RANGE && now >= this.nextAttackAt) {
+        // Throw from where you stand, never closing the gap. Daggers have a
+        // dead zone as well as a limit: anything already inside melee reach is
+        // too close to throw at, so you draw the sword or back off. Out of
+        // range you simply hold the target and wait for it to come.
         this.projectiles.push(spawnDagger({ x: this.me.x, y: this.me.y }, { x: target.x, y: target.y }));
-        this.nextAttackAt = now + FIRE_INTERVAL_MS;
+        this.startCooldown(now, FIRE_INTERVAL_MS);
       }
     }
 
@@ -344,6 +403,14 @@ export class GameSimulation {
       case "keydown": {
         const key = msg.key.toLowerCase();
 
+        // Tab targets the nearest enemy in the room, behaving exactly like a
+        // double-click on it — including the toggle back off.
+        if (msg.code === "Tab") {
+          const nearest = this.nearestEnemy();
+          if (nearest) this.toggleEngage(nearest);
+          return;
+        }
+
         // Number keys 1-5 select the matching action-bar slot.
         if (key.length === 1 && key >= "1" && key <= "5") {
           const slot = Number(key) - 1;
@@ -386,9 +453,7 @@ export class GameSimulation {
       // combat — moving no longer breaks it.
       case "dblclick": {
         const clicked = enemyAtPoint(this.enemies, this.me.room, { x: msg.x, y: msg.y });
-        if (!clicked) break;
-        if (this.attacking && this.targetId === clicked.id) this.disengageCombat();
-        else this.engageEnemy(clicked);
+        if (clicked) this.toggleEngage(clicked);
         break;
       }
 
@@ -439,6 +504,11 @@ export class GameSimulation {
     // Realtime: one clock for everything, and it never stops.
     const now = realNow;
     const step = dt;
+
+    // Action-bar cooldown sweep. Null once elapsed, so the bar goes back to
+    // normal rather than sitting at a zero-height overlay.
+    const cooldownLeft = this.nextAttackAt - now;
+    this.cooldownRemainingMs = cooldownLeft > 0 ? cooldownLeft : null;
 
     this.resurrectInMs = null;
     if (this.dead && this.autoResurrect) {
@@ -527,6 +597,10 @@ export class GameSimulation {
       }
     }
 
+    // Last, so it reflects where everything actually ended up this tick — and
+    // after the kill sweep, so a corpse never reads as attackable.
+    this.selectedCanAttack = this.computeSelectedCanAttack();
+
     this.updateDamageNumbers(dt);
   }
 
@@ -583,6 +657,10 @@ export class GameSimulation {
       targetId: this.targetId,
       attacking: this.attacking,
       activeSlot: this.activeSlot,
+      cooldown: this.cooldownRemainingMs === null
+        ? null
+        : { slot: this.cooldownSlot, remainingMs: this.cooldownRemainingMs, totalMs: this.cooldownTotal },
+      selectedCanAttack: this.selectedCanAttack,
       moveTarget: this.moveTarget ? { x: this.moveTarget.x, y: this.moveTarget.y } : null,
       pathCells: this.pathCells.map((c) => ({ col: c.col, row: c.row })),
       gameElapsedMs: this.gameElapsedMs,

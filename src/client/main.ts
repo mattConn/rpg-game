@@ -35,6 +35,7 @@ import { drawEnemy, drawHealthBar } from "./enemies.js";
 import { drawTiles } from "./tilemap.js";
 import { worldToCell } from "../shared/tilemap.js";
 import { fitToViewport } from "./viewport.js";
+import { SERVER_TICK_MS, renderFraction, smoothInterval } from "./interpolation.js";
 
 // ------------------------------------------------------------------ fonts
 
@@ -75,6 +76,9 @@ let currSnapshot: GameSnapshot | null = null;
 let prevSnapshotTime = 0;
 let currSnapshotTime = 0;
 
+/** Smoothed playback interval for the lerp — see `interpolation.ts`. */
+let snapshotInterval = SERVER_TICK_MS;
+
 const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
 const wsUrl = `${wsProtocol}//${location.host}`;
 
@@ -88,6 +92,7 @@ function connectWebSocket() {
       prevSnapshotTime = currSnapshotTime;
       currSnapshot = snap;
       currSnapshotTime = performance.now();
+      if (prevSnapshot) snapshotInterval = smoothInterval(snapshotInterval, currSnapshotTime - prevSnapshotTime);
     } catch {
       // Ignore malformed messages.
     }
@@ -117,6 +122,15 @@ function send(msg: InputMessage) {
 
 window.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
+
+  if (event.code === "Tab") {
+    // Tab toggles the nearest target, so swallow the browser's auto-repeat —
+    // held down it would strobe engage/disengage. preventDefault also keeps
+    // focus from walking off the canvas.
+    event.preventDefault();
+    if (!event.repeat) send({ type: "keydown", key, code: event.code });
+    return;
+  }
 
   if ((key.length === 1 && key >= "1" && key <= "5") || "wasd".includes(key)) {
     send({ type: "keydown", key: event.key.toLowerCase(), code: event.code });
@@ -275,8 +289,10 @@ function interpolateSnapshot(prev: GameSnapshot, curr: GameSnapshot, t: number, 
     return { ...ce, x: lerp(pe.x, ce.x, t), y: lerp(pe.y, ce.y, t) };
   });
 
-  // Projectiles: extrapolate from curr using vx/vy (they travel in straight lines).
-  const elapsed = (now - currSnapshotTime) / 1000; // seconds since curr arrived
+  // Projectiles: extrapolate from curr using vx/vy (they travel in straight
+  // lines). Clamped at 0 for the same reason as `t` — see frame().
+  const sinceSnapshot = Math.max(0, now - currSnapshotTime);
+  const elapsed = sinceSnapshot / 1000; // seconds since curr arrived
   const projectiles = curr.projectiles.map((p) => ({
     ...p,
     x: p.x + p.vx * elapsed,
@@ -298,6 +314,12 @@ function interpolateSnapshot(prev: GameSnapshot, curr: GameSnapshot, t: number, 
 
   const gameElapsedMs = lerp(prev.gameElapsedMs, curr.gameElapsedMs, t);
 
+  // Cooldown counts down in real time, so run it forward from when the snapshot
+  // arrived — at 600ms a snapshot-stepped blind would visibly stair-step.
+  const cooldown = curr.cooldown
+    ? { ...curr.cooldown, remainingMs: Math.max(0, curr.cooldown.remainingMs - sinceSnapshot) }
+    : null;
+
   return {
     ...curr,
     player,
@@ -306,6 +328,7 @@ function interpolateSnapshot(prev: GameSnapshot, curr: GameSnapshot, t: number, 
     damageNumbers,
     moveTarget,
     gameElapsedMs,
+    cooldown,
   };
 }
 
@@ -584,7 +607,7 @@ function render(snap: GameSnapshot) {
     }
   }
 
-  drawActionBar(ctx, barOrigin, ACTIONS, snap.activeSlot);
+  drawActionBar(ctx, barOrigin, ACTIONS, snap.activeSlot, snap.cooldown, snap.selectedCanAttack);
   drawGameClock(snap.gameElapsedMs);
 }
 
@@ -592,9 +615,7 @@ function render(snap: GameSnapshot) {
 
 function frame(now: number) {
   if (currSnapshot) {
-    const elapsed = now - currSnapshotTime;
-    const interval = currSnapshotTime - prevSnapshotTime || 50;
-    const t = prevSnapshot ? Math.min(elapsed / interval, 1) : 1;
+    const t = renderFraction(now, currSnapshotTime, snapshotInterval, prevSnapshot !== null);
     const renderSnap = prevSnapshot ? interpolateSnapshot(prevSnapshot, currSnapshot, t, now) : currSnapshot;
     updateCursorStyle();
     render(renderSnap);
