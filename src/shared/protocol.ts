@@ -24,13 +24,14 @@ export interface GameSnapshot {
   targetId: string | null;
   attacking: boolean;
   activeSlot: number;
-  autoMode: boolean;
   moveTarget: { x: number; y: number } | null;
   pathCells: Array<{ col: number; row: number }>;
   gameElapsedMs: number;
   killCount: number;
-  cooldownUntil: number;
   dead: boolean;
+  autoResurrect: boolean;
+  /** Real ms left before an auto-resurrect fires, or null when none pending. */
+  resurrectInMs: number | null;
   tombstones: Array<{ x: number; y: number; room: RoomCoord; gameElapsedMs: number }>;
 }
 
@@ -39,6 +40,8 @@ export type InputMessage =
   | { type: "keydown"; key: string; code: string }
   | { type: "keyup"; key: string }
   | { type: "click"; x: number; y: number }
-  | { type: "rightclick"; x: number; y: number }
+  /** Engage the enemy under the point with the selected weapon. */
+  | { type: "dblclick"; x: number; y: number }
   | { type: "slot"; index: number }
-  | { type: "resurrect" };
+  | { type: "resurrect" }
+  | { type: "toggleAutoResurrect" };

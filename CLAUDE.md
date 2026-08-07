@@ -98,6 +98,30 @@ test walls with `segmentHitsWall` / `isSolidAtPixel`.
 The starting vault is a solid box in the center room with a 2-cell doorway on its
 south side (`rectBorder(16,11,23,18, [[19,18],[20,18]])`).
 
+### Realtime
+
+The world always runs. `tick(realNow)` derives `dt` from wall time and every
+timestamp — melee/fire cadence, enemy attack interval, respawn, auto-resurrect —
+is plain real ms from the same clock. There is no freeze, no sim-clock domain,
+and no time scaling anywhere; a turn-based layer and a 2× "wait" mode both
+existed here briefly and were removed, so don't reintroduce a second time
+domain. The server simulates whether or not a client is connected.
+
+### Death + auto-resurrect
+
+Dying drops a tombstone and stops the player; the world keeps running.
+`resurrect()` is the single revive path, shared by the **Resurrect** button and
+the timer.
+
+The **Auto-Res** toggle sits under the HUD stats and is clickable alive or dead
+(the `dead` guard in `handleInput` deliberately sits *below* the
+`toggleAutoResurrect` case). When on, the player revives
+`AUTO_RESURRECT_DELAY_MS` (3s) after death, and `resurrectInMs` drives a
+countdown beside the label.
+
+The delay is measured from death rather than from enabling the toggle, so
+switching Auto-Res on while already dead revives you at once.
+
 ### Overlays (minimap / HUD / action bar)
 
 All three are dragged by a gold handle at their top-left corner. `main.ts` holds
@@ -116,22 +140,77 @@ the drag doesn't also register as a game click.
 
 ### Enemies + combat
 
-Enemies (`enemies.ts`) are glyph tokens with identity (currently one hellhound,
-a `♞` in orange, near the top-right of the start room — render-only, no stats/AI).
+The game is built around **one-on-one combat**: there is exactly one enemy alive
+at any moment — a Hellhound (`♞`, orange, 30 HP). It enters at a random room edge,
+wanders, and chases once the player is within `CHASE_RANGE` or it has been hit
+(`aggro`, which is permanent). Kill it and `RESPAWN_DELAY_MS` (3s) later a fresh
+one walks in, so there is always something to fight and never a second one. Wave
+spawning, `MAX_ENEMIES`, and the kill-count cooldown that gated it are gone —
+don't add a spawner back without changing this section.
 
-- **Single-click** an enemy → target it (yellow ring). Never moves you.
+**The gesture picks the target; the action bar picks the weapon.** Combat starts
+one way and one way only — **double-click an enemy** — and ends one way only —
+double-click your way out. It is fought with whatever slot is selected. Nothing
+engages on the player's behalf: no proactive auto-combat, and no retaliation
+either, so an enemy can stand there beating on you indefinitely while you do
+nothing. That is deliberate; both were tried and removed.
+
+- **Single-click** an enemy → select it (yellow ring). No attack, no movement.
+- **Double-click** an enemy → `engageEnemy`: target + `attacking`, leaving
+  `activeSlot` alone. `updateCombat` then applies that weapon's range rule:
+  - **melee** — strike every `MELEE_INTERVAL` while within `ATTACK_RANGE`.
+  - **ranged** — a dagger every `FIRE_INTERVAL_MS` while within `RANGED_RANGE`
+    (7 cells). Out of range you just hold the target and wait; point-blank you
+    keep throwing rather than closing.
+- **Double-click the engaged enemy again** → disengage and untarget. Together
+  with double-clicking a *different* enemy (which just switches target), that is
+  the **only** way out of combat.
+- **1–5** or clicking a slot selects the weapon, before or during a fight —
+  switching mid-fight switches behaviour on the next tick.
+
+**One shared attack cooldown.** There is a single `nextAttackAt`, not a timer
+per weapon, and each attack charges *its own* interval against it: a dagger
+(`FIRE_INTERVAL_MS`, 1s) owes a full second even if you switch to the sword
+(`MELEE_INTERVAL`, 600ms) straight after. **You can never beat the cadence of the
+attack you just made.** That's what stops weapon-swapping from being a damage
+multiplier — with per-weapon timers, alternating slots let each one fire off its
+own stale clock. `engageEnemy` deliberately does *not* reset it either, or
+double-clicking off and back on would refund the cooldown.
+- **Movement never breaks combat.** A ground click or a WASD step walks you
+  wherever you asked and the engagement rides along — you keep swinging at
+  anything that stays inside `ATTACK_RANGE` and keep throwing at anything inside
+  `RANGED_RANGE` as you go.
 - **Hover** within `NAME_REVEAL_DISTANCE` → shows its name (same rule reveals the
   player's own `(You)` label).
-- **Double-click** an enemy → attack (ring turns **red**). Double-clicking the
-  same enemy again cancels combat (ring back to yellow, target kept).
-- **Melee** selected: walk to `ATTACK_RANGE` of the enemy and hold (reuses
-  `moveTarget`). **Ranged** selected: throw daggers at it every
-  `FIRE_INTERVAL_MS` at `PROJECTILE_SPEED`, oriented along flight, stopped by
-  walls; continues until cancelled.
-- **1–5** keys or clicking a slot select the active attack.
-- Clicking open ground cancels combat *and* untargets (and walks there).
 
-There is no damage / death yet — "attack" is purely positioning + visuals.
+**Neither weapon pursues.** `engageEnemy` never writes `moveTarget` and neither
+does `updateCombat` — closing the distance is entirely the player's job, with
+WASD or a ground click (or by letting the hellhound come to you; it chases
+inside `CHASE_RANGE`). Engaging a target 300px away and standing still is a
+no-op: you stay put and it takes no damage. An earlier version auto-ran you into
+`ATTACK_RANGE`, which needed a whole yielding mechanism so player movement could
+win — all of that is gone; don't reintroduce a chase without reading this
+paragraph.
+
+Two range constants interact awkwardly and are worth knowing before tuning:
+`ENEMY_RADIUS` (45, the click hit-box) is *larger* than `ATTACK_RANGE` (44), so
+a ground click near enough to leave you in sword reach is swallowed by the
+enemy's hit-box and read as "select" instead. Click-to-move alone therefore
+always stops a hair short — in practice the hellhound closes that gap itself, so
+the fight still starts, but WASD is the reliable way in.
+- **Right-click has no meaning.** The canvas `contextmenu` handler only suppresses
+  the browser menu.
+
+The double-click is the browser's own `dblclick` event. The leading `click`s that
+precede it only select a target, so letting them through first is harmless —
+this is why the client needs no debounce. An earlier model bound the weapon to
+the gesture (click = ranged, double-click = melee) and *did* need one, to stop a
+dagger flying before the melee charge; don't reintroduce it.
+
+Enemy attacks are gated on `e.chasing`, which is only ever assigned inside
+`updateEnemy` — and `tick` skips `updateEnemy` for the enemy you're meleeing so
+it holds position instead of shoving you. `tick` therefore sets `chasing` itself
+in that branch, or a hellhound engaged at point-blank would never swing back.
 
 ## Conventions
 
@@ -150,13 +229,16 @@ There is no damage / death yet — "attack" is purely positioning + visuals.
 
 ## Known limitations / next steps
 
-- **No pathfinding.** Click-to-move and melee auto-approach travel in a straight
-  line and stop at walls — they don't route around the vault. To melee the
-  hellhound, leave the vault (south doorway) first.
+- **No pathfinding.** Click-to-move and WASD travel in a straight line and stop
+  at walls — nothing routes around the vault. The player spawns *inside* it, so
+  to reach the hellhound you leave via the south doorway first. (This bites when
+  writing tests too: stage the player on open floor, e.g. `(200, 800)`, or they
+  walk into a wall.)
 - Collision is cell-based (full 30px cell) while wall glyphs are thinner lines,
   so the player stops a few px shy of visually touching a wall.
 - Player name/color are randomized per page load (no persistence, no name entry).
-- HUD health/mana are static placeholders (100/100); action-bar slots 3–5 empty.
+- HUD health is live; mana is still a static placeholder. Action-bar slots 3–5
+  are empty.
 
 ## Git
 

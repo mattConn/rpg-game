@@ -41,10 +41,9 @@ import { fitToViewport } from "./viewport.js";
 const GLYPH_FONT = "20px monospace";
 const NAME_FONT = "12px monospace";
 const ROOM_LABEL_FONT = "13px monospace";
-const AUTO_LABEL_FONT = "11px monospace";
 const CLOCK_FONT = "13px monospace";
 
-/** One in-game minute = this many real ms. Must match the server constant. */
+/** One in-game minute = this many ms of `gameElapsedMs`. Display-only. */
 const MS_PER_GAME_MINUTE = 500;
 
 /** Floating damage number lifetime in seconds. */
@@ -119,7 +118,7 @@ function send(msg: InputMessage) {
 window.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
 
-  if (event.code === "Space" || (key.length === 1 && key >= "1" && key <= "5") || "wasd".includes(key)) {
+  if ((key.length === 1 && key >= "1" && key <= "5") || "wasd".includes(key)) {
     send({ type: "keydown", key: event.key.toLowerCase(), code: event.code });
     event.preventDefault();
   }
@@ -152,29 +151,51 @@ const barOrigin: Point = { ...ACTION_BAR_DEFAULT_ORIGIN };
 
 const hudOrigin: Point = { ...HUD_DEFAULT_ORIGIN };
 
+const RESURRECT_FONT = "12px monospace";
+const AUTO_RES_FONT = "11px monospace";
+const AUTO_RES_LABEL = "Auto-Res";
+
+interface Rect { x: number; y: number; width: number; height: number }
+
+const hits = (r: Rect, p: Point) =>
+  p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height;
+
+/** Centred "Resurrect" button under the name plate — only drawn when dead. */
+function resurrectRect(): Rect {
+  ctx.font = RESURRECT_FONT;
+  const width = ctx.measureText("Resurrect").width;
+  return {
+    x: hudOrigin.x + PORTRAIT_SIZE / 2 - width / 2,
+    y: hudOrigin.y + PORTRAIT_SIZE + NAME_GAP + NAME_HEIGHT + 4,
+    width,
+    height: 12,
+  };
+}
+
+/** The auto-resurrect toggle, left-aligned under the stats. Always present. */
+function autoResRect(): Rect {
+  ctx.font = AUTO_RES_FONT;
+  return {
+    x: hudOrigin.x,
+    y: hudOrigin.y + PORTRAIT_SIZE + NAME_GAP + NAME_HEIGHT + 22,
+    width: ctx.measureText(AUTO_RES_LABEL).width,
+    height: 11,
+  };
+}
+
 canvas.addEventListener("click", (event) => {
 
   const point = toWorld(event);
 
   // Resurrect button when dead — check before other click logic.
-  if (currSnapshot?.dead) {
-    const resX = hudOrigin.x + PORTRAIT_SIZE / 2;
-    const resY = hudOrigin.y + PORTRAIT_SIZE + NAME_GAP + NAME_HEIGHT + 4;
-    ctx.font = "12px monospace";
-    const textWidth = ctx.measureText("Resurrect").width;
-    const textHeight = 12;
-    if (
-      point.x >= resX - textWidth / 2 && point.x <= resX + textWidth / 2
-      && point.y >= resY && point.y <= resY + textHeight
-    ) {
-      send({ type: "resurrect" });
-      return;
-    }
+  if (currSnapshot?.dead && hits(resurrectRect(), point)) {
+    send({ type: "resurrect" });
+    return;
   }
 
-  // Toggle auto-combat by clicking the Auto label.
-  if (isOverAutoLabel(point)) {
-    send({ type: "keydown", key: " ", code: "Space" });
+  // Auto-resurrect toggle — usable alive or dead.
+  if (hits(autoResRect(), point)) {
+    send({ type: "toggleAutoResurrect" });
     return;
   }
 
@@ -189,10 +210,16 @@ canvas.addEventListener("click", (event) => {
   send({ type: "click", x: point.x, y: point.y });
 });
 
+// The browser's own double-click. The leading clicks only ever select a target
+// or start a walk, so letting them through before this arrives is harmless.
+canvas.addEventListener("dblclick", (event) => {
+  const point = toWorld(event);
+  send({ type: "dblclick", x: point.x, y: point.y });
+});
+
+// Keep the browser menu off the canvas; right-click has no game meaning.
 canvas.addEventListener("contextmenu", (event) => {
   event.preventDefault();
-  const point = toWorld(event);
-  send({ type: "rightclick", x: point.x, y: point.y });
 });
 
 /** Cursor position in room coordinates, or null while the mouse is off-canvas. */
@@ -211,22 +238,11 @@ let appliedCursor = DEFAULT_CURSOR;
 function updateCursorStyle() {
   const snap = currSnapshot;
 
-  // Check if hovering the resurrect button.
-  let overResurrect = false;
-  if (snap?.dead && cursor) {
-    const resX = hudOrigin.x + PORTRAIT_SIZE / 2;
-    const resY = hudOrigin.y + PORTRAIT_SIZE + NAME_GAP + NAME_HEIGHT + 4;
-    ctx.font = "12px monospace";
-    const textWidth = ctx.measureText("Resurrect").width;
-    const textHeight = 12;
-    overResurrect =
-      cursor.x >= resX - textWidth / 2 && cursor.x <= resX + textWidth / 2
-      && cursor.y >= resY && cursor.y <= resY + textHeight;
-  }
+  const overResurrect = !!snap?.dead && !!cursor && hits(resurrectRect(), cursor);
 
   let wanted = DEFAULT_CURSOR;
   if (overResurrect) wanted = "pointer";
-  else if (cursor && isOverAutoLabel(cursor)) wanted = "pointer";
+  else if (cursor && hits(autoResRect(), cursor)) wanted = "pointer";
 
   if (wanted !== appliedCursor) {
     canvas.style.cursor = wanted;
@@ -342,25 +358,6 @@ function drawLabelIfHovered(x: number, y: number, label: string) {
   ctx.fillText(label, x, y + PLAYER_RADIUS + 10);
 }
 
-const AUTO_LABEL_X = WORLD_WIDTH - 14;
-const AUTO_LABEL_Y = 14 + 38;
-
-function isOverAutoLabel(point: { x: number; y: number }): boolean {
-  ctx.font = AUTO_LABEL_FONT;
-  const w = ctx.measureText("Auto").width;
-  const h = 11;
-  return point.x >= AUTO_LABEL_X - w && point.x <= AUTO_LABEL_X
-    && point.y >= AUTO_LABEL_Y && point.y <= AUTO_LABEL_Y + h;
-}
-
-function drawAutoLabel(autoMode: boolean, hovered: boolean) {
-  ctx.font = AUTO_LABEL_FONT;
-  ctx.textAlign = "right";
-  ctx.textBaseline = "top";
-  ctx.fillStyle = hovered ? "#ffffff" : autoMode ? "#ffd633" : "#444444";
-  ctx.fillText("Auto", AUTO_LABEL_X, AUTO_LABEL_Y);
-}
-
 /** Draw a filled time-of-day icon (sun/moon/sunset) centred at (cx, cy). */
 function drawTimeIcon(c: CanvasRenderingContext2D, cx: number, cy: number, r: number, hourOfDay: number) {
   if (hourOfDay >= 6 && hourOfDay < 18) {
@@ -408,10 +405,12 @@ function drawGameClock(gameElapsedMs: number) {
   const x = WORLD_WIDTH - margin;
   const y = margin;
 
+  const clockColor = "#aaaaaa";
+
   ctx.font = CLOCK_FONT;
   ctx.textAlign = "right";
   ctx.textBaseline = "top";
-  ctx.fillStyle = "#aaaaaa";
+  ctx.fillStyle = clockColor;
   const dayText = `Day ${day}`;
   ctx.fillText(dayText, x, y);
 
@@ -419,7 +418,7 @@ function drawGameClock(gameElapsedMs: number) {
   const dayWidth = ctx.measureText(dayText).width;
   drawTimeIcon(ctx, x - dayWidth - 12, y + 7, 6, hourOfDay);
 
-  ctx.fillStyle = "#aaaaaa";
+  ctx.fillStyle = clockColor;
   ctx.fillText(timeStr, x, y + 16);
 }
 
@@ -542,20 +541,30 @@ function render(snap: GameSnapshot) {
 
   // "Resurrect" button below the HUD when dead.
   if (snap.dead) {
-    const resX = hudOrigin.x + PORTRAIT_SIZE / 2;
-    const resY = hudOrigin.y + PORTRAIT_SIZE + NAME_GAP + NAME_HEIGHT + 4;
-    ctx.font = "12px monospace";
-    ctx.textAlign = "center";
+    const rect = resurrectRect();
+    ctx.font = RESURRECT_FONT;
+    ctx.textAlign = "left";
     ctx.textBaseline = "top";
+    ctx.fillStyle = cursor && hits(rect, cursor) ? "#ffd633" : "#ffffff";
+    ctx.fillText("Resurrect", rect.x, rect.y);
+  }
 
-    const textWidth = ctx.measureText("Resurrect").width;
-    const textHeight = 12;
-    const hovering = cursor !== null
-      && cursor.x >= resX - textWidth / 2 && cursor.x <= resX + textWidth / 2
-      && cursor.y >= resY && cursor.y <= resY + textHeight;
+  // Auto-resurrect toggle under the stats, with a countdown while one is due —
+  // three frozen seconds with no feedback reads as a hang.
+  {
+    const rect = autoResRect();
+    ctx.font = AUTO_RES_FONT;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillStyle = cursor && hits(rect, cursor)
+      ? "#ffffff"
+      : snap.autoResurrect ? "#ffd633" : "#444444";
+    ctx.fillText(AUTO_RES_LABEL, rect.x, rect.y);
 
-    ctx.fillStyle = hovering ? "#ffd633" : "#ffffff";
-    ctx.fillText("Resurrect", resX, resY);
+    if (snap.resurrectInMs !== null) {
+      ctx.fillStyle = "#aaaaaa";
+      ctx.fillText(`${(snap.resurrectInMs / 1000).toFixed(1)}s`, rect.x + rect.width + 8, rect.y);
+    }
   }
 
   // Enemy portrait next to player HUD when in combat.
@@ -576,7 +585,6 @@ function render(snap: GameSnapshot) {
   }
 
   drawActionBar(ctx, barOrigin, ACTIONS, snap.activeSlot);
-  drawAutoLabel(snap.autoMode, !!cursor && isOverAutoLabel(cursor));
   drawGameClock(snap.gameElapsedMs);
 }
 

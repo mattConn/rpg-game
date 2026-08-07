@@ -52,10 +52,10 @@ const ARRIVAL_EPSILON = 1.5;
 /** How close a melee attacker walks before stopping to strike. */
 const ATTACK_RANGE = 44;
 
-/** Auto-combat only engages enemies within this distance (7 grid squares). */
-const AUTO_ENGAGE_RANGE = 7 * CELL_SIZE;
+/** How far a thrown dagger will reach (7 grid squares). */
+const RANGED_RANGE = 7 * CELL_SIZE;
 
-/** Melee hit cadence in autoplay (ms). */
+/** Melee hit cadence (ms). */
 const MELEE_INTERVAL = 600;
 
 /** Melee damage per hit. */
@@ -64,8 +64,8 @@ const MELEE_DAMAGE = 10;
 /** Ranged (dagger) damage per hit. */
 const RANGED_DAMAGE = 5;
 
-/** Spawn a wave of enemies every this many ms. */
-const SPAWN_INTERVAL = 3000;
+/** Delay before the single hellhound is replaced after it dies (ms). */
+const RESPAWN_DELAY_MS = 3000;
 
 /** Floating damage number lifetime in seconds. */
 const DAMAGE_NUMBER_LIFETIME = 1.0;
@@ -73,14 +73,8 @@ const DAMAGE_NUMBER_LIFETIME = 1.0;
 /** How fast damage numbers rise (px/s). */
 const DAMAGE_NUMBER_SPEED = 50;
 
-/** One in-game minute = this many real ms. */
-const MS_PER_GAME_MINUTE = 500;
-
-const MAX_ENEMIES = 7;
-
-const KILLS_PER_COOLDOWN = 50;
-/** 1 game hour in real ms (60 game minutes x MS_PER_GAME_MINUTE). */
-const COOLDOWN_MS = 60 * MS_PER_GAME_MINUTE;
+/** Delay before an auto-resurrect fires (ms), measured from the moment of death. */
+const AUTO_RESURRECT_DELAY_MS = 3000;
 
 // ------------------------------------------------------------------ types
 
@@ -129,14 +123,24 @@ export class GameSimulation {
   attacking = false;
   activeSlot = 0;
   readonly projectiles: Projectile[] = [];
-  private lastFireAt = 0;
-  private lastMeleeAt = 0;
-  private lastSpawnAt = 0;
+  /**
+   * Earliest time the next attack may land, of *any* kind. Each attack charges
+   * its own interval against this one shared clock, so swapping weapons can't
+   * beat the cadence of the swing you just made — a 2s attack owes its full 2s
+   * even if you switch to a 1s one straight after.
+   */
+  private nextAttackAt = 0;
   killCount = 0;
-  cooldownUntil = 0;
+  /** Real-ms deadline for replacing the hellhound, or null when one is alive. */
+  private respawnAt: number | null = null;
 
   // Death
   dead = false;
+  autoResurrect = false;
+  /** Real-ms timestamp of death, for the auto-resurrect delay. */
+  private deathAt = 0;
+  /** Real ms left before an auto-resurrect, or null when none is pending. */
+  resurrectInMs: number | null = null;
   tombstones: Array<{ x: number; y: number; room: RoomCoord; gameElapsedMs: number; visible: boolean }> = [];
 
   // Clock
@@ -144,11 +148,6 @@ export class GameSimulation {
 
   // Movement
   moveTarget: { x: number; y: number } | null = null;
-
-  // Autoplay
-  autoMode = true;
-  private manualMoveTarget: Point | null = null;
-  private manualTarget = false;
   pathCells: Array<{ col: number; row: number }> = [];
 
   // Damage numbers
@@ -159,6 +158,11 @@ export class GameSimulation {
 
   // Timing — last tick timestamp (real ms, e.g. Date.now())
   private lastTickTime = Date.now();
+
+  constructor() {
+    // Exactly one hellhound, from the first tick onward.
+    this.spawnHellhound();
+  }
 
   // -------------------------------------------------------- helpers
 
@@ -178,7 +182,6 @@ export class GameSimulation {
 
   private disengageCombat() {
     this.targetId = null;
-    this.manualTarget = false;
     this.endCombat();
   }
 
@@ -218,34 +221,28 @@ export class GameSimulation {
 
     // The target died or we walked out of its room — combat is off.
     if (this.attacking && !target) {
-      this.manualTarget = false;
       this.pathCells = [];
       this.endCombat();
     }
 
     if (this.attacking && target) {
-      const dx = target.x - this.me.x;
-      const dy = target.y - this.me.y;
-      const distance = Math.hypot(dx, dy) || 1;
+      const distance = Math.hypot(target.x - this.me.x, target.y - this.me.y);
 
       if (this.activeKind() === "melee") {
-        // Walk to just within striking range, then hold.
-        this.moveTarget =
-          distance > ATTACK_RANGE
-            ? { x: target.x - (dx / distance) * ATTACK_RANGE, y: target.y - (dy / distance) * ATTACK_RANGE }
-            : null;
-
-        // Melee damage on interval when in range.
-        if (distance <= ATTACK_RANGE && now - this.lastMeleeAt >= MELEE_INTERVAL) {
+        // No pursuit: engaging never moves you. Closing the distance is the
+        // player's job (WASD or a ground click); we only swing at what's in
+        // reach, whether that's because you walked in or it walked into you.
+        if (distance <= ATTACK_RANGE && now >= this.nextAttackAt) {
           target.health -= MELEE_DAMAGE;
           target.aggro = true;
           this.spawnDamageNumber(target.x, target.y, MELEE_DAMAGE);
-          this.lastMeleeAt = now;
+          this.nextAttackAt = now + MELEE_INTERVAL;
         }
-      } else if (now - this.lastFireAt >= FIRE_INTERVAL_MS) {
-        // Ranged: loose a dagger at the enemy on a fixed cadence.
+      } else if (distance <= RANGED_RANGE && now >= this.nextAttackAt) {
+        // Throw from where you stand, never closing the gap. Out of range you
+        // simply hold the target and wait for it to come.
         this.projectiles.push(spawnDagger({ x: this.me.x, y: this.me.y }, { x: target.x, y: target.y }));
-        this.lastFireAt = now;
+        this.nextAttackAt = now + FIRE_INTERVAL_MS;
       }
     }
 
@@ -273,63 +270,12 @@ export class GameSimulation {
     }
   }
 
-  // -------------------------------------------------------- autoplay update
-
-  private updateAutoplay(now: number) {
-    if (this.dead) return;
-    // Don't override player-chosen targets or manual movement.
-    if (this.manualTarget || this.manualMoveTarget) return;
-
-    // Find closest enemy in the current room within engage range.
-    let closest: Enemy | null = null;
-    let closestDist = Infinity;
-
-    for (const e of this.enemies) {
-      if (!sameRoom(e.room, this.me.room)) continue;
-      const d = Math.hypot(e.x - this.me.x, e.y - this.me.y);
-      if (d < closestDist && d <= AUTO_ENGAGE_RANGE) {
-        closest = e;
-        closestDist = d;
-      }
-    }
-
-    if (!closest) {
-      // Nothing in range — idle.
-      if (this.attacking) this.endCombat();
-      this.targetId = null;
-      this.moveTarget = null;
-      return;
-    }
-
-    this.targetId = closest.id;
-    this.attacking = true;
-
-    if (closestDist <= ATTACK_RANGE) {
-      // In melee range — use sword.
-      this.activeSlot = 0;
-    } else {
-      // Out of melee range — use daggers.
-      this.activeSlot = 1;
-    }
-
-    // Walk toward closest enemy so melee can connect.
-    const dx = closest.x - this.me.x;
-    const dy = closest.y - this.me.y;
-    const dist = Math.hypot(dx, dy) || 1;
-    this.moveTarget =
-      closestDist > ATTACK_RANGE
-        ? { x: closest.x - (dx / dist) * ATTACK_RANGE, y: closest.y - (dy / dist) * ATTACK_RANGE }
-        : null;
-  }
-
   // -------------------------------------------------------- spawning
 
-  private spawnWave() {
-    if (this.enemies.length >= MAX_ENEMIES) return;
-    const count = Math.min(1 + Math.floor(Math.random() * 2), MAX_ENEMIES - this.enemies.length);
-    for (let i = 0; i < count; i++) {
-      this.enemies.push(spawnEnemy(`hellhound-${this.nextEnemyId++}`, this.me.room));
-    }
+  /** The one opponent. Enters at a random room edge and wanders from there. */
+  private spawnHellhound() {
+    this.enemies.push(spawnEnemy(`hellhound-${this.nextEnemyId++}`, this.me.room));
+    this.respawnAt = null;
   }
 
   // -------------------------------------------------------- movement
@@ -364,8 +310,7 @@ export class GameSimulation {
         x1 = this.moveTarget.x;
         y1 = this.moveTarget.y;
         this.moveTarget = null;
-        this.manualMoveTarget = null;
-        this.pathCells = []; // arrived — auto-combat can resume
+        this.pathCells = []; // arrived
       } else {
         x1 = this.me.x + (toX / distance) * step;
         y1 = this.me.y + (toY / distance) * step;
@@ -383,13 +328,13 @@ export class GameSimulation {
 
   handleInput(msg: InputMessage): void {
     if (msg.type === "resurrect") {
-      if (this.dead) {
-        this.dead = false;
-        this.stats.health = this.stats.maxHealth;
-        this.me.x = WORLD_WIDTH / 2;
-        this.me.y = WORLD_HEIGHT / 2;
-        for (const t of this.tombstones) t.visible = true;
-      }
+      this.resurrect();
+      return;
+    }
+
+    // Toggling auto-resurrect has to work while dead — that's when you want it.
+    if (msg.type === "toggleAutoResurrect") {
+      this.autoResurrect = !this.autoResurrect;
       return;
     }
 
@@ -399,16 +344,6 @@ export class GameSimulation {
       case "keydown": {
         const key = msg.key.toLowerCase();
 
-        // Space toggles auto-movement.
-        if (msg.code === "Space") {
-          this.autoMode = !this.autoMode;
-          if (!this.autoMode) {
-            this.disengageCombat();
-            this.moveTarget = null;
-          }
-          return;
-        }
-
         // Number keys 1-5 select the matching action-bar slot.
         if (key.length === 1 && key >= "1" && key <= "5") {
           const slot = Number(key) - 1;
@@ -417,11 +352,10 @@ export class GameSimulation {
         }
 
         if (!"wasd".includes(key) || key.length !== 1) return;
+        // Steering does not drop the target — only a double-click does.
         this.heldKeys.add(key);
         this.moveTarget = null;
-        this.manualMoveTarget = null;
         this.pathCells = [];
-        this.disengageCombat();
         break;
       }
 
@@ -433,29 +367,28 @@ export class GameSimulation {
       case "click": {
         const point = { x: msg.x, y: msg.y };
 
-        // Left-click on an enemy: engage in melee combat.
+        // Click an enemy: select it, nothing more. Double-click starts the fight.
         const clicked = enemyAtPoint(this.enemies, this.me.room, point);
         if (clicked) {
-          this.engageEnemy(clicked, "melee");
+          this.targetId = clicked.id;
           return;
         }
 
-        // Left-click on ground: disengage, walk there.
-        this.disengageCombat();
-        this.manualTarget = false;
+        // Click open ground: walk there, keeping whatever we're engaged with.
         const dest = { x: clamp(point.x, MIN_X, MAX_X), y: clamp(point.y, MIN_Y, MAX_Y) };
         this.moveTarget = dest;
-        this.manualMoveTarget = dest;
         this.computePathCells(this.me.x, this.me.y, dest.x, dest.y);
         break;
       }
 
-      case "rightclick": {
-        const point = { x: msg.x, y: msg.y };
-        const clicked = enemyAtPoint(this.enemies, this.me.room, point);
-        if (clicked) {
-          this.engageEnemy(clicked, "ranged");
-        }
+      // Double-click an enemy: engage it with the selected weapon, or drop it
+      // if it's the one we're already fighting. This is the *only* way out of
+      // combat — moving no longer breaks it.
+      case "dblclick": {
+        const clicked = enemyAtPoint(this.enemies, this.me.room, { x: msg.x, y: msg.y });
+        if (!clicked) break;
+        if (this.attacking && this.targetId === clicked.id) this.disengageCombat();
+        else this.engageEnemy(clicked);
         break;
       }
 
@@ -465,38 +398,61 @@ export class GameSimulation {
         }
         break;
       }
+
     }
   }
 
-  private engageEnemy(enemy: Enemy, kind: "melee" | "ranged") {
-    this.manualTarget = true;
-    this.manualMoveTarget = null;
-    this.pathCells = [];
+  /** Back on your feet at the centre of the room, tombstones now visible. */
+  private resurrect() {
+    if (!this.dead) return;
+    this.dead = false;
+    this.resurrectInMs = null;
+    this.stats.health = this.stats.maxHealth;
+    this.me.x = WORLD_WIDTH / 2;
+    this.me.y = WORLD_HEIGHT / 2;
+    for (const t of this.tombstones) t.visible = true;
+  }
+
+  /**
+   * Start the fight. The weapon is whatever the player has selected — the
+   * gesture picks the target, never the attack. `updateCombat` then applies
+   * that weapon's range rules.
+   *
+   * Engaging never moves you and never cancels a walk you already ordered:
+   * neither weapon pursues, so movement is entirely the player's business.
+   */
+  private engageEnemy(enemy: Enemy) {
     this.targetId = enemy.id;
     this.attacking = true;
-    this.activeSlot = kind === "melee" ? 0 : 1;
     this.projectiles.length = 0;
-    this.lastFireAt = 0;
-    this.lastMeleeAt = 0;
-
-    // Show path to enemy's current position.
-    this.computePathCells(this.me.x, this.me.y, enemy.x, enemy.y);
+    // Deliberately does NOT clear nextAttackAt: re-engaging would otherwise be
+    // a way to refund a cooldown by double-clicking off and straight back on.
   }
 
   // -------------------------------------------------------- tick
 
-  tick(now: number): void {
+  tick(realNow: number): void {
     // Clamped so a long gap doesn't teleport the player.
-    const dt = Math.min((now - this.lastTickTime) / 1000, 0.1);
-    this.lastTickTime = now;
+    const dt = Math.min((realNow - this.lastTickTime) / 1000, 0.1);
+    this.lastTickTime = realNow;
+
+    // Realtime: one clock for everything, and it never stops.
+    const now = realNow;
+    const step = dt;
+
+    this.resurrectInMs = null;
+    if (this.dead && this.autoResurrect) {
+      const remaining = AUTO_RESURRECT_DELAY_MS - (now - this.deathAt);
+      if (remaining <= 0) this.resurrect();
+      else this.resurrectInMs = remaining;
+    }
 
     // Advance in-game clock.
-    this.gameElapsedMs += dt * 1000;
+    this.gameElapsedMs += step * 1000;
 
-    // Spawn enemies on interval, unless on cooldown.
-    if (now >= this.cooldownUntil && now - this.lastSpawnAt >= SPAWN_INTERVAL) {
-      this.spawnWave();
-      this.lastSpawnAt = now;
+    // Put the next hellhound in the room once its predecessor's timer is up.
+    if (this.respawnAt !== null && now >= this.respawnAt) {
+      this.spawnHellhound();
     }
 
     const layer = this.dungeon.get(this.me.room);
@@ -510,8 +466,14 @@ export class GameSimulation {
     const aiPlayerY = this.dead ? -1e5 : this.me.y;
     for (const e of this.enemies) {
       if (!sameRoom(e.room, this.me.room)) continue;
-      if (inMelee && e.id === this.targetId) continue; // locked in melee
-      updateEnemy(e, aiPlayerX, aiPlayerY, dt, layer);
+      // Locked in melee: it holds position rather than closing, but it is very
+      // much in the fight — `updateEnemy` is the only thing that sets
+      // `chasing`, so keep it hostile here or it never swings back.
+      if (inMelee && e.id === this.targetId) {
+        e.chasing = !this.dead;
+        continue;
+      }
+      updateEnemy(e, aiPlayerX, aiPlayerY, step, layer);
     }
 
     // Enemy attacks on the player.
@@ -531,6 +493,7 @@ export class GameSimulation {
       if (this.stats.health <= 0) {
         this.stats.health = 0;
         this.dead = true;
+        this.deathAt = realNow;
         this.tombstones.push({ x: this.me.x, y: this.me.y, room: { ...this.me.room }, gameElapsedMs: this.gameElapsedMs, visible: false });
         this.disengageCombat();
         this.moveTarget = null;
@@ -543,37 +506,32 @@ export class GameSimulation {
       }
     }
 
-    // Auto-targeting and weapon selection only when autoMode is on.
-    if (this.autoMode) {
-      this.updateAutoplay(now);
-    }
-
     // Combat (melee hits, dagger firing/advancing).
-    this.updateCombat(now, dt);
+    this.updateCombat(now, step);
 
     // Player movement.
-    this.applyMovement(dt);
+    this.applyMovement(step);
 
-    // Remove dead enemies and count kills.
+    // Remove dead enemies, count kills, and queue the replacement.
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       if (this.enemies[i]!.health <= 0) {
         const dead = this.enemies[i]!;
         if (dead.id === this.targetId) {
           this.targetId = null;
-          this.manualTarget = false;
           this.pathCells = [];
           this.endCombat();
         }
         this.enemies.splice(i, 1);
         this.killCount++;
-        if (this.killCount >= KILLS_PER_COOLDOWN) {
-          this.killCount = 0;
-          this.cooldownUntil = now + COOLDOWN_MS;
-        }
+        this.respawnAt = now + RESPAWN_DELAY_MS;
       }
     }
 
-    // Update damage numbers (rise upward, age, remove expired).
+    this.updateDamageNumbers(dt);
+  }
+
+  /** Rise upward, age, remove expired. */
+  private updateDamageNumbers(dt: number) {
     for (let i = this.damageNumbers.length - 1; i >= 0; i--) {
       const dn = this.damageNumbers[i]!;
       dn.y -= DAMAGE_NUMBER_SPEED * dt;
@@ -625,13 +583,13 @@ export class GameSimulation {
       targetId: this.targetId,
       attacking: this.attacking,
       activeSlot: this.activeSlot,
-      autoMode: this.autoMode,
       moveTarget: this.moveTarget ? { x: this.moveTarget.x, y: this.moveTarget.y } : null,
       pathCells: this.pathCells.map((c) => ({ col: c.col, row: c.row })),
       gameElapsedMs: this.gameElapsedMs,
       killCount: this.killCount,
-      cooldownUntil: this.cooldownUntil,
       dead: this.dead,
+      autoResurrect: this.autoResurrect,
+      resurrectInMs: this.resurrectInMs,
       tombstones: this.tombstones.filter((t) => t.visible).map((t) => ({ x: t.x, y: t.y, room: t.room, gameElapsedMs: t.gameElapsedMs })),
     };
   }
