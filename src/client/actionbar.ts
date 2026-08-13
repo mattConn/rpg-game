@@ -52,6 +52,16 @@ const COOLDOWN_SHADE = "rgba(0, 0, 0, 0.72)";
 const COOLDOWN_EDGE = "#ffd633";
 const COOLDOWN_EDGE_THICKNESS = 1.5;
 
+/**
+ * The key that selects a slot, printed in its top-left corner. 1-5 select the
+ * slot in every front end, so the label is true everywhere — and in the
+ * turn-based game, where choosing a weapon and swinging it are separate acts,
+ * the bar has to say which key does the choosing.
+ */
+const KEY_FONT = "9px monospace";
+const KEY_COLOR = "#7a7a7a";
+const KEY_INSET = 4;
+
 export function drawActionBar(
   ctx: CanvasRenderingContext2D,
   origin: Point,
@@ -80,6 +90,13 @@ export function drawActionBar(
 
     const action = actions[i];
     if (!action) continue;
+
+    // Corner key label, before the blind so a spent slot darkens it too.
+    ctx.font = KEY_FONT;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillStyle = KEY_COLOR;
+    ctx.fillText(`(${i + 1})`, r.x + KEY_INSET, r.y + KEY_INSET);
 
     const cx = r.x + r.width / 2;
     const cy = r.y + r.height / 2;

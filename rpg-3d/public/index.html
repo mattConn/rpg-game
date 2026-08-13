@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Single-Player RPG — 3D</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #111;
+      }
+
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      /*
+       * The 3D view and the 2D UI are two stacked canvases sharing one 4:3
+       * letterbox, so the overlay keeps drawing in 1200x900 room units exactly
+       * as the 2D game does.
+       */
+      #stage {
+        position: relative;
+        line-height: 0;
+      }
+
+      #stage canvas {
+        display: block;
+      }
+
+      #scene {
+        background: #000;
+      }
+
+      /* Transparent: an opaque backing here would hide the whole 3D view. */
+      #ui {
+        position: absolute;
+        top: 0;
+        left: 0;
+        background: transparent;
+        cursor: crosshair;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <canvas id="scene"></canvas>
+      <canvas id="ui"></canvas>
+    </div>
+    <script src="/game3d.js"></script>
+  </body>
+</html>

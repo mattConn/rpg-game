@@ -14,6 +14,17 @@ export interface Projectile {
 export const FIRE_INTERVAL_MS = 1000;
 export const PROJECTILE_SPEED = 480;
 
+/**
+ * Floating damage numbers: how long one lives (seconds) and how fast it drifts
+ * up the room's y axis (px/s).
+ *
+ * Shared because a server ages and retires them while a client fades and places
+ * them, and the two must use the same numbers or a hit either vanishes early or
+ * hangs there fully faded. Every front end and every simulation reads these.
+ */
+export const DAMAGE_NUMBER_LIFETIME = 1.4;
+export const DAMAGE_NUMBER_SPEED = 50;
+
 /** A dagger is done once it reaches the target or leaves the room. */
 export const HIT_RADIUS = 14;
 const OFF_SCREEN_MARGIN = 40;

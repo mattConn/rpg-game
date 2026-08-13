@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Single-Player RPG — Turn-Based</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #111;
+      }
+
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      /*
+       * Two stacked canvases sharing one 4:3 letterbox, exactly as in the
+       * real-time 3D client: WebGL underneath, and the 2D UI drawing in
+       * 1200x900 room units on top.
+       */
+      #stage {
+        position: relative;
+        line-height: 0;
+      }
+
+      #stage canvas {
+        display: block;
+      }
+
+      #scene {
+        background: #000;
+      }
+
+      /* Transparent: an opaque backing here would hide the whole board. */
+      #ui {
+        position: absolute;
+        top: 0;
+        left: 0;
+        background: transparent;
+        cursor: crosshair;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <canvas id="scene"></canvas>
+      <canvas id="ui"></canvas>
+    </div>
+    <script src="/tactics.js"></script>
+  </body>
+</html>

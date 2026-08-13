@@ -1,0 +1,28 @@
+{
+  "name": "singleplayer-rpg-tactics",
+  "version": "1.0.0",
+  "description": "Turn-based 3x3 skirmish on the same 3D models and the same UI as the real-time game.",
+  "type": "module",
+  "scripts": {
+    "build:client": "esbuild src/client/main.ts --bundle --format=iife --sourcemap --alias:three=./node_modules/three --outfile=public/tactics.js",
+    "watch:client": "npm run build:client -- --watch",
+    "start": "npm run build:client && tsx src/server/index.ts",
+    "dev": "npm run build:client && tsx watch src/server/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/static": "^10.1.2",
+    "fastify": "^5.10.0",
+    "three": "^0.185.1",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/three": "^0.185.0",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  }
+}

@@ -20,6 +20,7 @@ import {
 } from "../shared/movement.js";
 import type { GameSnapshot, InputMessage } from "../shared/protocol.js";
 import { ACTIONS } from "../shared/actions.js";
+import { DAMAGE_NUMBER_LIFETIME } from "../shared/combat.js";
 import {
   ACTION_BAR_DEFAULT_ORIGIN,
   drawActionBar,
@@ -31,7 +32,9 @@ import {
 } from "./combat.js";
 import { DEFAULT_CURSOR } from "./cursors.js";
 import { HUD_DEFAULT_ORIGIN, HUD_HEIGHT, HUD_WIDTH, NAME_GAP, NAME_HEIGHT, PORTRAIT_SIZE, drawEnemyHud, drawHud } from "./hud.js";
-import { drawEnemy, drawHealthBar } from "./enemies.js";
+import { drawCorpse, drawEnemy, drawFacingGlyph, drawHealthBar } from "./enemies.js";
+import { drawLootMenu } from "./lootmenu.js";
+import { LOOT_CLOSE_RECT } from "../shared/loot.js";
 import { drawTiles } from "./tilemap.js";
 import { worldToCell } from "../shared/tilemap.js";
 import { fitToViewport } from "./viewport.js";
@@ -46,9 +49,6 @@ const CLOCK_FONT = "13px monospace";
 
 /** One in-game minute = this many ms of `gameElapsedMs`. Display-only. */
 const MS_PER_GAME_MINUTE = 500;
-
-/** Floating damage number lifetime in seconds. */
-const DAMAGE_NUMBER_LIFETIME = 1.0;
 
 // ------------------------------------------------------------------ canvas
 
@@ -255,7 +255,8 @@ function updateCursorStyle() {
   const overResurrect = !!snap?.dead && !!cursor && hits(resurrectRect(), cursor);
 
   let wanted = DEFAULT_CURSOR;
-  if (overResurrect) wanted = "pointer";
+  if (snap?.inspect && cursor && hits(LOOT_CLOSE_RECT, cursor)) wanted = "pointer";
+  else if (overResurrect) wanted = "pointer";
   else if (cursor && hits(autoResRect(), cursor)) wanted = "pointer";
 
   if (wanted !== appliedCursor) {
@@ -299,9 +300,12 @@ function interpolateSnapshot(prev: GameSnapshot, curr: GameSnapshot, t: number, 
     y: p.y + p.vy * elapsed,
   }));
 
-  // Damage numbers: lerp y and age by index.
-  const damageNumbers = curr.damageNumbers.map((cd, i) => {
-    const pd = prev.damageNumbers[i];
+  // Paired by id, not by position: numbers expire out of the middle of the
+  // array while newer ones live on, and matching by index would lerp a survivor
+  // against a different number entirely.
+  const prevDamage = new Map(prev.damageNumbers.map((d) => [d.id, d]));
+  const damageNumbers = curr.damageNumbers.map((cd) => {
+    const pd = prevDamage.get(cd.id);
     if (!pd) return cd;
     return { ...cd, y: lerp(pd.y, cd.y, t), age: lerp(pd.age, cd.age, t) };
   });
@@ -366,10 +370,10 @@ function drawRoom(snap: GameSnapshot) {
   ctx.fillText(roomName(room), 14, WORLD_HEIGHT - 12);
 }
 
-function drawPlayer(x: number, y: number, color: string) {
+function drawPlayer(x: number, y: number, color: string, facing: 1 | -1) {
   ctx.font = GLYPH_FONT;
   ctx.fillStyle = color;
-  ctx.fillText("@", x, y);
+  drawFacingGlyph(ctx, "@", x, y, facing);
 }
 
 function drawLabelIfHovered(x: number, y: number, label: string) {
@@ -532,6 +536,15 @@ function render(snap: GameSnapshot) {
     }
   }
 
+  // Bodies in this room, under the living — a corpse never hides a hellhound.
+  for (const corpse of snap.corpses ?? []) {
+    if (!sameRoom(corpse.room, snap.player.room)) continue;
+    drawCorpse(ctx, corpse, {
+      targeted: corpse.id === snap.targetId,
+      showName: !!cursor && Math.hypot(cursor.x - corpse.x, cursor.y - corpse.y) <= NAME_REVEAL_DISTANCE,
+    });
+  }
+
   // Enemies in this room.
   for (const enemy of snap.enemies) {
     if (!sameRoom(enemy.room, snap.player.room)) continue;
@@ -551,7 +564,7 @@ function render(snap: GameSnapshot) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
-  drawPlayer(snap.player.x, snap.player.y, snap.dead ? "#444444" : snap.player.color);
+  drawPlayer(snap.player.x, snap.player.y, snap.dead ? "#444444" : snap.player.color, snap.player.facing);
   drawLabelIfHovered(snap.player.x, snap.player.y, "(You)");
 
   // Daggers in flight.
@@ -609,6 +622,9 @@ function render(snap: GameSnapshot) {
 
   drawActionBar(ctx, barOrigin, ACTIONS, snap.activeSlot, snap.cooldown, snap.selectedCanAttack);
   drawGameClock(snap.gameElapsedMs);
+
+  // Last, so the inspect menu sits over the overlays as well as the room.
+  if (snap.inspect) drawLootMenu(ctx, snap.inspect, cursor);
 }
 
 // ------------------------------------------------------------------ game loop

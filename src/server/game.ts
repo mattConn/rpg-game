@@ -21,6 +21,8 @@ import {
 } from "../shared/movement.js";
 import { ACTIONS } from "../shared/actions.js";
 import {
+  DAMAGE_NUMBER_LIFETIME,
+  DAMAGE_NUMBER_SPEED,
   FIRE_INTERVAL_MS,
   advanceDagger,
   daggerDone,
@@ -36,6 +38,14 @@ import {
   updateEnemy,
   type Enemy,
 } from "../shared/enemies.js";
+import {
+  LOOT_CLOSE_RECT,
+  LOOT_MENU_RECT,
+  corpseLabel,
+  corpseOf,
+  hitsRect,
+  type Corpse,
+} from "../shared/loot.js";
 import {
   Dungeon,
   segmentHitsWall,
@@ -67,18 +77,21 @@ const RANGED_DAMAGE = 5;
 /** Delay before the single hellhound is replaced after it dies (ms). */
 const RESPAWN_DELAY_MS = 3000;
 
-/** Floating damage number lifetime in seconds. */
-const DAMAGE_NUMBER_LIFETIME = 1.0;
-
-/** How fast damage numbers rise (px/s). */
-const DAMAGE_NUMBER_SPEED = 50;
-
 /** Delay before an auto-resurrect fires (ms), measured from the moment of death. */
 const AUTO_RESURRECT_DELAY_MS = 3000;
+
+/**
+ * How many corpses stay on the floor. Bodies are permanent, but a kill every
+ * few seconds would otherwise grow the snapshot without bound, so the oldest
+ * falls off once the room is this full.
+ */
+const MAX_CORPSES = 32;
 
 // ------------------------------------------------------------------ types
 
 interface DamageNumber {
+  /** Stable across snapshots, so the client can pair one up to interpolate it. */
+  id: string;
   x: number;
   y: number;
   text: string;
@@ -118,6 +131,10 @@ export class GameSimulation {
 
   // Enemies & combat
   readonly enemies: Enemy[] = [];
+  /** Bodies of everything killed, oldest first. Purely a target/loot surface. */
+  readonly corpses: Corpse[] = [];
+  /** Id of the corpse whose loot menu is open, or null when none is. */
+  inspectingId: string | null = null;
   private nextEnemyId = 1;
   targetId: string | null = null;
   attacking = false;
@@ -154,6 +171,8 @@ export class GameSimulation {
   gameElapsedMs = 0;
 
   // Movement
+  /** Which way the player's glyph faces: +1 right, -1 left. Held when idle. */
+  facing: 1 | -1 = 1;
   moveTarget: { x: number; y: number } | null = null;
   pathCells: Array<{ col: number; row: number }> = [];
 
@@ -190,6 +209,12 @@ export class GameSimulation {
   private disengageCombat() {
     this.targetId = null;
     this.endCombat();
+  }
+
+  /** The corpse whose menu is open, or undefined — it may have aged off. */
+  private inspectedCorpse(): Corpse | undefined {
+    if (!this.inspectingId) return undefined;
+    return this.corpses.find((c) => c.id === this.inspectingId && sameRoom(c.room, this.me.room));
   }
 
   /** Nearest enemy in the player's room, or undefined if the room is empty. */
@@ -260,8 +285,11 @@ export class GameSimulation {
     this.cooldownTotal = interval;
   }
 
+  private nextDamageNumberId = 0;
+
   private spawnDamageNumber(x: number, y: number, amount: number, color = "#ffd633") {
     this.damageNumbers.push({
+      id: `dn-${this.nextDamageNumberId++}`,
       x,
       y,
       text: String(amount),
@@ -381,11 +409,25 @@ export class GameSimulation {
     const moved = resolveMove(this.dungeon.get(this.me.room), x0, y0, x1, y1, PLAYER_RADIUS);
     this.me.x = clamp(moved.x, MIN_X, MAX_X);
     this.me.y = clamp(moved.y, MIN_Y, MAX_Y);
+
+    // Face the way we actually travelled. Sub-pixel drift is ignored and pure
+    // vertical movement keeps the previous facing, so the glyph doesn't flicker.
+    const travelled = this.me.x - x0;
+    if (travelled > 0.01) this.facing = 1;
+    else if (travelled < -0.01) this.facing = -1;
   }
 
   // -------------------------------------------------------- input handling
 
   handleInput(msg: InputMessage): void {
+    // The inspect menu is transient: it closes the moment the player does
+    // anything — moves, attacks, swaps weapons, resurrects. Mouse messages are
+    // the exception, handled in their own cases below, since a click has to
+    // tell "on the ✕", "inside the menu" and "outside it" apart.
+    if (this.inspectingId && msg.type !== "click" && msg.type !== "dblclick" && msg.type !== "keyup") {
+      this.inspectingId = null;
+    }
+
     if (msg.type === "resurrect") {
       this.resurrect();
       return;
@@ -434,10 +476,28 @@ export class GameSimulation {
       case "click": {
         const point = { x: msg.x, y: msg.y };
 
+        // An open menu swallows the click: only the ✕ does anything inside it,
+        // and a click anywhere outside dismisses it *without* also walking you
+        // there — one click, one effect.
+        if (this.inspectingId) {
+          if (hitsRect(LOOT_CLOSE_RECT, point) || !hitsRect(LOOT_MENU_RECT, point)) {
+            this.inspectingId = null;
+          }
+          return;
+        }
+
         // Click an enemy: select it, nothing more. Double-click starts the fight.
         const clicked = enemyAtPoint(this.enemies, this.me.room, point);
         if (clicked) {
           this.targetId = clicked.id;
+          return;
+        }
+
+        // Click a corpse: select it too. The dead can be targeted, just not
+        // fought. The living win a tie, since a body can lie under one.
+        const corpse = enemyAtPoint(this.corpses, this.me.room, point);
+        if (corpse) {
+          this.targetId = corpse.id;
           return;
         }
 
@@ -452,8 +512,19 @@ export class GameSimulation {
       // if it's the one we're already fighting. This is the *only* way out of
       // combat — moving no longer breaks it.
       case "dblclick": {
-        const clicked = enemyAtPoint(this.enemies, this.me.room, { x: msg.x, y: msg.y });
-        if (clicked) this.toggleEngage(clicked);
+        const point = { x: msg.x, y: msg.y };
+        const clicked = enemyAtPoint(this.enemies, this.me.room, point);
+        if (clicked) {
+          this.inspectingId = null; // engaging is an attack, so it closes the menu
+          this.toggleEngage(clicked);
+          break;
+        }
+
+        // The same gesture on a body inspects it instead of engaging it: the
+        // dead get looted, not fought.
+        const corpse = enemyAtPoint(this.corpses, this.me.room, point);
+        this.inspectingId = corpse?.id ?? null;
+        if (corpse) this.targetId = corpse.id;
         break;
       }
 
@@ -556,6 +627,9 @@ export class GameSimulation {
           this.stats.health -= ENEMY_DAMAGE;
           this.spawnDamageNumber(this.me.x, this.me.y, ENEMY_DAMAGE, "#ff4444");
           e.lastAttackAt = now;
+          // Taking a hit dismisses the menu: you don't read loot mid-mauling,
+          // and a panel over the middle of the room hides what's chewing on you.
+          this.inspectingId = null;
         }
       }
 
@@ -568,6 +642,7 @@ export class GameSimulation {
         this.disengageCombat();
         this.moveTarget = null;
         this.heldKeys.clear();
+        this.inspectingId = null;
         // Enemies lose interest in the dead player.
         for (const e of this.enemies) {
           e.aggro = false;
@@ -582,15 +657,19 @@ export class GameSimulation {
     // Player movement.
     this.applyMovement(step);
 
-    // Remove dead enemies, count kills, and queue the replacement.
+    // Retire dead enemies to corpses, count kills, and queue the replacement.
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       if (this.enemies[i]!.health <= 0) {
         const dead = this.enemies[i]!;
         if (dead.id === this.targetId) {
+          // Dying clears the target: a kill leaves you holding nothing, and the
+          // body has to be clicked afresh to select it.
           this.targetId = null;
           this.pathCells = [];
           this.endCombat();
         }
+        this.corpses.push(corpseOf(dead));
+        if (this.corpses.length > MAX_CORPSES) this.corpses.shift();
         this.enemies.splice(i, 1);
         this.killCount++;
         this.respawnAt = now + RESPAWN_DELAY_MS;
@@ -619,6 +698,7 @@ export class GameSimulation {
   // -------------------------------------------------------- snapshot
 
   snapshot(): GameSnapshot {
+    const inspected = this.inspectedCorpse();
     return {
       player: {
         x: this.me.x,
@@ -626,6 +706,7 @@ export class GameSimulation {
         color: this.me.color,
         name: this.me.name,
         room: this.me.room,
+        facing: this.facing,
       },
       stats: { ...this.stats },
       enemies: this.enemies.map((e) => ({
@@ -640,7 +721,25 @@ export class GameSimulation {
         maxHealth: e.maxHealth,
         chasing: e.chasing,
         aggro: e.aggro,
+        facing: e.facing,
       })),
+      corpses: this.corpses.map((c) => ({
+        id: c.id,
+        name: c.name,
+        glyph: c.glyph,
+        color: c.color,
+        room: c.room,
+        x: c.x,
+        y: c.y,
+        facing: c.facing,
+      })),
+      inspect: inspected
+        ? {
+            corpseId: inspected.id,
+            title: corpseLabel(inspected),
+            loot: inspected.loot.map((item) => ({ name: item.name })),
+          }
+        : null,
       projectiles: this.projectiles.map((p) => ({
         x: p.x,
         y: p.y,
@@ -648,6 +747,7 @@ export class GameSimulation {
         vy: p.vy,
       })),
       damageNumbers: this.damageNumbers.map((dn) => ({
+        id: dn.id,
         x: dn.x,
         y: dn.y,
         text: dn.text,
