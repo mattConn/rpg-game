@@ -480,13 +480,25 @@ The whole game, in one picture:
 ```
 
 Turns alternate: you take one action, then every *woken* hellhound takes one,
-then it is your turn again. Your action is a **step** (one square, any of the
-eight directions — click a lit tile), an **attack**, or a **wait**. There is no
-free movement and no real-time input at all.
+then it is your turn again. Your action is a **walk**, an **attack**, or a
+**wait**. There is no real-time input at all.
+
+**The grid is fine and invisible.** It began as a literal 3x3 of squares you
+hopped between; each is now `SUBDIVISION` (5) cells across, so a cell is about
+half a pace. Nothing is drawn on the floor and nothing visibly snaps, so a move
+reads as walking rather than as stepping tile to tile — while the simulation
+stays discrete, deterministic and strictly turn-based. The grid became a lattice
+for positions to sit on instead of a board you play on.
+
+Because of that, **every rule is a distance in room pixels, never a count of
+cells** (`MOVE_RANGE`, `MELEE_RANGE`, `AGGRO_RANGE`, `MIN_SEPARATION`). Raising
+`SUBDIVISION` makes placement finer and changes nothing else about the game;
+that is the whole point of it, and it is why the opening positions still land on
+exactly the points they did when the board was three squares wide.
 
 | | |
 |---|---|
-| click a lit square | step onto it |
+| click within a step | walk there — anywhere in reach, not to a square |
 | click a hellhound | mark it; click it again to unmark |
 | **1** / **2**, or a bar square | choose sword / dagger. **Costs nothing** |
 | **Space**, or the Attack button | swing the chosen weapon at the mark |
@@ -501,6 +513,19 @@ hellhound has 24 HP and hits for 7, the player has 100 and hits for 8 (sword) or
 5 (dagger). Two hounds biting take roughly a third of you per round and a hound
 takes three sword blows to kill, so standing and trading with both loses. That
 arithmetic is the reason the arch exists.
+
+**With no grid drawn, the floor has to say what the grid used to** — and it does
+it with **two marks, both under the cursor rather than under the player**: a
+small white **footfall ring** at the cell a click would actually land on, which
+goes dark red when that cell is out of `MOVE_RANGE` or has somebody in it, and an
+amber **ring at the arch**. The snapshot still carries the radius (`moveRange`),
+so what is allowed and what the ring says are the same number — but it is
+answered one click at a time. A blue **movement disc** around the player showed
+the whole of it at once and was removed: a pool of light following you around the
+board all game read as something painted on the floor rather than as a statement
+about this turn. The escape mark is a ring rather than a filled patch for the
+same reason — a pale wash on stone reads as a stain, a rim reads as somewhere to
+stand.
 
 **It is the 3D client's renderer with different rules under it.** The models,
 every animation rig, `applyCues`, `interpolateSnapshot` and the entire 2D overlay
@@ -522,19 +547,33 @@ turn-based additions (`phase`, `round`, `playerCell`, `legalMoves`, `escapeCell`
   what leaves the imported models, HUD and damage-number projection unscaled —
   the 3D bridge still just divides by 30.
   - `stage.ts` derives the board extent, the camera's framing and the fog as
-    **multiples of `BOARD_W`**, not in fixed units, so resizing a square carries
+    **multiples of `BOARD_W`**, not in fixed units, so resizing the board carries
     the whole scene with it. Hard-coded distances there would quietly leave the
-    view halfway across the dungeon the first time `TILE_PX` changed.
+    view halfway across the dungeon the first time the board changed.
 - **Real time only animates; it never decides.** A turn is committed the instant
   it is asked for — the actor's *cell* changes immediately — and `busyUntil` then
   holds the board still while the slide or the swing plays out. Death and escape
   are the deliberate exceptions, resolved after the animation, so a hellhound
   dies at the end of the blow that killed it.
-- **Reach is horizontal and diagonal, never vertical** (`canMelee`: `|dcol| === 1
-  && |drow| <= 1`). It is symmetric, so it gates the bite exactly as it gates the
-  sword, and `chooseHoundStep` plans the approach with the same function — which
-  is why the pack moves into the column *beside* you rather than straight at you.
-  Daggers keep the real-time dead zone: in sword reach is too close to throw.
+- **Reach is horizontal and diagonal, never vertical** — `canReach`, which is
+  `|dx| >= |dy|` and within `MELEE_RANGE`: a quarter-turn cone opening left and
+  right. On the old 3x3 this was "one column across, at most one row up or
+  down"; the cone is exactly that set of squares generalised to a fine grid and
+  nothing more. It is symmetric, so it gates the bite as it gates the sword, and
+  the pack plans its approach with the same test — `approachPoints` is a ring
+  around the player filtered through `canReach`, which is *why* hounds come at
+  you from the sides rather than from directly above or below. Daggers keep the
+  real-time dead zone: in sword reach is too close to throw.
+- **Two hounds flank rather than queue** because each picks the approach point
+  nearest *itself*, so whichever side it is already on is the side it commits
+  to, and `MIN_SEPARATION` keeps the second off the first one's spot.
+- **Bodies never block, but you cannot stop inside one.** Walking *through*
+  another actor is fine — nothing but walls has ever collided in this game — and
+  a destination that lands in someone is nudged to `nearestClearCell`, which on
+  a grid this fine is half a pace away and imperceptible.
+- **A walk's duration is proportional to the ground covered** (`walkTo`), floored
+  at 120ms. A constant looked right when every move was exactly one square; now
+  that you can stop anywhere, it would make a half-pace adjustment crawl.
 - **Aggro is per-hound, and permanent.** A hellhound wakes when the player comes
   within a square of it (`isAdjacent`, checked every tick, so it fires whichever
   side closed the gap) or when a thrown dagger finds it — **only** it; the other
@@ -571,8 +610,8 @@ turn-based additions (`phase`, `round`, `playerCell`, `legalMoves`, `escapeCell`
   That turn, its lit eyes and its head-down hunting posture are the *whole* tell
   that a hound has woken — there is deliberately **no marker on the floor for
   aggro**. A ring under woken hounds was tried and removed: the floor already
-  carries the legal-move tiles, the escape square and the target ring, and a
-  fourth thing competing for it read as clutter rather than as information.
+  carries the footfall ring, the escape ring and the target ring, and a fourth
+  thing competing for it read as clutter rather than as information.
 - **Stepping onto `ESCAPE_CELL` does not hand over the turn** — you are through
   the arch before they can answer. Every other action ends the turn.
 - **Choosing an attack and making one are separate acts.** The bar's squares and
@@ -602,9 +641,12 @@ turn-based additions (`phase`, `round`, `playerCell`, `legalMoves`, `escapeCell`
   vignette because from behind the shoulder a bite is easy to miss; here the
   whole board is on screen and the log names what hit you, so it only got in the
   way of reading the board.
-- **The grid is built into the floor** as nine raised flagstones — the opposite
-  call to the real-time room, where drawing the tile grid would advertise a
-  structure that pixel-based movement doesn't have. Here the grid *is* the game.
+- **Nothing is drawn on the floor.** The board was once nine raised flagstones,
+  back when the grid *was* the game and you hopped between squares. Now that a
+  cell is a fraction of a pace and you stop where you like, ruling the floor
+  would advertise a lattice the player never has to think about — the same
+  reason the real-time room leaves its tile grid undrawn. A single slightly
+  lighter slab marks the fighting ground so the arena still reads as a place.
 - Same testing convention again: the rules are pure and the simulation runs
   headless, so drive `TacticsGame` with a throwaway `node:assert` script under
   `tsx` and delete it. Typecheck and build **in `rpg-tactics/`**.

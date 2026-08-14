@@ -27,12 +27,8 @@ import {
   ARENA_X,
   ARENA_Y,
   ESCAPE_CELL,
-  GRID_COLS,
-  GRID_ROWS,
-  TILE_PX,
-  allCells,
+  SQUARE_PX,
   cellCenter,
-  type Cell,
 } from "../shared/tactics.js";
 
 // -------------------------------------------------------------- board in 3D
@@ -42,7 +38,8 @@ const BOARD_X0 = toX(ARENA_X);
 const BOARD_Z0 = toZ(ARENA_Y);
 const BOARD_W = toX(ARENA_W);
 const BOARD_D = toZ(ARENA_H);
-const TILE = toX(TILE_PX);
+/** One of the board's original squares, in scene units — the scale of a stride. */
+const STRIDE = toX(SQUARE_PX);
 
 const BOARD_CX = BOARD_X0 + BOARD_W / 2;
 const BOARD_CZ = BOARD_Z0 + BOARD_D / 2;
@@ -78,12 +75,6 @@ const PAN_SPEED = 0.03;
 /** How far the pan target may stray from the board's centre. */
 const PAN_LIMIT = BOARD_W * 0.7;
 
-export interface TileHighlight {
-  cell: Cell;
-  color: number;
-  opacity: number;
-}
-
 export interface Stage {
   readonly scene: THREE.Scene;
   readonly pickables: THREE.Object3D[];
@@ -98,7 +89,8 @@ export interface Stage {
   groundAt(ndcX: number, ndcY: number): { x: number; y: number } | null;
   pickAt(ndcX: number, ndcY: number): THREE.Object3D | null;
   project(point: THREE.Vector3): { x: number; y: number };
-  setTileHighlights(highlights: readonly TileHighlight[]): void;
+  /** Where a click would put them, and whether it is allowed. */
+  setDestination(px: number | null, py: number | null, allowed: boolean): void;
   setTargetRing(px: number | null, py: number | null, color: number): void;
   animateScenery(elapsed: number): void;
   render(): void;
@@ -179,27 +171,28 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   apron.position.set(BOARD_CX, -0.06, BOARD_CZ);
   scene.add(apron);
 
-  // ------------------------------------------------------------- flagstones
-
-  // Nine raised slabs with grout between them. Unlike the real-time game — where
-  // drawing the tile grid would advertise a structure the pixel-based movement
-  // doesn't have — the grid here *is* the game, so it is built into the floor
-  // rather than merely highlighted.
-  const GROUT = 0.18;
-  const slabLight = new THREE.MeshLambertMaterial({ color: 0x54545f, flatShading: true });
-  const slabDark = new THREE.MeshLambertMaterial({ color: 0x494954, flatShading: true });
-
-  for (const cell of allCells()) {
-    const slab = new THREE.Mesh(
-      new THREE.BoxGeometry(TILE - GROUT, 0.12, TILE - GROUT),
-      (cell.col + cell.row) % 2 === 0 ? slabLight : slabDark,
-    );
-    const centre = cellCenter(cell);
-    slab.position.set(toX(centre.x), 0.06, toZ(centre.y));
-    slab.receiveShadow = true;
-    slab.castShadow = false;
-    scene.add(slab);
-  }
+  // ------------------------------------------------------------- the board
+  //
+  // Nothing is drawn on it. The board used to be nine raised flagstones,
+  // because back then the grid *was* the game and you hopped from one square to
+  // the next. Now that a cell is a fraction of a pace and you stop wherever you
+  // like, ruling the floor would advertise a lattice the player never has to
+  // think about — the same reason the real-time room leaves its tile grid
+  // undrawn. Where you may go isn't drawn either — a disc of reachable ground
+  // around the player was tried and removed: it read as a thing painted on the
+  // floor rather than as a statement about this turn, and it followed you around
+  // the board all game. The footfall ring under the cursor carries the range
+  // instead, one click at a time.
+  //
+  // A slightly lighter slab marks the fighting ground so the arena still reads
+  // as a place, with no lines on it.
+  const boardSlab = new THREE.Mesh(
+    new THREE.BoxGeometry(BOARD_W, 0.1, BOARD_D),
+    new THREE.MeshLambertMaterial({ color: 0x4e4e59, flatShading: true }),
+  );
+  boardSlab.position.set(BOARD_CX, 0.05, BOARD_CZ);
+  boardSlab.receiveShadow = true;
+  scene.add(boardSlab);
 
   // -------------------------------------------------------------------- walls
 
@@ -231,7 +224,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   // The south wall is the one with the way out in it, so it is built in two
   // stretches with a gap where the escape column runs.
   const archCentre = toX(cellCenter(ESCAPE_CELL).x);
-  const ARCH_WIDTH = TILE * 0.66;
+  const ARCH_WIDTH = STRIDE * 0.66;
   const archLeft = archCentre - ARCH_WIDTH / 2;
   const archRight = archCentre + ARCH_WIDTH / 2;
   const southZ = south + WALL_T / 2;
@@ -271,6 +264,21 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   archGlow.position.set(archCentre, (WALL_H - 0.2) / 2, southZ + WALL_T / 2 + 0.02);
   scene.add(archGlow);
 
+  // The way out used to be a lit tile on a grid. With the grid gone it needs a
+  // mark of its own, or the arch is only visible from angles that show the wall.
+  // A ring rather than a filled disc: a pale wash on stone reads as a stain,
+  // while a rim reads as somewhere to stand.
+  const escapeRadius = toX(SQUARE_PX) * 0.42;
+  const escapeGeometry = new THREE.RingGeometry(escapeRadius * 0.86, escapeRadius, 48);
+  escapeGeometry.rotateX(-Math.PI / 2);
+  const escapeGlow = new THREE.Mesh(
+    escapeGeometry,
+    new THREE.MeshBasicMaterial({ color: 0xffc478, transparent: true, opacity: 0.6, depthWrite: false }),
+  );
+  const escapeAt = cellCenter(ESCAPE_CELL);
+  escapeGlow.position.set(toX(escapeAt.x), 0.11, toZ(escapeAt.y));
+  scene.add(escapeGlow);
+
   const archLight = new THREE.PointLight(0xffb45a, 5, BOARD_W, 2);
   archLight.position.set(archCentre, 1.6, southZ - 0.6);
   scene.add(archLight);
@@ -301,24 +309,23 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   // ------------------------------------------------------------- highlights
 
-  // One quad per square, reused every frame. Nine of them exist for the life of
-  // the page; a frame just decides what colour each is and whether it shows.
-  const highlightMeshes = new Map<string, THREE.Mesh>();
-  for (const cell of allCells()) {
-    const geometry = new THREE.PlaneGeometry(TILE - GROUT - 0.1, TILE - GROUT - 0.1);
-    geometry.rotateX(-Math.PI / 2);
-    const quad = new THREE.Mesh(
-      geometry,
-      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthWrite: false }),
-    );
-    const centre = cellCenter(cell);
-    quad.position.set(toX(centre.x), 0.13, toZ(centre.y));
-    quad.visible = false;
-    scene.add(quad);
-    highlightMeshes.set(`${cell.col},${cell.row}`, quad);
-  }
+  /**
+   * Where the cursor would put you. Small, so it reads as a footfall.
+   *
+   * With no disc around the player, this is the whole of the answer to "where
+   * can I go": it sits on the cell a click would land on, and goes dark red when
+   * that cell is out of this turn's reach or has somebody standing in it.
+   */
+  const destinationGeometry = new THREE.RingGeometry(STRIDE * 0.12, STRIDE * 0.17, 24);
+  destinationGeometry.rotateX(-Math.PI / 2);
+  const destinationMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.85, depthWrite: false,
+  });
+  const destination = new THREE.Mesh(destinationGeometry, destinationMaterial);
+  destination.visible = false;
+  scene.add(destination);
 
-  const targetRingGeometry = new THREE.RingGeometry(TILE * 0.31, TILE * 0.38, 32);
+  const targetRingGeometry = new THREE.RingGeometry(STRIDE * 0.31, STRIDE * 0.38, 32);
   targetRingGeometry.rotateX(-Math.PI / 2);
   const targetRingMaterial = new THREE.MeshBasicMaterial({
     color: 0xffd633, transparent: true, opacity: 0.9, depthWrite: false,
@@ -438,16 +445,12 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       };
     },
 
-    setTileHighlights(highlights) {
-      for (const quad of highlightMeshes.values()) quad.visible = false;
-      for (const highlight of highlights) {
-        const quad = highlightMeshes.get(`${highlight.cell.col},${highlight.cell.row}`);
-        if (!quad) continue;
-        quad.visible = true;
-        const material = quad.material as THREE.MeshBasicMaterial;
-        material.color.setHex(highlight.color);
-        material.opacity = highlight.opacity;
-      }
+    setDestination(px, py, allowed) {
+      destination.visible = px !== null && py !== null;
+      if (px === null || py === null) return;
+      destinationMaterial.color.setHex(allowed ? 0xffffff : 0x8a4040);
+      destinationMaterial.opacity = allowed ? 0.85 : 0.45;
+      destination.position.set(toX(px), 0.13, toZ(py));
     },
 
     setTargetRing(px, py, color) {
@@ -471,6 +474,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       });
       // The way out breathes, so it reads as an exit rather than as decoration.
       const pulse = 0.42 + Math.sin(elapsed * 2.2) * 0.1;
+      (escapeGlow.material as THREE.MeshBasicMaterial).opacity = 0.55 + Math.sin(elapsed * 2.2) * 0.18;
       (archGlow.material as THREE.MeshBasicMaterial).opacity = pulse;
       archLight.intensity = 4.5 + Math.sin(elapsed * 2.2) * 1.1;
     },
@@ -482,4 +486,4 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 }
 
 /** Board dimensions the client's own code needs — kept with the board itself. */
-export const BOARD = { x0: BOARD_X0, z0: BOARD_Z0, w: BOARD_W, d: BOARD_D, tile: TILE, cols: GRID_COLS, rows: GRID_ROWS };
+export const BOARD = { x0: BOARD_X0, z0: BOARD_Z0, w: BOARD_W, d: BOARD_D, stride: STRIDE };

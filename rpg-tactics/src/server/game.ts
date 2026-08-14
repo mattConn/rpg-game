@@ -36,16 +36,21 @@ import {
 } from "../../../src/shared/loot.js";
 import type { Point } from "../../../src/shared/movement.js";
 import {
+  AGGRO_RANGE,
   ARENA_ROOM,
   ATTACK_MS,
   AUTO_RESTART_DELAY_MS,
   ENEMY_ACTION_MS,
   ESCAPE_CELL,
+  ESCAPE_RADIUS,
   HOUND_DAMAGE,
   HOUND_MAX_HEALTH,
   HOUND_STARTS,
   LOG_LINES,
   MELEE_DAMAGE,
+  MELEE_RANGE,
+  MIN_SEPARATION,
+  MOVE_RANGE,
   PLAYER_MAX_HEALTH,
   PLAYER_MAX_MANA,
   PLAYER_START,
@@ -53,15 +58,19 @@ import {
   STEP_MS,
   THROW_RECOVER_MS,
   TURN_GAP_MS,
-  canMelee,
+  approachPoints,
+  canReach,
   cellAtPoint,
   cellCenter,
+  clampToGrid,
+  distance,
   facingToward,
-  isAdjacent,
+  inGrid,
   isOver,
-  neighbors,
   sameCell,
-  stepDistance,
+  stepToward,
+  withinAggro,
+  withinMove,
   type Cell,
   type Phase,
   type TacticsInput,
@@ -312,9 +321,10 @@ export class TacticsGame {
    * toward it, or its step toward you.
    */
   private wakeAdjacent(): void {
+    const player = this.playerAt();
     for (const enemy of this.enemies) {
       if (enemy.aggro) continue;
-      if (isAdjacent(enemy.cell, this.player.cell)) this.wake(enemy);
+      if (withinAggro(this.at(enemy), player)) this.wake(enemy);
     }
   }
 
@@ -326,7 +336,7 @@ export class TacticsGame {
   private faceThePlayer(): void {
     for (const enemy of this.enemies) {
       if (!enemy.aggro || enemy.slide) continue;
-      enemy.facing = facingToward(enemy.cell, this.player.cell, enemy.facing);
+      enemy.facing = facingToward(this.at(enemy), this.playerAt(), enemy.facing);
     }
   }
 
@@ -395,8 +405,8 @@ export class TacticsGame {
     const enemy = this.enemies.find((e) => e.id === id);
     if (!enemy) return; // killed before its turn came round
 
-    if (canMelee(enemy.cell, this.player.cell)) {
-      enemy.facing = facingToward(enemy.cell, this.player.cell, enemy.facing);
+    if (canReach(this.at(enemy), this.playerAt())) {
+      enemy.facing = facingToward(this.at(enemy), this.playerAt(), enemy.facing);
       // Name the striker outright. Every hound that bites this round gets its
       // own lunge because the client is told which one, not left to work it out.
       this.strike = { enemyId: enemy.id, seq: ++this.strikeSeq };
@@ -409,55 +419,83 @@ export class TacticsGame {
       return;
     }
 
-    const step = this.chooseHoundStep(enemy);
-    if (!step) {
+    const destination = this.chooseHoundDestination(enemy);
+    if (!destination) {
       this.say(`The ${enemy.name.toLowerCase()} circles, hemmed in.`);
       this.busyUntil = now + TURN_GAP_MS;
       return;
     }
 
-    enemy.facing = facingToward(enemy.cell, step, enemy.facing);
-    this.stepTo(enemy, step, now);
+    enemy.facing = facingToward(this.at(enemy), cellCenter(destination), enemy.facing);
+    const travel = this.walkTo(enemy, destination, now);
     this.say(`The ${enemy.name.toLowerCase()} closes.`);
-    this.busyUntil = now + STEP_MS + TURN_GAP_MS;
+    this.busyUntil = now + travel + TURN_GAP_MS;
   }
 
   /**
-   * Where a hellhound puts its one step. It wants a square it can *bite* from
-   * next turn, which — because `canMelee` refuses to reach straight up or down —
-   * means the column beside you rather than simply the nearest square. Falling
-   * short of that, it takes the step that shortens the gap most.
+   * Where a hellhound walks. It aims for a spot it could *bite* from — one of
+   * the ring of points around the player that its own reach rule allows, which
+   * is why the pack comes at you from the sides rather than from directly above
+   * or below — and covers as much of the way there as a turn allows.
    *
-   * Returns null when every neighbour is taken and standing still is as good as
-   * anything, which on a board this small happens more than you would think.
+   * Picking the approach point nearest to *itself* is what makes two hounds
+   * flank instead of queueing: whichever side each is already on is the side it
+   * commits to, and the separation check keeps the second one off the first
+   * one's spot.
+   *
+   * Returns null when it is already as close as it can usefully get.
    */
-  private chooseHoundStep(enemy: Hound): Cell | null {
-    const goal = this.player.cell;
-    const score = (cell: Cell) =>
-      (canMelee(cell, goal) ? 0 : 100) +
-      stepDistance(cell, goal) * 10 +
-      // Deterministic tie-break, so a hound never dithers between two equals.
-      (cell.col * 3 + cell.row) * 0.01;
+  private chooseHoundDestination(enemy: Hound): Cell | null {
+    const from = this.at(enemy);
+    const player = this.playerAt();
 
-    let best: Cell | null = null;
-    let bestScore = score(enemy.cell);
+    const spots = approachPoints(player)
+      .filter((spot) => this.isClear(spot, enemy.id))
+      .sort((a, b) => distance(from, a) - distance(from, b));
 
-    for (const candidate of neighbors(enemy.cell)) {
-      if (!this.isFree(candidate, enemy.id)) continue;
-      const value = score(candidate);
-      if (value < bestScore) {
-        bestScore = value;
-        best = candidate;
-      }
-    }
+    const goal = spots[0];
+    if (!goal) return null;
 
-    return best;
+    // As far along as this turn allows, then snapped to the nearest cell that
+    // isn't inside someone. Walking *through* another body is fine — nothing
+    // but the walls has ever collided in this game — but stopping in one isn't.
+    const wanted = stepToward(from, goal, MOVE_RANGE);
+    const landing = this.nearestClearCell(wanted, enemy.id);
+    if (!landing) return null;
+    return sameCell(landing, enemy.cell) ? null : landing;
   }
 
-  /** Nothing living stands here — bodies do not block, they never did. */
-  private isFree(cell: Cell, ignoreId?: string): boolean {
-    if (sameCell(cell, this.player.cell)) return false;
-    return !this.enemies.some((e) => e.id !== ignoreId && sameCell(e.cell, cell));
+  /** Nothing living is standing here. Bodies never blocked anything. */
+  private isClear(point: Point, ignoreId?: string): boolean {
+    if (this.player.id !== ignoreId && distance(point, this.playerAt()) < MIN_SEPARATION) return false;
+    return !this.enemies.some(
+      (e) => e.id !== ignoreId && distance(point, this.at(e)) < MIN_SEPARATION,
+    );
+  }
+
+  /**
+   * The closest cell to a point that nobody is standing in, searched outward.
+   * A fine grid means the fallback is usually half a pace away, so being nudged
+   * off an occupied spot is not something the player can feel.
+   */
+  private nearestClearCell(point: Point, ignoreId?: string): Cell | null {
+    const start = clampToGrid(point);
+    for (let radius = 0; radius <= 6; radius++) {
+      let best: Cell | null = null;
+      let bestGap = Infinity;
+      for (let dr = -radius; dr <= radius; dr++) {
+        for (let dc = -radius; dc <= radius; dc++) {
+          if (Math.max(Math.abs(dc), Math.abs(dr)) !== radius) continue;
+          const cell = { col: start.col + dc, row: start.row + dr };
+          if (!inGrid(cell)) continue;
+          if (!this.isClear(cellCenter(cell), ignoreId)) continue;
+          const gap = distance(point, cellCenter(cell));
+          if (gap < bestGap) { bestGap = gap; best = cell; }
+        }
+      }
+      if (best) return best;
+    }
+    return null;
   }
 
   // ----------------------------------------------------------- player turns
@@ -501,26 +539,34 @@ export class TacticsGame {
     return this.phase === "player" && now >= this.busyUntil;
   }
 
-  /** Squares the player may step onto this turn. */
-  private legalMoves(now: number): Cell[] {
-    if (!this.canAct(now)) return [];
-    return neighbors(this.player.cell).filter((cell) => this.isFree(cell));
+  /**
+   * Whether the player may walk to a cell: on the board, inside this turn's
+   * allowance, and not inside somebody. With no grid drawn, the disc the client
+   * paints is this predicate made visible, so the two must agree exactly — which
+   * is why the radius lives in `shared/` and both sides read it.
+   */
+  private canWalkTo(cell: Cell, now: number): boolean {
+    if (!this.canAct(now)) return false;
+    if (!inGrid(cell)) return false;
+    const to = cellCenter(cell);
+    if (!withinMove(this.playerAt(), to)) return false;
+    return this.isClear(to, this.player.id);
   }
 
   private move(cell: Cell, now: number): void {
-    this.player.facing = facingToward(this.player.cell, cell, this.player.facing);
-    this.stepTo(this.player, cell, now);
+    this.player.facing = facingToward(this.playerAt(), cellCenter(cell), this.player.facing);
+    const travel = this.walkTo(this.player, cell, now);
 
-    if (sameCell(cell, ESCAPE_CELL)) {
+    if (distance(cellCenter(cell), cellCenter(ESCAPE_CELL)) <= ESCAPE_RADIUS) {
       // No turn is handed over: you are through the arch before they can answer.
       this.pendingEscape = true;
-      this.busyUntil = now + STEP_MS;
+      this.busyUntil = now + travel;
       this.say("You break for the arch.");
       return;
     }
 
-    this.busyUntil = now + STEP_MS + TURN_GAP_MS;
-    this.endPlayerTurn(now, STEP_MS + TURN_GAP_MS, null);
+    this.busyUntil = now + travel + TURN_GAP_MS;
+    this.endPlayerTurn(now, travel + TURN_GAP_MS, null);
   }
 
   private wait(now: number): void {
@@ -550,8 +596,8 @@ export class TacticsGame {
 
     const action = ACTIONS[this.activeSlot];
     const target = this.livingTarget();
-    const reach = target ? canMelee(this.player.cell, target.cell) : false;
-    if (target) this.player.facing = facingToward(this.player.cell, target.cell, this.player.facing);
+    const reach = target ? canReach(this.playerAt(), this.at(target)) : false;
+    if (target) this.player.facing = facingToward(this.playerAt(), this.at(target), this.player.facing);
 
     const spend = (actionMs: number) => {
       this.busyUntil = now + actionMs;
@@ -592,7 +638,7 @@ export class TacticsGame {
     this.wake(target);
 
     const from = { x: this.player.x, y: this.player.y };
-    const to = cellCenter(target.cell);
+    const to = this.at(target);
     this.thrown = {
       projectile: spawnDagger(from, to),
       target: to,
@@ -709,10 +755,7 @@ export class TacticsGame {
       return;
     }
 
-    const cell = cellAtPoint(point);
-    if (!cell) return;
-
-    const enemy = this.enemies.find((e) => sameCell(e.cell, cell));
+    const enemy = this.enemyNear(point);
     if (enemy) {
       // Clicking the mark drops it. One gesture both ways, so there is always a
       // way to end up holding nothing without hunting for a second one.
@@ -720,31 +763,50 @@ export class TacticsGame {
       return;
     }
 
-    // Walking somewhere beats selecting what is lying there: on a board this
-    // small, a body under your feet must never cost you the step. Double-click
-    // is how you get at a corpse, and it works wherever the body is.
-    if (this.canAct(now) && this.legalMoves(now).some((c) => sameCell(c, cell))) {
+    // Walking somewhere beats selecting what is lying there: a body underfoot
+    // must never cost you the move. Double-click is how you get at a corpse.
+    //
+    const cell = cellAtPoint(point);
+    if (cell && this.canWalkTo(cell, now)) {
       this.move(cell, now);
       return;
     }
 
-    const corpse = this.corpseAt(cell);
+    const corpse = this.corpseNear(point);
     if (corpse) this.targetId = corpse.id;
+  }
+
+  /** Pick radius around a body — the same half-body the separation rule uses. */
+  private enemyNear(point: Point): Hound | null {
+    let best: Hound | null = null;
+    let bestGap = MIN_SEPARATION;
+    for (const enemy of this.enemies) {
+      const gap = distance(point, this.at(enemy));
+      if (gap < bestGap) { bestGap = gap; best = enemy; }
+    }
+    return best;
+  }
+
+  private corpseNear(point: Point): Corpse | null {
+    let best: Corpse | null = null;
+    let bestGap = MIN_SEPARATION;
+    for (const corpse of this.corpses) {
+      const gap = distance(point, { x: corpse.x, y: corpse.y });
+      if (gap < bestGap) { bestGap = gap; best = corpse; }
+    }
+    return best;
   }
 
   private onDoubleClick(point: Point): void {
     if (this.inspectingId) return; // the leading click already handled the panel
 
-    const cell = cellAtPoint(point);
-    if (!cell) return;
-
-    const enemy = this.enemies.find((e) => sameCell(e.cell, cell));
+    const enemy = this.enemyNear(point);
     if (enemy) {
       this.targetId = enemy.id;
       return;
     }
 
-    const corpse = this.corpseAt(cell);
+    const corpse = this.corpseNear(point);
     if (corpse) {
       this.targetId = corpse.id;
       this.inspectingId = corpse.id;
@@ -764,25 +826,35 @@ export class TacticsGame {
 
   // ---------------------------------------------------------------- helpers
 
-  private stepTo(actor: Actor, cell: Cell, now: number): void {
+  /**
+   * Commit a walk and start playing it out. Returns how long it will take.
+   *
+   * The duration is proportional to the ground covered rather than fixed, so a
+   * half-pace adjustment doesn't take as long as a full stride. On the old
+   * board every move was exactly one square and a constant looked fine; now that
+   * you can stop anywhere, a constant would make short moves crawl.
+   */
+  private walkTo(actor: Actor, cell: Cell, now: number): number {
+    const to = cellCenter(cell);
+    const travelled = distance({ x: actor.x, y: actor.y }, to);
+    const ms = Math.max(120, STEP_MS * (travelled / MOVE_RANGE));
+
     actor.cell = { ...cell };
-    actor.slide = {
-      from: { x: actor.x, y: actor.y },
-      to: cellCenter(cell),
-      startAt: now,
-      endAt: now + STEP_MS,
-    };
+    actor.slide = { from: { x: actor.x, y: actor.y }, to, startAt: now, endAt: now + ms };
+    return ms;
+  }
+
+  /** An actor's committed position — where the rules say it is, mid-walk or not. */
+  private at(actor: Actor): Point {
+    return cellCenter(actor.cell);
+  }
+
+  private playerAt(): Point {
+    return this.at(this.player);
   }
 
   private livingTarget(): Hound | null {
     return this.enemies.find((e) => e.id === this.targetId) ?? null;
-  }
-
-  private corpseAt(cell: Cell): Corpse | null {
-    return this.corpses.find((c) => {
-      const at = cellAtPoint({ x: c.x, y: c.y });
-      return at !== null && sameCell(at, cell);
-    }) ?? null;
   }
 
   private nextDamageNumberId = 0;
@@ -804,7 +876,7 @@ export class TacticsGame {
     if (!this.canAct(now)) return false;
     const target = this.livingTarget();
     if (!target) return false;
-    const reach = canMelee(this.player.cell, target.cell);
+    const reach = canReach(this.playerAt(), this.at(target));
     return ACTIONS[this.activeSlot]?.kind === "melee" ? reach : !reach;
   }
 
@@ -827,10 +899,10 @@ export class TacticsGame {
     const target = this.livingTarget();
     if (!target) {
       return this.anyAwake()
-        ? "Click a hellhound to mark it, or a lit square to move."
-        : "Nothing has noticed you. Mark one and throw, or step within a square.";
+        ? "Click a hellhound to mark it, or anywhere in the ring to move."
+        : "Nothing has noticed you. Mark one and throw, or walk into their reach.";
     }
-    if (canMelee(this.player.cell, target.cell)) {
+    if (canReach(this.playerAt(), this.at(target))) {
       return "In reach — 1 for the sword, Space to swing. Too close to throw.";
     }
     return "Out of reach — 2 for a dagger, Space to throw. Or step closer.";
@@ -934,9 +1006,13 @@ export class TacticsGame {
       // ------------------------------------------------------ turn-based only
       phase: this.phase,
       round: this.round,
-      playerCell: { ...this.player.cell },
-      legalMoves: this.legalMoves(now),
-      escapeCell: { ...ESCAPE_CELL },
+      // With nothing drawn on the floor, this disc is the only thing telling the
+      // player where they may go — so it is the rule itself, sent over.
+      moveRange: this.canAct(now) ? MOVE_RANGE : 0,
+      moveFrom: this.playerAt(),
+      escapePoint: cellCenter(ESCAPE_CELL),
+      escapeRadius: ESCAPE_RADIUS,
+      meleeRange: MELEE_RANGE,
       aggro: this.anyAwake(),
       strike: this.strike ? { ...this.strike } : null,
       log: this.log.slice(-LOG_LINES),

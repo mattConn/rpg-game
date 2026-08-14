@@ -32,14 +32,14 @@ import { interpolateSnapshot } from "../../../rpg-3d/src/client/playback.js";
 import { toX, toZ } from "../../../rpg-3d/src/client/world.js";
 import {
   cellAtPoint,
+  cellCenter,
+  distance,
   isOver,
-  sameCell,
-  type Cell,
   type TacticsInput,
   type TacticsSnapshot,
 } from "../shared/tactics.js";
 import { attackRect, drawTacticsChrome, hitsButton, waitRect } from "./chrome.js";
-import { createStage, type TileHighlight } from "./stage.js";
+import { createStage } from "./stage.js";
 
 // ------------------------------------------------------------------ canvases
 
@@ -225,7 +225,6 @@ window.addEventListener("mouseup", () => {
 /** Cursor in overlay units (UI hit-testing) and on the floor (world reveals). */
 let uiCursor: Point | null = null;
 let groundCursor: Point | null = null;
-let hoverCell: Cell | null = null;
 
 uiCanvas.addEventListener("mousemove", (event) => {
   if (dragButton !== null) {
@@ -243,13 +242,11 @@ uiCanvas.addEventListener("mousemove", (event) => {
   uiCursor = toOverlay(event);
   const ndc = toNdc(event);
   groundCursor = stage.groundAt(ndc.x, ndc.y);
-  hoverCell = groundCursor ? cellAtPoint(groundCursor) : null;
 });
 
 uiCanvas.addEventListener("mouseleave", () => {
   uiCursor = null;
   groundCursor = null;
-  hoverCell = null;
 });
 
 uiCanvas.addEventListener("wheel", (event) => {
@@ -339,34 +336,23 @@ function updateCursorStyle(snap: TacticsSnapshot) {
 
 // ------------------------------------------------------------- board paint
 
-const MOVE_COLOR = 0x7fd0ff;
-const ESCAPE_COLOR = 0xffb45a;
-
 /**
- * Which squares light up. Precedence runs escape → legal step → hover, so the
- * square under the cursor always reports the strongest thing true of it, and the
- * way out stays marked even on a turn you can't reach it.
+ * Where a click would actually put you, snapped to the invisible grid. Sent to
+ * the server as a plain room point — it re-derives the same cell — but resolved
+ * here too so the marker under the cursor is exactly where you will end up
+ * rather than approximately.
  */
-function tileHighlights(snap: TacticsSnapshot, elapsed: number): TileHighlight[] {
-  const byCell = new Map<string, TileHighlight>();
-  const put = (cell: Cell, color: number, opacity: number) =>
-    byCell.set(`${cell.col},${cell.row}`, { cell, color, opacity });
+function hoverDestination(snap: TacticsSnapshot): { at: Point; allowed: boolean } | null {
+  if (!groundCursor || isOver(snap.phase) || snap.moveRange <= 0) return null;
+  const cell = cellAtPoint(groundCursor);
+  if (!cell) return null;
 
-  put(snap.escapeCell, ESCAPE_COLOR, 0.12 + Math.sin(elapsed * 2.2) * 0.04);
-
-  for (const cell of snap.legalMoves) {
-    const escape = sameCell(cell, snap.escapeCell);
-    put(cell, escape ? ESCAPE_COLOR : MOVE_COLOR, escape ? 0.34 : 0.17);
-  }
-
-  if (hoverCell) {
-    const existing = byCell.get(`${hoverCell.col},${hoverCell.row}`);
-    const legal = snap.legalMoves.some((c) => sameCell(c, hoverCell!));
-    if (legal && existing) put(hoverCell, existing.color, 0.4);
-    else if (!existing) put(hoverCell, 0xffffff, 0.1);
-  }
-
-  return [...byCell.values()];
+  const at = cellCenter(cell);
+  const inRange = distance(snap.moveFrom, at) <= snap.moveRange;
+  // Standing inside something isn't allowed, and the pick radius the server
+  // uses for "did you click that hound" is the same half-body.
+  const occupied = snap.enemies.some((e) => distance(at, { x: e.x, y: e.y }) < snap.meleeRange * 0.5);
+  return { at, allowed: inRange && !occupied };
 }
 
 // ----------------------------------------------------------------- game loop
@@ -415,7 +401,10 @@ function frame(now: number) {
   actors.syncProjectiles(snap, elapsed);
   actors.syncTombstones(snap);
 
-  stage.setTileHighlights(isOver(snap.phase) ? [] : tileHighlights(snap, elapsed));
+  // Nothing is drawn on the floor around the player: the footfall ring under the
+  // cursor is what says whether a click would land, and where.
+  const destination = hoverDestination(snap);
+  stage.setDestination(destination?.at.x ?? null, destination?.at.y ?? null, destination?.allowed ?? false);
 
   // Red under something you are fighting, yellow under a body you have merely
   // selected — the real-time game's ring colours, on a bigger ring.

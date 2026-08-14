@@ -21,7 +21,12 @@ three can run at once.
   .  .  X       and the bottom row is the escape row
 ```
 
-Step onto **X**, the bottom-right square, and you are out.
+Reach **X**, the arch in the far corner, and you are out.
+
+The board is turn-based but **not tile-based to look at**. Underneath it is a
+15x15 lattice — five cells to each of those three squares — and none of it is
+drawn. You walk to wherever you click within your reach for the turn rather than
+hopping from square to square, so a turn-based fight moves like a fluid one.
 
 The pack starts **asleep** — two hellhounds standing across the board looking at
 you, and you at them. They wake **one at a time**, and never settle again:
@@ -35,11 +40,16 @@ woken one turns to look at you wherever it is standing, which is the tell that
 separates the two. From then on the turns alternate: you act, each woken hound
 acts, then it is your turn again.
 
-**Reach runs sideways and across, never straight up or down.** A hellhound
-directly above or below you cannot bite you and you cannot cut it, which is why
-the pack manoeuvres into the column beside you rather than simply walking at you.
-The daggers are the mirror image: anything already inside sword reach is too
-close to throw at.
+**Reach runs sideways and across, never straight up or down** — a quarter-turn
+cone opening left and right. A hellhound directly above or below you cannot bite
+you and you cannot cut it, which is why the pack manoeuvres to your flanks
+rather than simply walking at you. The daggers are the mirror image: anything
+already inside sword reach is too close to throw at.
+
+The floor carries two marks and nothing else: a small **white ring** under the
+cursor at the spot a click would put you — dark red when that spot is beyond this
+turn's reach or has something standing in it — and an **amber ring** at the arch.
+Nothing is drawn under the player.
 
 Two hounds biting take a third of you a round, and it takes three sword blows to
 put one down. That arithmetic does not work in your favour, which is what the
@@ -49,7 +59,7 @@ arch in the south wall is for.
 
 | | |
 |---|---|
-| click a lit square | step onto it (one square, any of eight directions) |
+| click within a step | walk there — anywhere in reach |
 | click a hellhound | mark it — click it again to drop the mark |
 | **1** / **2** or click a slot | choose the sword / the dagger. Costs nothing |
 | **Space** or **Attack** | swing the chosen weapon at the mark |
