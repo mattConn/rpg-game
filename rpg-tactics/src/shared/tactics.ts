@@ -75,7 +75,62 @@ export function cellCenter(cell: Cell): Point {
   };
 }
 
-/** The cell a room point falls in, or null when the point is off the board. */
+// --------------------------------------------------------- beyond the board
+
+/**
+ * **The board is no longer the world.** The doorway in the south wall used to be
+ * a way *out of the game* — step on it and the encounter ended — and is now
+ * simply a door: the corridor behind it and the chamber at the end of that are
+ * ground you can stand on, so walking through it takes you somewhere instead of
+ * finishing the fight.
+ *
+ * That makes "on the grid" a question about three rectangles rather than about
+ * one, which is the only thing the change costs. Everything downstream —
+ * reachability, the pack's approach, the footfall ring — asks `inGrid` and gets
+ * the same answer it always did.
+ */
+export interface Region {
+  col: number;
+  row: number;
+  cols: number;
+  rows: number;
+}
+
+/** The arena itself: the fight starts here and usually ends here. */
+export const BOARD_REGION: Region = { col: 0, row: 0, cols: GRID_COLS, rows: GRID_ROWS };
+
+/**
+ * The corridor, running south out of the doorway. It is exactly the arena's
+ * bottom-right column band — one of the original squares wide — so the masonry
+ * the client builds around it lands on cell boundaries rather than near them.
+ */
+export const HALL_ROWS = 20;
+export const HALL_REGION: Region = {
+  col: (SQUARES - 1) * SUBDIVISION,
+  row: GRID_ROWS,
+  cols: SUBDIVISION,
+  rows: HALL_ROWS,
+};
+
+/** The room at the end of it, the same size as the arena and empty. */
+export const FAR_REGION: Region = {
+  col: 0,
+  row: GRID_ROWS + HALL_ROWS,
+  cols: GRID_COLS,
+  rows: GRID_ROWS,
+};
+
+export const REGIONS: readonly Region[] = [BOARD_REGION, HALL_REGION, FAR_REGION];
+
+/** A region's middle, in room pixels — where the client frames and lights it. */
+export function regionCentre(region: Region): Point {
+  return {
+    x: ARENA_X + (region.col + region.cols / 2) * TILE_PX,
+    y: ARENA_Y + (region.row + region.rows / 2) * TILE_PX,
+  };
+}
+
+/** The cell a room point falls in, or null when the point is off the floor. */
 export function cellAtPoint(point: Point): Cell | null {
   const cell = {
     col: Math.floor((point.x - ARENA_X) / TILE_PX),
@@ -84,20 +139,39 @@ export function cellAtPoint(point: Point): Cell | null {
   return inGrid(cell) ? cell : null;
 }
 
-/** The nearest legal cell to a point, clamped onto the board rather than refused. */
+/**
+ * The nearest standable cell to a point, clamped rather than refused. With more
+ * than one rectangle to land in it is "clamp into each, keep the closest" — the
+ * corridor is narrow, so a point out in the masonry beside it must not snap back
+ * to the arena when the hall is a pace away.
+ */
 export function clampToGrid(point: Point): Cell {
-  return {
-    col: clampInt(Math.floor((point.x - ARENA_X) / TILE_PX), 0, GRID_COLS - 1),
-    row: clampInt(Math.floor((point.y - ARENA_Y) / TILE_PX), 0, GRID_ROWS - 1),
-  };
+  let best: Cell | null = null;
+  let bestGap = Infinity;
+  for (const region of REGIONS) {
+    const cell = {
+      col: clampInt(Math.floor((point.x - ARENA_X) / TILE_PX), region.col, region.col + region.cols - 1),
+      row: clampInt(Math.floor((point.y - ARENA_Y) / TILE_PX), region.row, region.row + region.rows - 1),
+    };
+    const gap = distance(point, cellCenter(cell));
+    if (gap < bestGap) { bestGap = gap; best = cell; }
+  }
+  return best!;
 }
 
 function clampInt(value: number, lo: number, hi: number): number {
   return value < lo ? lo : value > hi ? hi : value;
 }
 
+export function inRegion(region: Region, cell: Cell): boolean {
+  return (
+    cell.col >= region.col && cell.col < region.col + region.cols &&
+    cell.row >= region.row && cell.row < region.row + region.rows
+  );
+}
+
 export function inGrid(cell: Cell): boolean {
-  return cell.col >= 0 && cell.col < GRID_COLS && cell.row >= 0 && cell.row < GRID_ROWS;
+  return REGIONS.some((region) => inRegion(region, cell));
 }
 
 export function sameCell(a: Cell, b: Cell): boolean {
@@ -118,7 +192,7 @@ export function distance(a: Point, b: Point): number {
  * ```
  *   @ . h
  *   . . h
- *   . . X
+ *   . . D      D is the doorway column: the corridor runs south out of it.
  * ```
  *
  * `SUBDIVISION` is odd, so the centre of each old square is still the centre of
@@ -133,14 +207,9 @@ const squareCentre = (col: number, row: number): Cell => ({
 export const PLAYER_START: Cell = squareCentre(0, 0);
 export const HOUND_STARTS: readonly Cell[] = [squareCentre(2, 0), squareCentre(2, 1)];
 
-/**
- * The way out, in the far corner. Reach it and the fight is over — which means
- * the shortest run to safety goes straight past the pack, and they are between
- * you and it from the first turn.
- */
-export const ESCAPE_CELL: Cell = squareCentre(2, 2);
-/** How close to the arch counts as through it. */
-export const ESCAPE_RADIUS = SQUARE_PX * 0.42;
+// The doorway is not a cell any more, it is the mouth of `HALL_REGION` — see
+// the regions above. It used to end the encounter; now it only leads out of the
+// room, with the pack still between you and it from the first turn.
 
 // -------------------------------------------------------------------- ranges
 
@@ -148,6 +217,12 @@ export const ESCAPE_RADIUS = SQUARE_PX * 0.42;
  * How far anything travels in one turn — one of the original squares' worth of
  * ground. What changed when the grid was subdivided is *where you may stop*,
  * not how far you get.
+ *
+ * For the player it is **a price rather than a limit**: they may click any floor
+ * there is and they will walk to it, taking a round per square's worth of ground
+ * and letting the pack answer in each. A long walk is a commitment, not a
+ * refused click. The hellhounds are gated by it in the old way — one leg per
+ * turn, because a turn is all they get.
  */
 export const MOVE_RANGE = SQUARE_PX;
 
@@ -187,11 +262,6 @@ export function withinAggro(a: Point, b: Point): boolean {
   return distance(a, b) <= AGGRO_RANGE;
 }
 
-/** Whether a destination is inside this turn's travel allowance. */
-export function withinMove(from: Point, to: Point): boolean {
-  return distance(from, to) <= MOVE_RANGE + 0.001;
-}
-
 /** Which way a model should face to look from `from` at `to`. Held on a tie. */
 export function facingToward(from: Point, to: Point, held: 1 | -1): 1 | -1 {
   if (to.x > from.x + 0.001) return 1;
@@ -200,21 +270,33 @@ export function facingToward(from: Point, to: Point, held: 1 | -1): 1 | -1 {
 }
 
 /**
- * The points a hellhound would like to be standing on: a ring around the player
- * at just inside biting distance, keeping only those its reach rule actually
- * allows. That filter is what pushes the pack to come at you from the sides
- * rather than from directly above or below, and it falls out of `canReach`
- * rather than being a second rule the AI has to remember.
+ * The cells a hellhound would like to be standing in: every one within reach of
+ * the player that its own reach rule allows — which is what pushes the pack to
+ * come at you from the sides rather than from directly above or below, and falls
+ * out of `canReach` rather than being a second rule the AI has to remember.
+ *
+ * **This is a search of the floor, not a ring around the player**, and it has to
+ * be, now that the floor is not one rectangle. A ring at four-fifths of biting
+ * distance was the same idea while the game was played in a 9x9 room: the two
+ * points on it that a hound could bite from lie a long way out to the left and
+ * right, and in a room they are always floor. In the corridor they are both
+ * inside the masonry, so every candidate was unstandable and the pack would
+ * follow you through the door and then stand there for the rest of the game,
+ * hemmed in, while you were beside them. Asking the grid instead gives the same
+ * answer in the room and a real one in the hall.
  */
-export function approachPoints(target: Point, count = 16): Point[] {
-  const radius = MELEE_RANGE * 0.8;
-  const points: Point[] = [];
-  for (let i = 0; i < count; i++) {
-    const angle = (i / count) * Math.PI * 2;
-    const point = { x: target.x + Math.cos(angle) * radius, y: target.y + Math.sin(angle) * radius };
-    if (canReach(point, target)) points.push(point);
+export function approachCells(target: Point): Cell[] {
+  const centre = clampToGrid(target);
+  const span = Math.ceil(MELEE_RANGE / TILE_PX);
+  const cells: Cell[] = [];
+  for (let dr = -span; dr <= span; dr++) {
+    for (let dc = -span; dc <= span; dc++) {
+      const cell = { col: centre.col + dc, row: centre.row + dr };
+      if (!inGrid(cell)) continue;
+      if (canReach(cellCenter(cell), target)) cells.push(cell);
+    }
   }
-  return points;
+  return cells;
 }
 
 /** Step from `from` toward `to`, stopping at `limit` px if it is further. */
@@ -235,8 +317,9 @@ export const HOUND_MAX_HEALTH = 24;
 /**
  * Damage is tuned so the fight is a race the player can lose. Three sword blows
  * put a hound down; two hounds biting take a third of you every round. Standing
- * and trading with both of them does not work, which is the whole point of the
- * arch.
+ * and trading with both of them does not work, which is why the door is open:
+ * giving ground down the corridor is the answer to it. It is no longer a way to
+ * *win* — the pack follows you through — only a way to keep moving.
  */
 export const MELEE_DAMAGE = 8;
 export const RANGED_DAMAGE = 5;
@@ -251,12 +334,6 @@ export const THROW_RECOVER_MS = 220;
 /** A beat between one actor finishing and the next starting (ms). */
 export const TURN_GAP_MS = 240;
 
-/**
- * The longest a single hellhound's turn can take. Used to predict when the
- * player's turn comes back, which is what the action bar's blind counts down.
- */
-export const ENEMY_ACTION_MS = Math.max(STEP_MS, ATTACK_MS);
-
 /** Delay before an auto-restart fires after death (ms), measured from the death. */
 export const AUTO_RESTART_DELAY_MS = 3000;
 
@@ -269,10 +346,10 @@ export const LOG_LINES = 4;
  * Where the encounter is. `player` and `enemy` alternate; the other three are
  * terminal and wait for a restart.
  */
-export type Phase = "player" | "enemy" | "escaped" | "cleared" | "dead";
+export type Phase = "player" | "enemy" | "cleared" | "dead";
 
 export function isOver(phase: Phase): boolean {
-  return phase === "escaped" || phase === "cleared" || phase === "dead";
+  return phase === "cleared" || phase === "dead";
 }
 
 /**
@@ -288,15 +365,13 @@ export interface TacticsSnapshot extends GameSnapshot {
   /** 1-based, incremented when the player's turn comes back around. */
   round: number;
   /**
-   * How far the player may travel this turn, in px, and from where. Zero off
-   * turn. With no grid drawn this is the *only* thing telling them where they
-   * can go, so the client paints it on the floor as a disc.
+   * How much ground a round of walking covers, in px, and where from. Zero off
+   * turn, which is all the client reads it for now: a click is legal anywhere
+   * there is floor, so this no longer says where the player may go — only what
+   * going there will cost them per round.
    */
   moveRange: number;
   moveFrom: { x: number; y: number };
-  /** The arch, and how close counts as through it. */
-  escapePoint: { x: number; y: number };
-  escapeRadius: number;
   /** Reach, so the client can show what the selected weapon would cover. */
   meleeRange: number;
   /**
@@ -306,17 +381,20 @@ export interface TacticsSnapshot extends GameSnapshot {
    */
   aggro: boolean;
   /**
-   * The most recent blow landed on the player, and a counter that ticks with
-   * each one. The client lunges `enemyId` whenever `seq` changes.
+   * Every blow the pack landed in the round just resolved, each with a counter
+   * that ticks once per blow. The client lunges every one whose seq it has not
+   * seen before.
    *
    * This exists because the real-time client can afford to *guess* who bit you
    * — it picks the nearest thing hunting you — and a turn-based board cannot.
    * Two hellhounds standing either side of you both strike in the same round,
    * and a guess gives the animation to the same one twice while the other bites
-   * you without moving. It stays a piece of state rather than an event: the seq
-   * is what changed, so a dropped or repeated snapshot can't double-play it.
+   * you without moving. It is a *list* for the same reason once more: the round
+   * resolves whole, so both blows land in one snapshot and a single field would
+   * only ever animate the last of them. It stays state rather than events — the
+   * seq is what changed, so a dropped or repeated snapshot can't double-play it.
    */
-  strike: { enemyId: string; seq: number } | null;
+  strikes: Array<{ enemyId: string; seq: number }>;
   /** Newest last; the client draws the tail. */
   log: string[];
   /** One line telling the player what the board is waiting for. */

@@ -26,9 +26,14 @@ import {
   ARENA_W,
   ARENA_X,
   ARENA_Y,
-  ESCAPE_CELL,
+  BOARD_REGION,
+  FAR_REGION,
+  HALL_REGION,
   SQUARE_PX,
-  cellCenter,
+  TILE_PX,
+  cellAtPoint,
+  inRegion,
+  regionCentre,
 } from "../shared/tactics.js";
 
 // -------------------------------------------------------------- board in 3D
@@ -50,6 +55,31 @@ const MARGIN = 1.5;
 const WALL_H = 2.8;
 const WALL_T = 0.7;
 
+/** A chamber: the board plus its margin of bare floor. 12x12 units. */
+const CHAMBER_W = BOARD_W + MARGIN * 2;
+const CHAMBER_D = BOARD_D + MARGIN * 2;
+
+/**
+ * **The corridor is walkable ground now, so the rules own its shape and this
+ * file only dresses it.** `HALL_REGION` is where the player may stand; the
+ * doorway's width, the masonry either side of it and the second chamber's place
+ * in the world are all read off it here, so what you can walk down and what you
+ * can see are the same corridor by construction rather than by agreement.
+ *
+ * It is still the room's own measure long and a fraction of it wide, at the
+ * chambers' full wall height: taller than it is broad is the whole of what makes
+ * a corridor read as one — shrink the height with the width and it reads as a
+ * crawlspace, widen it and it reads as a third room.
+ */
+const PASSAGE_W = toX(HALL_REGION.cols * TILE_PX);
+const ARCH_CENTRE = toX(regionCentre(HALL_REGION).x);
+
+/** The far chamber sits on its own region, a corridor's length to the south. */
+const FAR_CZ = toZ(regionCentre(FAR_REGION).y);
+
+/** What is left for the hall itself once both chambers' walls are accounted for. */
+const HALL_LEN = FAR_CZ - BOARD_CZ - CHAMBER_D - WALL_T * 2;
+
 /**
  * Framing is expressed as multiples of the board's width rather than in units,
  * so a change to `TILE_PX` carries the camera and the fog with it. Fixed numbers
@@ -69,10 +99,24 @@ const PITCH_MIN = 0.42;
 const PITCH_MAX = 1.42;
 const PITCH_START = 0.95;
 
+/**
+ * First person needs its own bounds, because the number means something else
+ * there: overhead it is how steeply the camera looks down at the floor, and
+ * from the eyes it is where the head is tilted, with the horizon at zero. The
+ * range is deliberately lopsided — a fight on the floor is worth a good deal
+ * more looking down than up.
+ */
+const FP_PITCH_MIN = -0.5;
+const FP_PITCH_MAX = 0.95;
+const FP_PITCH_START = 0.12;
+
+/** Eye level on the 1.9-unit human: the head sits at 1.83, the eyes just above. */
+const EYE_HEIGHT = 1.8;
+
 const ROTATE_SPEED = 0.006;
 const PAN_SPEED = 0.03;
 
-/** How far the pan target may stray from the board's centre. */
+/** How far a drag may push the view off whatever the camera is framing. */
 const PAN_LIMIT = BOARD_W * 0.7;
 
 export interface Stage {
@@ -84,6 +128,14 @@ export interface Stage {
   orbit(dx: number, dy: number): void;
   /** Slide the look-at point across the floor. Deltas are in screen pixels. */
   pan(dx: number, dy: number): void;
+  /**
+   * Where the player is and which way they are facing, so the camera knows what
+   * it should be framing — and, in first person, where it is and where it looks.
+   */
+  follow(px: number, py: number, facing: 1 | -1): void;
+  /** Swap between the overhead view and the player's own eyes. Returns the new mode. */
+  toggleFirstPerson(): boolean;
+  readonly firstPerson: boolean;
   resetView(): void;
   update(dt: number): void;
   groundAt(ndcX: number, ndcY: number): { x: number; y: number } | null;
@@ -133,71 +185,52 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   // ------------------------------------------------------------------- floor
 
-  const chamberW = BOARD_W + MARGIN * 2;
-  const chamberD = BOARD_D + MARGIN * 2;
+  /**
+   * A slab of noisy stone. A few centimetres of displacement per vertex so flat
+   * shading has something to catch — a perfectly flat plane reads as a void
+   * rather than as a floor — and one shade per vertex on top of that.
+   */
+  const stoneFloor = (w: number, d: number) => {
+    const geometry = new THREE.PlaneGeometry(w, d, Math.ceil(w), Math.ceil(d));
+    geometry.rotateX(-Math.PI / 2);
 
-  const floorGeometry = new THREE.PlaneGeometry(chamberW, chamberD, chamberW, chamberD);
-  floorGeometry.rotateX(-Math.PI / 2);
+    const position = geometry.attributes.position as THREE.BufferAttribute;
+    const colors = new Float32Array(position.count * 3);
+    const stone = new THREE.Color(0x3a3a45);
+    for (let i = 0; i < position.count; i++) {
+      position.setY(i, (Math.random() - 0.5) * 0.05);
+      const shade = 0.82 + Math.random() * 0.36;
+      colors[i * 3] = stone.r * shade;
+      colors[i * 3 + 1] = stone.g * shade;
+      colors[i * 3 + 2] = stone.b * shade;
+    }
+    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    geometry.computeVertexNormals();
 
-  // A few centimetres of noise per vertex so flat shading has something to
-  // catch — a perfectly flat plane reads as a void rather than as a floor.
-  const position = floorGeometry.attributes.position as THREE.BufferAttribute;
-  const colors = new Float32Array(position.count * 3);
-  const stone = new THREE.Color(0x3a3a45);
-  for (let i = 0; i < position.count; i++) {
-    position.setY(i, (Math.random() - 0.5) * 0.05);
-    const shade = 0.82 + Math.random() * 0.36;
-    colors[i * 3] = stone.r * shade;
-    colors[i * 3 + 1] = stone.g * shade;
-    colors[i * 3 + 2] = stone.b * shade;
-  }
-  floorGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-  floorGeometry.computeVertexNormals();
-
-  const floor = new THREE.Mesh(
-    floorGeometry,
-    new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }),
-  );
-  floor.position.set(BOARD_CX, 0, BOARD_CZ);
-  floor.receiveShadow = true;
-  scene.add(floor);
+    const floor = new THREE.Mesh(
+      geometry,
+      new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }),
+    );
+    floor.receiveShadow = true;
+    return floor;
+  };
 
   // The apron: darker stone running out past the walls, so the camera looking
   // in from outside sees a dungeon continuing into the dark rather than a hole.
+  // It has to cover both rooms and the hall between them, so it is sized from
+  // the whole complex rather than from the board.
   const apron = new THREE.Mesh(
-    new THREE.PlaneGeometry(chamberW * 3, chamberD * 3).rotateX(-Math.PI / 2),
+    new THREE.PlaneGeometry(CHAMBER_W * 3, (FAR_CZ - BOARD_CZ) + CHAMBER_D * 3).rotateX(-Math.PI / 2),
     new THREE.MeshLambertMaterial({ color: 0x1e1e26 }),
   );
-  apron.position.set(BOARD_CX, -0.06, BOARD_CZ);
+  apron.position.set(BOARD_CX, -0.06, (BOARD_CZ + FAR_CZ) / 2);
   scene.add(apron);
-
-  // ------------------------------------------------------------- the board
-  //
-  // Nothing is drawn on it. The board used to be nine raised flagstones,
-  // because back then the grid *was* the game and you hopped from one square to
-  // the next. Now that a cell is a fraction of a pace and you stop wherever you
-  // like, ruling the floor would advertise a lattice the player never has to
-  // think about — the same reason the real-time room leaves its tile grid
-  // undrawn. Where you may go isn't drawn either — a disc of reachable ground
-  // around the player was tried and removed: it read as a thing painted on the
-  // floor rather than as a statement about this turn, and it followed you around
-  // the board all game. The footfall ring under the cursor carries the range
-  // instead, one click at a time.
-  //
-  // A slightly lighter slab marks the fighting ground so the arena still reads
-  // as a place, with no lines on it.
-  const boardSlab = new THREE.Mesh(
-    new THREE.BoxGeometry(BOARD_W, 0.1, BOARD_D),
-    new THREE.MeshLambertMaterial({ color: 0x4e4e59, flatShading: true }),
-  );
-  boardSlab.position.set(BOARD_CX, 0.05, BOARD_CZ);
-  boardSlab.receiveShadow = true;
-  scene.add(boardSlab);
 
   // -------------------------------------------------------------------- walls
 
   const wallMaterial = new THREE.MeshLambertMaterial({ color: 0x3b3b45, flatShading: true });
   const capMaterial = new THREE.MeshLambertMaterial({ color: 0x4c4c58, flatShading: true });
+  const archMaterial = new THREE.MeshLambertMaterial({ color: 0x565062, flatShading: true });
 
   const addWall = (w: number, d: number, x: number, z: number, height = WALL_H) => {
     const wall = new THREE.Mesh(new THREE.BoxGeometry(w, height, d), wallMaterial);
@@ -214,98 +247,148 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   const west = BOARD_X0 - MARGIN;
   const east = BOARD_X0 + BOARD_W + MARGIN;
-  const north = BOARD_Z0 - MARGIN;
-  const south = BOARD_Z0 + BOARD_D + MARGIN;
 
-  addWall(chamberW + WALL_T * 2, WALL_T, BOARD_CX, north - WALL_T / 2);
-  addWall(WALL_T, chamberD + WALL_T * 2, west - WALL_T / 2, BOARD_CZ);
-  addWall(WALL_T, chamberD + WALL_T * 2, east + WALL_T / 2, BOARD_CZ);
+  const archLeft = ARCH_CENTRE - PASSAGE_W / 2;
+  const archRight = ARCH_CENTRE + PASSAGE_W / 2;
 
-  // The south wall is the one with the way out in it, so it is built in two
-  // stretches with a gap where the escape column runs.
-  const archCentre = toX(cellCenter(ESCAPE_CELL).x);
-  const ARCH_WIDTH = STRIDE * 0.66;
-  const archLeft = archCentre - ARCH_WIDTH / 2;
-  const archRight = archCentre + ARCH_WIDTH / 2;
-  const southZ = south + WALL_T / 2;
-
-  const westSpan = archLeft - (west - WALL_T);
-  addWall(westSpan, WALL_T, west - WALL_T + westSpan / 2, southZ);
-  const eastSpan = east + WALL_T - archRight;
-  addWall(eastSpan, WALL_T, archRight + eastSpan / 2, southZ);
-
-  // --------------------------------------------------------------- the arch
-
-  // Jambs, a lintel, and warm light spilling out of the passage. It is the only
-  // bright thing outside the board, which is the point: the way out should be
-  // visible from anywhere you can put the camera.
-  const archMaterial = new THREE.MeshLambertMaterial({ color: 0x565062, flatShading: true });
-  const jamb = (x: number) => {
-    const post = new THREE.Mesh(new THREE.BoxGeometry(0.34, WALL_H + 0.5, WALL_T + 0.3), archMaterial);
-    post.position.set(x, (WALL_H + 0.5) / 2, southZ);
-    post.castShadow = true;
-    scene.add(post);
+  /** An east-west wall built in two stretches, with the passage's gap in it. */
+  const addPiercedWall = (z: number) => {
+    const westSpan = archLeft - (west - WALL_T);
+    addWall(westSpan, WALL_T, west - WALL_T + westSpan / 2, z);
+    const eastSpan = east + WALL_T - archRight;
+    addWall(eastSpan, WALL_T, archRight + eastSpan / 2, z);
   };
-  jamb(archLeft + 0.17);
-  jamb(archRight - 0.17);
 
-  const lintel = new THREE.Mesh(
-    new THREE.BoxGeometry(ARCH_WIDTH + 0.5, 0.4, WALL_T + 0.4),
-    archMaterial,
-  );
-  lintel.position.set(archCentre, WALL_H + 0.3, southZ);
-  lintel.castShadow = true;
-  scene.add(lintel);
+  /** Jambs and a lintel around a gap, so it reads as a doorway and not a hole. */
+  const addDoorFrame = (z: number) => {
+    for (const x of [archLeft + 0.17, archRight - 0.17]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.34, WALL_H + 0.5, WALL_T + 0.3), archMaterial);
+      post.position.set(x, (WALL_H + 0.5) / 2, z);
+      post.castShadow = true;
+      scene.add(post);
+    }
+    const lintel = new THREE.Mesh(
+      new THREE.BoxGeometry(PASSAGE_W + 0.5, 0.4, WALL_T + 0.4),
+      archMaterial,
+    );
+    lintel.position.set(ARCH_CENTRE, WALL_H + 0.3, z);
+    lintel.castShadow = true;
+    scene.add(lintel);
+  };
 
-  const archGlow = new THREE.Mesh(
-    new THREE.PlaneGeometry(ARCH_WIDTH - 0.4, WALL_H - 0.2),
-    new THREE.MeshBasicMaterial({ color: 0xffc478, transparent: true, opacity: 0.5, side: THREE.DoubleSide }),
-  );
-  archGlow.position.set(archCentre, (WALL_H - 0.2) / 2, southZ + WALL_T / 2 + 0.02);
-  scene.add(archGlow);
-
-  // The way out used to be a lit tile on a grid. With the grid gone it needs a
-  // mark of its own, or the arch is only visible from angles that show the wall.
-  // A ring rather than a filled disc: a pale wash on stone reads as a stain,
-  // while a rim reads as somewhere to stand.
-  const escapeRadius = toX(SQUARE_PX) * 0.42;
-  const escapeGeometry = new THREE.RingGeometry(escapeRadius * 0.86, escapeRadius, 48);
-  escapeGeometry.rotateX(-Math.PI / 2);
-  const escapeGlow = new THREE.Mesh(
-    escapeGeometry,
-    new THREE.MeshBasicMaterial({ color: 0xffc478, transparent: true, opacity: 0.6, depthWrite: false }),
-  );
-  const escapeAt = cellCenter(ESCAPE_CELL);
-  escapeGlow.position.set(toX(escapeAt.x), 0.11, toZ(escapeAt.y));
-  scene.add(escapeGlow);
-
-  const archLight = new THREE.PointLight(0xffb45a, 5, BOARD_W, 2);
-  archLight.position.set(archCentre, 1.6, southZ - 0.6);
-  scene.add(archLight);
-
-  // ------------------------------------------------------------------ torches
-
-  // One bracket at the midpoint of each of the four walls. `west`/`east`/
-  // `north`/`south` are the walls' *inner faces*, so each offset points into the
-  // room — get the sign wrong and the torch is buried in its own masonry.
+  // ------------------------------------------------------------- a chamber
   //
-  // The south one sits over the middle column, not over the arch: the way out
-  // has its own light spilling through it, and a torch there would wash the
-  // glow out rather than add to it.
+  // Nothing is drawn on the floor of one. The board used to be nine raised
+  // flagstones, because back then the grid *was* the game and you hopped from
+  // one square to the next. Now that a cell is a fraction of a pace and you stop
+  // wherever you like, ruling the floor would advertise a lattice the player
+  // never has to think about — the same reason the real-time room leaves its
+  // tile grid undrawn. Where you may go isn't drawn either — a disc of reachable
+  // ground around the player was tried and removed: it read as a thing painted
+  // on the floor rather than as a statement about this turn, and it followed you
+  // around the board all game. The footfall ring under the cursor carries the
+  // range instead, one click at a time.
+  //
+  // A slightly lighter slab marks the fighting ground so the arena still reads
+  // as a place, with no lines on it.
+
   const TORCH_INSET = 0.25;
   const torches: Array<ReturnType<typeof buildTorch>> = [];
-  const torchSpots: Array<[number, number]> = [
-    [BOARD_CX, north + TORCH_INSET],
-    [BOARD_CX, south - TORCH_INSET],
-    [west + TORCH_INSET, BOARD_CZ],
-    [east - TORCH_INSET, BOARD_CZ],
-  ];
-  for (const [x, z] of torchSpots) {
+
+  const addTorch = (x: number, z: number) => {
     const torch = buildTorch();
     torch.group.position.set(x, 1.9, z);
     scene.add(torch.group);
     torches.push(torch);
-  }
+  };
+
+  /**
+   * One room, and the only room there is: floor, slab, four walls with the
+   * passage's gap in one of them, and a torch at the midpoint of each wall.
+   *
+   * The far room is this same call with the gap on its north side — which is
+   * what "identical" means here. There is one room, built twice, so anything
+   * done to the arena is done to what you see through the arch by construction.
+   */
+  const buildChamber = (cz: number, doorway: "north" | "south") => {
+    const floor = stoneFloor(CHAMBER_W, CHAMBER_D);
+    floor.position.set(BOARD_CX, 0, cz);
+    scene.add(floor);
+
+    const slab = new THREE.Mesh(
+      new THREE.BoxGeometry(BOARD_W, 0.1, BOARD_D),
+      new THREE.MeshLambertMaterial({ color: 0x4e4e59, flatShading: true }),
+    );
+    slab.position.set(BOARD_CX, 0.05, cz);
+    slab.receiveShadow = true;
+    scene.add(slab);
+
+    const north = cz - CHAMBER_D / 2;
+    const south = cz + CHAMBER_D / 2;
+
+    addWall(WALL_T, CHAMBER_D + WALL_T * 2, west - WALL_T / 2, cz);
+    addWall(WALL_T, CHAMBER_D + WALL_T * 2, east + WALL_T / 2, cz);
+
+    // The pierced wall is the one the hallway leaves by; the other is solid.
+    const northZ = north - WALL_T / 2;
+    const southZ = south + WALL_T / 2;
+    if (doorway === "south") {
+      addWall(CHAMBER_W + WALL_T * 2, WALL_T, BOARD_CX, northZ);
+      addPiercedWall(southZ);
+      addDoorFrame(southZ);
+    } else {
+      addPiercedWall(northZ);
+      addDoorFrame(northZ);
+      addWall(CHAMBER_W + WALL_T * 2, WALL_T, BOARD_CX, southZ);
+    }
+
+    // One bracket at the midpoint of each wall. These are the walls' *inner*
+    // faces, so each offset points into the room — get the sign wrong and the
+    // torch is buried in its own masonry.
+    //
+    // The one over the doorway sits on the middle column, not over the arch
+    // itself: the passage has its own light spilling through it, and a torch
+    // there would wash the glow out rather than add to it.
+    addTorch(BOARD_CX, north + TORCH_INSET);
+    addTorch(BOARD_CX, south - TORCH_INSET);
+    addTorch(west + TORCH_INSET, cz);
+    addTorch(east - TORCH_INSET, cz);
+  };
+
+  buildChamber(BOARD_CZ, "south");
+  buildChamber(FAR_CZ, "north");
+
+  // ------------------------------------------------------------ the hallway
+
+  // Between the two doorways: floor, two long walls a passage-width apart, and a
+  // torch on each side at the halfway mark. Nothing else — it is a distance to
+  // be crossed, and the room at the end of it should be the thing you look at.
+  const hallZ0 = BOARD_CZ + CHAMBER_D / 2 + WALL_T;
+  const hallCZ = hallZ0 + HALL_LEN / 2;
+
+  const hallFloor = stoneFloor(PASSAGE_W + WALL_T * 2, HALL_LEN);
+  hallFloor.position.set(ARCH_CENTRE, 0, hallCZ);
+  scene.add(hallFloor);
+
+  addWall(WALL_T, HALL_LEN, archLeft - WALL_T / 2, hallCZ);
+  addWall(WALL_T, HALL_LEN, archRight + WALL_T / 2, hallCZ);
+
+  addTorch(archLeft + TORCH_INSET, hallCZ);
+  addTorch(archRight - TORCH_INSET, hallCZ);
+
+  // --------------------------------------------------------------- the arch
+
+  // A lamp in the doorway, and nothing in the way of it.
+  //
+  // Both of the marks that used to be here are gone with the escape rule they
+  // belonged to: the amber ring on the floor said "stand here and the encounter
+  // ends", and the warm plane hanging in the opening was the light of somewhere
+  // else. The doorway is a door now — you walk through it — and a glowing
+  // curtain across a thing you can walk through reads as a barrier.
+  const southZ = BOARD_CZ + CHAMBER_D / 2 + WALL_T / 2;
+  const archLight = new THREE.PointLight(0xffb45a, 5, BOARD_W, 2);
+  archLight.position.set(ARCH_CENTRE, 1.6, southZ - 0.6);
+  scene.add(archLight);
 
   // ------------------------------------------------------------- highlights
 
@@ -341,19 +424,75 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   let pitch = PITCH_START;
   let distance = CAMERA_START_DISTANCE;
 
-  /** Where the camera looks. Panning moves this; everything else orbits it. */
+  /**
+   * What the camera is framing, before the drag offset: **the board while the
+   * player is standing on it, and the player once they have left it.**
+   *
+   * The board is the subject of this game, so pinning the view to it is right
+   * for the whole of a fight — and became wrong the moment the door opened,
+   * because a player who walks into the corridor walks out of the frame and
+   * behind the south wall. Following only off the board keeps the fight framed
+   * exactly as it was and costs nothing until you leave.
+   */
+  const home = new THREE.Vector3(BOARD_CX, 0, BOARD_CZ);
+  /** A drag's displacement from that, kept within `PAN_LIMIT` of it. */
+  const panOffset = { x: 0, z: 0 };
+
+  /** Where the camera looks: what it is framing, plus wherever you dragged it. */
   const focus = new THREE.Vector3(BOARD_CX, 0, BOARD_CZ);
+  const applyFocus = () => focus.set(home.x + panOffset.x, 0, home.z + panOffset.z);
   /** Smoothed copy, so a wheel notch or a released drag settles instead of snapping. */
   const smoothed = { yaw, pitch, distance, x: focus.x, z: focus.z };
 
+  /**
+   * **First person is the same rig with the distance taken out.** `yaw` and
+   * `pitch` stop saying where the camera hangs around the board and start saying
+   * which way the player is looking out of their own eyes.
+   *
+   * They therefore mean different things in the two modes, and each mode keeps
+   * its own pair. Overhead, pitch is an angle *down* at the floor that never
+   * approaches the horizon, and yaw is which corner you are watching the fight
+   * from; from the eyes, the horizon is the middle of the pitch range and yaw is
+   * the way you are facing. **Entering first person looks the way the character
+   * is facing** rather than the way the camera was — the two are unrelated, and
+   * inheriting the camera's yaw drops you nose-first into whichever wall it
+   * happened to be behind. Leaving puts the overhead view back exactly as you
+   * left it, so F is a look through the eyes and not a loss of your framing.
+   */
+  let firstPerson = false;
+  let overheadPitch = PITCH_START;
+  let overheadYaw = 0;
+
+  /** The player's head, in scene units — where the eyes are when they are ours. */
+  const eye = new THREE.Vector3(BOARD_CX, EYE_HEIGHT, BOARD_CZ);
+  const forward = new THREE.Vector3();
+  /** Which way the player's model is facing: +1 east, -1 west. */
+  let playerFacing: 1 | -1 = 1;
+
+  const clampPitch = (value: number) =>
+    firstPerson ? clamp(value, FP_PITCH_MIN, FP_PITCH_MAX) : clamp(value, PITCH_MIN, PITCH_MAX);
+
   const applyCamera = () => {
-    const horizontal = Math.cos(smoothed.pitch) * smoothed.distance;
-    camera.position.set(
-      smoothed.x + Math.sin(smoothed.yaw) * horizontal,
-      Math.sin(smoothed.pitch) * smoothed.distance,
-      smoothed.z + Math.cos(smoothed.yaw) * horizontal,
-    );
-    camera.lookAt(smoothed.x, 0.9, smoothed.z);
+    if (firstPerson) {
+      // Straight out of the head, along the same yaw/pitch the orbit uses: the
+      // overhead camera looks from `+(sin yaw, ., cos yaw)` back at its focus,
+      // so the direction it is facing is the negative of that.
+      camera.position.set(eye.x, eye.y, eye.z);
+      forward.set(
+        -Math.sin(smoothed.yaw) * Math.cos(smoothed.pitch),
+        -Math.sin(smoothed.pitch),
+        -Math.cos(smoothed.yaw) * Math.cos(smoothed.pitch),
+      );
+      camera.lookAt(eye.x + forward.x, eye.y + forward.y, eye.z + forward.z);
+    } else {
+      const horizontal = Math.cos(smoothed.pitch) * smoothed.distance;
+      camera.position.set(
+        smoothed.x + Math.sin(smoothed.yaw) * horizontal,
+        Math.sin(smoothed.pitch) * smoothed.distance,
+        smoothed.z + Math.cos(smoothed.yaw) * horizontal,
+      );
+      camera.lookAt(smoothed.x, 0.9, smoothed.z);
+    }
     // Kept fresh here rather than left to the renderer: picking and the
     // overlay's world-label projection both run before the next render.
     camera.updateMatrixWorld();
@@ -383,17 +522,55 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     },
 
     zoom(delta) {
+      // Nothing to pull the camera back from when it is your own head.
+      if (firstPerson) return;
       distance = clamp(distance + delta, CAMERA_MIN_DISTANCE, CAMERA_MAX_DISTANCE);
     },
 
     orbit(dx, dy) {
       // Dragging right swings the scene right, which means the camera goes the
-      // other way around the board.
+      // other way around the board — and in first person the same turn of the
+      // yaw is you looking right, which is the same gesture meaning the same
+      // thing from inside instead of outside.
       yaw -= dx * ROTATE_SPEED;
-      pitch = clamp(pitch - dy * ROTATE_SPEED * 0.8, PITCH_MIN, PITCH_MAX);
+      // The vertical flips, though. Overhead the drag pulls the *scene*, so
+      // dragging down tips the board up toward the horizon; from the eyes it
+      // moves your *head*, and a head that looked up when you dragged down
+      // would be the one control in here fighting the hand holding it.
+      const step = dy * ROTATE_SPEED * 0.8;
+      pitch = clampPitch(firstPerson ? pitch + step : pitch - step);
+    },
+
+    toggleFirstPerson() {
+      firstPerson = !firstPerson;
+      if (firstPerson) {
+        overheadPitch = pitch;
+        overheadYaw = yaw;
+        pitch = FP_PITCH_START;
+        // The camera looks along `-(sin yaw, ., cos yaw)`, so a quarter turn
+        // either way is due east or due west — which is the whole of what a
+        // `facing` says.
+        yaw = playerFacing === 1 ? -Math.PI / 2 : Math.PI / 2;
+      } else {
+        pitch = overheadPitch;
+        yaw = overheadYaw;
+      }
+      // The eye teleports either way, so easing the turn across the cut would
+      // only add a spin to it.
+      smoothed.pitch = pitch;
+      smoothed.yaw = yaw;
+      applyCamera();
+      return firstPerson;
+    },
+
+    get firstPerson() {
+      return firstPerson;
     },
 
     pan(dx, dy) {
+      // A pan is a drag of the board, and in first person there is no board to
+      // drag — you are standing on it.
+      if (firstPerson) return;
       // Screen right/up, expressed on the floor at the current yaw — so a drag
       // pulls the room the way the hand went whichever way the view is facing.
       const scale = PAN_SPEED * (distance / CAMERA_START_DISTANCE);
@@ -402,15 +579,40 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       const forwardX = Math.sin(yaw);
       const forwardZ = Math.cos(yaw);
 
-      focus.x = clamp(focus.x - (dx * rightX + dy * forwardX) * scale, BOARD_CX - PAN_LIMIT, BOARD_CX + PAN_LIMIT);
-      focus.z = clamp(focus.z - (dx * rightZ + dy * forwardZ) * scale, BOARD_CZ - PAN_LIMIT, BOARD_CZ + PAN_LIMIT);
+      panOffset.x = clamp(panOffset.x - (dx * rightX + dy * forwardX) * scale, -PAN_LIMIT, PAN_LIMIT);
+      panOffset.z = clamp(panOffset.z - (dx * rightZ + dy * forwardZ) * scale, -PAN_LIMIT, PAN_LIMIT);
+      applyFocus();
+    },
+
+    follow(px, py, facing) {
+      playerFacing = facing;
+      // The eyes ride the *interpolated* position undamped: this is the one
+      // point in the scene that has to be exactly where the player is, and a
+      // damped head lags a half-step behind its own body on every walk.
+      eye.set(toX(px), EYE_HEIGHT, toZ(py));
+
+      // On the board, the board. Off it — in the corridor or the far room —
+      // them. `damp` in `update` does the rest, so stepping through the doorway
+      // eases the view along instead of cutting to it.
+      const cell = cellAtPoint({ x: px, y: py });
+      const onBoard = cell !== null && inRegion(BOARD_REGION, cell);
+      home.set(onBoard ? BOARD_CX : toX(px), 0, onBoard ? BOARD_CZ : toZ(py));
+      applyFocus();
     },
 
     resetView() {
+      // V is "put the view back", and first person is a view. Being dropped
+      // into your own head with no way out but the same key you pressed to get
+      // there is the kind of thing a reset exists to undo.
+      firstPerson = false;
       yaw = 0;
       pitch = PITCH_START;
+      overheadPitch = PITCH_START;
+      smoothed.pitch = pitch;
       distance = CAMERA_START_DISTANCE;
-      focus.set(BOARD_CX, 0, BOARD_CZ);
+      panOffset.x = 0;
+      panOffset.z = 0;
+      applyFocus();
     },
 
     update(dt) {
@@ -439,6 +641,11 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
     project(point) {
       const projected = point.clone().project(camera);
+      // A point behind the camera comes back through the projection mirrored,
+      // and would draw its label or its damage number somewhere arbitrary on
+      // screen. Overhead nothing the overlay labels is ever behind the camera;
+      // in first person your own head is, every time something bites you.
+      if (projected.z > 1) return { x: -WORLD_WIDTH, y: -WORLD_HEIGHT };
       return {
         x: ((projected.x + 1) / 2) * WORLD_WIDTH,
         y: ((1 - projected.y) / 2) * WORLD_HEIGHT,
@@ -466,16 +673,14 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     animateScenery(elapsed) {
       torches.forEach((torch, i) => {
         const flicker = 0.82 + Math.sin(elapsed * 9 + i * 1.7) * 0.09 + Math.sin(elapsed * 23 + i) * 0.05;
-        // Four torches over a 9x9 floor. Each has a whole wall to carry, but
-        // the room is small enough that the real-time game's brightness would
-        // wash the flagstones out.
+        // Ten brackets — four to a room and two down the hall. Each has a whole
+        // wall to carry, but the rooms are small enough that the real-time
+        // game's brightness would wash their floors out.
         torch.light.intensity = 8 * flicker;
         torch.flame.scale.setScalar(0.85 + flicker * 0.25);
       });
-      // The way out breathes, so it reads as an exit rather than as decoration.
-      const pulse = 0.42 + Math.sin(elapsed * 2.2) * 0.1;
-      (escapeGlow.material as THREE.MeshBasicMaterial).opacity = 0.55 + Math.sin(elapsed * 2.2) * 0.18;
-      (archGlow.material as THREE.MeshBasicMaterial).opacity = pulse;
+      // The doorway breathes with the same beat the torches keep, so the way
+      // through still draws the eye without being a marker.
       archLight.intensity = 4.5 + Math.sin(elapsed * 2.2) * 1.1;
     },
 

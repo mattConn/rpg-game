@@ -213,12 +213,12 @@ function drawHint(ctx: CanvasRenderingContext2D, snap: TacticsSnapshot): void {
 
 /** The end of the encounter, centred over the board. */
 function drawOutcome(ctx: CanvasRenderingContext2D, snap: TacticsSnapshot): void {
+  // Two outcomes now. Walking out of the room used to be a third, and is not an
+  // outcome at all any more — you just leave, and the fight comes with you.
   const { title, color } =
-    snap.phase === "escaped"
-      ? { title: "ESCAPED", color: GOLD }
-      : snap.phase === "cleared"
-        ? { title: "PACK SLAIN", color: "#9fe8ff" }
-        : { title: "KILLED", color: "#c0392b" };
+    snap.phase === "cleared"
+      ? { title: "PACK SLAIN", color: "#9fe8ff" }
+      : { title: "KILLED", color: "#c0392b" };
 
   const cy = WORLD_HEIGHT * 0.34;
 

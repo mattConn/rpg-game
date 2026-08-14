@@ -454,17 +454,18 @@ export function applyCues<T extends GameSnapshot>(
   snap: T,
   now: number,
   /**
-   * Who struck the player, when the simulation is in a position to say. Given
-   * one, its answer is taken as fact — including when no health changed.
+   * Who struck the player, when the simulation is in a position to say — *all*
+   * of them, because a single exchange can land more than one blow. Given an
+   * answer it is taken as fact, including when no health changed.
    *
    * Without it the fallback is a *guess*: the nearest thing hunting the player,
    * which is only meaningful if they were actually bitten. That is good enough
    * for the real-time game, where whatever is closest almost certainly did it,
    * and not good enough for a board where two hellhounds flank you and both
-   * bite in the same round — the guess hands the animation to the same one
+   * bite in the same instant — the guess hands the animation to the same one
    * twice while the other tears into you without moving.
    */
-  biterOf?: (previous: T, snap: T) => string | null,
+  bitersOf?: (previous: T, snap: T) => string[],
 ): boolean {
   const before = previous.cooldown;
   const after = snap.cooldown;
@@ -480,8 +481,8 @@ export function applyCues<T extends GameSnapshot>(
 
   const wounded = snap.stats.health < previous.stats.health;
 
-  const biter = biterOf ? biterOf(previous, snap) : wounded ? nearestHunter(snap) : null;
-  if (biter) actors.lunge(biter, now);
+  const biters = bitersOf ? bitersOf(previous, snap) : wounded ? [nearestHunter(snap)] : [];
+  for (const biter of biters) if (biter) actors.lunge(biter, now);
 
   return wounded;
 }

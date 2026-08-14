@@ -106,14 +106,15 @@ function connectWebSocket() {
 }
 
 /**
- * Which hellhound just bit, straight from the simulation. `strike.seq` ticks
- * once per blow, so every hound that attacks in a round gets its own lunge —
- * where guessing at the nearest hunter would give two flanking hounds' bites to
- * whichever happened to be a pixel closer.
+ * Which hellhounds just bit, straight from the simulation. A round resolves
+ * whole, so both of them can land in the same snapshot; each blow carries a seq
+ * that only ever rises, and anything above the highest already seen is new.
+ * Guessing at the nearest hunter would give both bites to whichever happened to
+ * be a pixel closer.
  */
-function struckBy(previous: TacticsSnapshot, snap: TacticsSnapshot): string | null {
-  if (!snap.strike) return null;
-  return snap.strike.seq === previous.strike?.seq ? null : snap.strike.enemyId;
+function struckBy(previous: TacticsSnapshot, snap: TacticsSnapshot): string[] {
+  const seen = previous.strikes.reduce((highest, s) => Math.max(highest, s.seq), 0);
+  return snap.strikes.filter((s) => s.seq > seen).map((s) => s.enemyId);
 }
 
 let socket = connectWebSocket();
@@ -137,6 +138,14 @@ window.addEventListener("keydown", (event) => {
 
   if (key === "v") {
     stage.resetView();
+    event.preventDefault();
+    return;
+  }
+
+  // The view is the client's own business — the server has no camera and no
+  // opinion about one, so F never leaves this file.
+  if (key === "f") {
+    stage.toggleFirstPerson();
     event.preventDefault();
     return;
   }
@@ -341,6 +350,12 @@ function updateCursorStyle(snap: TacticsSnapshot) {
  * the server as a plain room point — it re-derives the same cell — but resolved
  * here too so the marker under the cursor is exactly where you will end up
  * rather than approximately.
+ *
+ * **Distance is no longer part of the answer.** Any floor there is may be
+ * clicked and will be walked to, a round at a time, so the ring only says
+ * whether the cursor is over floor and whether somebody is already standing
+ * there. `moveRange` is read for the one thing it still gates: it is zero when
+ * it is not your turn.
  */
 function hoverDestination(snap: TacticsSnapshot): { at: Point; allowed: boolean } | null {
   if (!groundCursor || isOver(snap.phase) || snap.moveRange <= 0) return null;
@@ -348,11 +363,10 @@ function hoverDestination(snap: TacticsSnapshot): { at: Point; allowed: boolean 
   if (!cell) return null;
 
   const at = cellCenter(cell);
-  const inRange = distance(snap.moveFrom, at) <= snap.moveRange;
-  // Standing inside something isn't allowed, and the pick radius the server
-  // uses for "did you click that hound" is the same half-body.
+  // The pick radius the server uses for "did you click that hound" is the same
+  // half-body, so a red ring is exactly the click that would mark one instead.
   const occupied = snap.enemies.some((e) => distance(at, { x: e.x, y: e.y }) < snap.meleeRange * 0.5);
-  return { at, allowed: inRange && !occupied };
+  return { at, allowed: !occupied };
 }
 
 // ----------------------------------------------------------------- game loop
@@ -392,6 +406,9 @@ function frame(now: number) {
     : undefined;
 
   actors.player.update(snap, marked ? { x: marked.x, y: marked.y } : null, dt, now, elapsed);
+  // Behind your own eyes you are the inside of a cloak. The rig still runs —
+  // it is what the camera is riding — it just isn't drawn.
+  actors.player.root.visible = !stage.firstPerson;
   // A woken hound looks at you wherever it is standing — that is the only tell
   // that separates one which has noticed you from one which hasn't.
   actors.syncEnemies(snap, dt, now, elapsed, (enemy) =>
@@ -413,6 +430,10 @@ function frame(now: number) {
     : undefined;
   stage.setTargetRing(targeted?.x ?? null, targeted?.y ?? null, marked ? 0xe23b3b : 0xffd633);
 
+  // The board frames itself while you are standing on it; walk out through the
+  // doorway and the camera comes with you, or the corridor would be somewhere
+  // you can go but not somewhere you can see.
+  stage.follow(snap.player.x, snap.player.y, snap.player.facing);
   stage.update(dt);
   stage.animateScenery(elapsed);
   stage.render();

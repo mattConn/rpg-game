@@ -18,9 +18,11 @@ and draws what comes back, and decides nothing.
 - The **real-time** game is the original: roam a 3x3 dungeon of rooms, and fight
   one hellhound at a time by engaging it and closing the distance yourself. The
   2D and 3D clients import one `GameSimulation`, so they cannot disagree.
-- The **turn-based** game is a single 3x3 board with two hellhounds on it. You
-  act, they act, and you win by killing them or by reaching the arch in the far
-  corner. Its rules are genuinely different, so it has its own simulation — but
+- The **turn-based** game is a 3x3 board with two hellhounds on it, a corridor
+  out of one corner and a second, identical room at the end of that. You act,
+  they act, and you win by killing them — the door used to be a second way to
+  win and is now only a way to leave the room, with the pack following you
+  through it. Its rules are genuinely different, so it has its own simulation — but
   it reuses everything downstream of the snapshot, because `TacticsSnapshot`
   *extends* `GameSnapshot`. See [the turn-based section](#the-turn-based-front-end-rpg-tactics).
 
@@ -475,13 +477,21 @@ The whole game, in one picture:
 
 ```
   @ .  h        player opens on (0,0), the pack holds the right column,
-  .  .  h       and the arch out of the vault is the bottom-right square.
-  .  .  X       Reach X and you are gone.
+  .  .  h       and the door out of the vault is the bottom-right square.
+  .  .  D       Behind D: a corridor, and a second room the size of this one.
 ```
 
 Turns alternate: you take one action, then every *woken* hellhound takes one,
 then it is your turn again. Your action is a **walk**, an **attack**, or a
 **wait**. There is no real-time input at all.
+
+**The sequence is in the resolution, not in the playback.** The whole round is
+resolved the instant your action is committed — yours first, then each woken
+hound in order, every one of them reading the board the ones before it left — and
+then all of it animates *together*, in a single window as long as the slowest
+thing in it. What happens is exactly what a strictly sequential round produced;
+what you watch is one exchange rather than three animations end to end, and a
+round costs the longest action instead of the sum of them.
 
 **The grid is fine and invisible.** It began as a literal 3x3 of squares you
 hopped between; each is now `SUBDIVISION` (5) cells across, so a cell is about
@@ -498,7 +508,7 @@ exactly the points they did when the board was three squares wide.
 
 | | |
 |---|---|
-| click within a step | walk there — anywhere in reach, not to a square |
+| click anywhere on the floor | walk there — however far, a round of ground at a time |
 | click a hellhound | mark it; click it again to unmark |
 | **1** / **2**, or a bar square | choose sword / dagger. **Costs nothing** |
 | **Space**, or the Attack button | swing the chosen weapon at the mark |
@@ -507,25 +517,27 @@ exactly the points they did when the board was three squares wide.
 | double-click a body | inspect it |
 | **R** | restart the encounter |
 | drag / right-drag / wheel / **V** | orbit / pan / zoom / reset the view |
+| **F** | look out of the player's own eyes, and back |
 
 The three constants worth holding in your head while reading the rest: a
 hellhound has 24 HP and hits for 7, the player has 100 and hits for 8 (sword) or
 5 (dagger). Two hounds biting take roughly a third of you per round and a hound
 takes three sword blows to kill, so standing and trading with both loses. That
-arithmetic is the reason the arch exists.
+arithmetic is the reason the door is open — giving ground is the answer to it,
+and the corridor is somewhere to give ground *to*.
 
 **With no grid drawn, the floor has to say what the grid used to** — and it does
-it with **two marks, both under the cursor rather than under the player**: a
-small white **footfall ring** at the cell a click would actually land on, which
-goes dark red when that cell is out of `MOVE_RANGE` or has somebody in it, and an
-amber **ring at the arch**. The snapshot still carries the radius (`moveRange`),
-so what is allowed and what the ring says are the same number — but it is
-answered one click at a time. A blue **movement disc** around the player showed
-the whole of it at once and was removed: a pool of light following you around the
-board all game read as something painted on the floor rather than as a statement
-about this turn. The escape mark is a ring rather than a filled patch for the
-same reason — a pale wash on stone reads as a stain, a rim reads as somewhere to
-stand.
+it with **one mark, under the cursor rather than under the player**: a small
+white **footfall ring** at the cell a click would actually land on, which goes
+dark red when that cell is out of `MOVE_RANGE`, has somebody in it, or is not
+floor at all. The snapshot still carries the radius (`moveRange`), so what is
+allowed and what the ring says are the same number — but it is answered one click
+at a time. A blue **movement disc** around the player showed the whole of it at
+once and was removed: a pool of light following you around the board all game
+read as something painted on the floor rather than as a statement about this
+turn. The amber ring that marked the way out went with the escape rule it
+belonged to — the door is walked through now, not stood on, and the light
+spilling through it is mark enough.
 
 **It is the 3D client's renderer with different rules under it.** The models,
 every animation rig, `applyCues`, `interpolateSnapshot` and the entire 2D overlay
@@ -535,8 +547,8 @@ a rig or a piece of UI in here — import it.**
 
 The mechanism that makes that possible is one line: `TacticsSnapshot` **extends
 `GameSnapshot`**. Everything downstream reads the fields it always read; the
-turn-based additions (`phase`, `round`, `playerCell`, `legalMoves`, `escapeCell`,
-`aggro`, `log`, `hint`) ride along untouched. Adding a required field to
+turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
+`aggro`, `strikes`, `log`, `hint`) ride along untouched. Adding a required field to
 `GameSnapshot` means filling it in here too.
 
 - **Positions stay in room pixels.** A square is `TILE_PX = 90` (three 3D units,
@@ -550,30 +562,84 @@ turn-based additions (`phase`, `round`, `playerCell`, `legalMoves`, `escapeCell`
     **multiples of `BOARD_W`**, not in fixed units, so resizing the board carries
     the whole scene with it. Hard-coded distances there would quietly leave the
     view halfway across the dungeon the first time the board changed.
-- **Real time only animates; it never decides.** A turn is committed the instant
-  it is asked for — the actor's *cell* changes immediately — and `busyUntil` then
-  holds the board still while the slide or the swing plays out. Death and escape
-  are the deliberate exceptions, resolved after the animation, so a hellhound
-  dies at the end of the blow that killed it.
+- **Real time only animates; it never decides.** A round is committed the instant
+  it is asked for — every actor's *cell* changes immediately — and `busyUntil`
+  then holds the board still while all the slides and swings play out at once.
+  Death is the deliberate exception, resolved after the animation, so a
+  hellhound dies at the end of the blow that killed it.
+  - `endPlayerTurn` therefore does the pack's thinking as well as its own job:
+    `resolvePackRound` walks the woken hounds in order and returns the longest
+    animation, and the window is `max(your action, that)`. There is no queue any
+    more and `tick` walks nothing — when the window closes, the next turn opens.
+    The action-bar blind is exactly that window, so it is no longer an estimate
+    built out of `ENEMY_ACTION_MS`, which is gone.
 - **Reach is horizontal and diagonal, never vertical** — `canReach`, which is
   `|dx| >= |dy|` and within `MELEE_RANGE`: a quarter-turn cone opening left and
   right. On the old 3x3 this was "one column across, at most one row up or
   down"; the cone is exactly that set of squares generalised to a fine grid and
   nothing more. It is symmetric, so it gates the bite as it gates the sword, and
-  the pack plans its approach with the same test — `approachPoints` is a ring
-  around the player filtered through `canReach`, which is *why* hounds come at
-  you from the sides rather than from directly above or below. Daggers keep the
+  the pack plans its approach with the same test — `approachCells` is every cell
+  within reach of the player filtered through `canReach`, which is *why* hounds
+  come at you from the sides rather than from directly above or below. It
+  searches the grid rather than a ring around the player because the floor is
+  no longer one rectangle: the two points on a ring that a hound could bite from
+  lie far out to the left and right, which is floor in a room and masonry in the
+  corridor, and a ring left the pack following you through the door and then
+  standing there hemmed in for the rest of the game. Daggers keep the
   real-time dead zone: in sword reach is too close to throw.
 - **Two hounds flank rather than queue** because each picks the approach point
   nearest *itself*, so whichever side it is already on is the side it commits
   to, and `MIN_SEPARATION` keeps the second off the first one's spot.
+- **A click anywhere on the floor walks you there, and the ground is what costs
+  turns.** `MOVE_RANGE` stopped being a limit on where you may go and became the
+  price of getting there: `onClick` records the destination as a *journey*, and
+  `advanceJourney` walks a leg of it off as each turn opens — one leg, then the
+  pack's answer, then the next leg. A destination four rounds away costs four
+  rounds and the pack acts in every one of them, so a walk across the room is a
+  commitment you arrive from having been bitten the whole way, rather than a
+  click that is simply refused. Hounds are still gated the old way, one leg per
+  turn, because a turn is all they get.
+  - **Asking to act is how you stop.** A journey takes its own turn the instant
+    one opens, so the player never gets a gap to act in; `stopWalking` is
+    therefore called by any click and by anything that would spend a turn
+    (`attack`, `wait`, Space, `.`) *before* the `canAct` gate that would
+    otherwise swallow it mid-window. Free actions — a weapon swap, Tab, Esc —
+    deliberately do not stop you.
+  - **The legs are timed to run into each other**, or a five-round walk reads as
+    stop and go: step, stand, step, stand. Three separate pauses had to come out
+    of a leg that has more walking after it, and `step(cell, now, more, resuming)`
+    takes out all three — it drops the beat between actors (`TURN_GAP_MS`, right
+    at the end of a move and wrong in the middle of one), **stretches the slide
+    to the whole window** so a round in which something bites you doesn't leave
+    the player standing while the bite plays (you walk a little slower instead,
+    which is far less noticeable than stopping dead), and starts the slide at the
+    *previous* `busyUntil` rather than at `now`, so the up-to-50ms between a
+    window closing and `tick` noticing comes off the new leg instead of showing
+    as a stall.
+    - That last one is why `resuming` exists, and it is a real trap: before the
+      first leg, `busyUntil` is whatever the last action left — **zero on a fresh
+      encounter** — so starting the slide there puts its beginning at the epoch
+      and snaps the player to the far end of the leg. A fake-clock probe starting
+      at `t = 0` scores that as a perfect glide; it took a measurement against
+      the live server to see it. Start throwaway clocks at a realistic epoch.
+  - **A leg that gets no closer gives up**, with "Your way is blocked" in the
+    log. Nothing routes around a corner, so a destination behind masonry (the
+    far room's west side, say) would otherwise spend the rest of the fight
+    grinding into a wall. This is the same limitation as ever, with a stop on it.
+  - The footfall ring lost its range test with the rule: it is white over any
+    floor and red only where somebody is standing, which is exactly the click
+    that would mark a hound instead. `snapshot.moveRange` is still sent, now
+    read only for "is it my turn" (it is zero off turn) and as what a round of
+    walking buys.
 - **Bodies never block, but you cannot stop inside one.** Walking *through*
   another actor is fine — nothing but walls has ever collided in this game — and
   a destination that lands in someone is nudged to `nearestClearCell`, which on
   a grid this fine is half a pace away and imperceptible.
 - **A walk's duration is proportional to the ground covered** (`walkTo`), floored
-  at 120ms. A constant looked right when every move was exactly one square; now
-  that you can stop anywhere, it would make a half-pace adjustment crawl.
+  at 120ms — except for a leg with more walking after it, which is stretched to
+  fill its whole round (see the journey below). A constant looked right when
+  every move was exactly one square; now that you can stop anywhere, it would
+  make a half-pace adjustment crawl.
 - **Aggro is per-hound, and permanent.** A hellhound wakes when the player comes
   within a square of it (`isAdjacent`, checked every tick, so it fires whichever
   side closed the gap) or when a thrown dagger finds it — **only** it; the other
@@ -596,10 +662,22 @@ turn-based additions (`phase`, `round`, `playerCell`, `legalMoves`, `escapeCell`
   `syncEnemies` so the 3D model turns properly rather than just flipping ±X. Mid
   step it faces its travel direction — a wolf holding its head on you while
   crossing the board strafes.
-- **Every hound that bites animates its own bite.** `snapshot.strike` carries
-  `{ enemyId, seq }` — the last blow landed, with a counter that ticks per blow —
-  and the client lunges that id whenever `seq` changes. `applyCues` takes an
-  optional `biterOf` resolver for exactly this; without one it falls back to the
+- **A round's damage to the player is one number, not one per bite.**
+  `resolvePackRound` sums what the pack took off you and spawns a single
+  `damageNumber` where they reached you — a **14**, not two 7s. Both blows land
+  in the same instant, so per-bite numbers stacked exactly on each other and had
+  to be nudged apart by 24px to be legible at all; even nudged they read as two
+  separate things happening rather than as the one exchange that did. The blows
+  are summed rather than the health difference, so a killing round still says
+  what it hit you for instead of the sliver you had left. Nothing is lost by
+  adding them up: the log still names each hound and each bite, and `strikes`
+  still animates a lunge apiece.
+- **Every hound that bites animates its own bite.** `snapshot.strikes` carries
+  one `{ enemyId, seq }` per blow of the round just resolved, and the client
+  lunges every seq above the highest it has seen. A *list* rather than a field
+  because the round resolves whole: both bites land in the same snapshot, and one
+  field would only ever animate the last of them. `applyCues` takes an optional
+  `bitersOf` resolver for exactly this; without one it falls back to the
   real-time game's *guess*, the nearest enemy that is hunting you. That guess is
   fine when one hellhound is chasing you across a room and wrong on a board
   where two flank you and both strike in a round: it hands the animation to
@@ -610,10 +688,12 @@ turn-based additions (`phase`, `round`, `playerCell`, `legalMoves`, `escapeCell`
   That turn, its lit eyes and its head-down hunting posture are the *whole* tell
   that a hound has woken — there is deliberately **no marker on the floor for
   aggro**. A ring under woken hounds was tried and removed: the floor already
-  carries the footfall ring, the escape ring and the target ring, and a fourth
-  thing competing for it read as clutter rather than as information.
-- **Stepping onto `ESCAPE_CELL` does not hand over the turn** — you are through
-  the arch before they can answer. Every other action ends the turn.
+  carries the footfall ring and the target ring, and a third thing competing for
+  it read as clutter rather than as information.
+- **The door ends nothing.** Stepping through it was once the encounter's second
+  ending — `pendingEscape`, an `"escaped"` phase, a free turn on the way out —
+  and all of that is gone. Walking onto it is an ordinary walk that hands over
+  the turn like any other, and the pack follows you down the corridor.
 - **Choosing an attack and making one are separate acts.** The bar's squares and
   1–5 only put a weapon in your hand and cost nothing; the turn is committed by
   the stacked **Attack** / **Wait** buttons to the right of the bar, or by
@@ -636,6 +716,34 @@ turn-based additions (`phase`, `round`, `playerCell`, `legalMoves`, `escapeCell`
   all, so there is nothing a rotation can break. Drag orbits, right/shift-drag
   pans, wheel zooms, V resets. A drag past `DRAG_THRESHOLD` swallows the click
   that follows, or looking around would also order a step.
+  - **F is the same rig with the distance taken out.** `yaw` and `pitch` stop
+    saying where the camera hangs and start saying where the player is looking;
+    the eye rides the *interpolated* position undamped, because this is the one
+    point in the scene that has to be exactly where the player is. Each mode
+    keeps its own `yaw`/`pitch` pair, because the numbers mean different things:
+    overhead, pitch is an angle down at the floor that never nears the horizon
+    and yaw is which corner you watch from; from the eyes, the horizon is the
+    middle of the pitch range and yaw is the way you face. **Entering looks the
+    way the character is facing, not the way the camera was** — inheriting the
+    camera's yaw drops you nose-first into whatever wall it was behind — and
+    leaving restores the overhead view exactly. The vertical drag flips with the
+    mode: overhead a drag pulls the *scene*, from the eyes it moves your *head*,
+    and a head that looked up when you dragged down would be the one control
+    here fighting the hand on it. Zoom and pan do nothing in first person, the
+    player's own rig is hidden (`actors.player.root.visible`) rather than left
+    to be seen from inside, and V drops you back out.
+    - `project` returns a point far off-canvas for anything **behind** the
+      camera. Overhead nothing the overlay labels ever is; in first person your
+      own head is, every time something bites you, and the mirrored projection
+      would otherwise put the damage number somewhere arbitrary on screen.
+  - **It frames the board while you are on it, and follows you once you leave.**
+    `stage.follow` sets what the camera is looking at — the board's centre, or
+    the player's own position when their cell is outside `BOARD_REGION` — and a
+    drag is an offset from that, clamped to `PAN_LIMIT`. Pinning the view to the
+    board was right for the whole of a fight and became wrong the moment the
+    door opened: a player who walks into the corridor otherwise walks out of the
+    frame and behind the south wall. Following only off the board leaves the
+    fight framed exactly as it always was.
 - **No hurt flash.** The tactics client passes `hurt: 0` into the shared
   `drawOverlay` rather than tracking it. The real-time game needs the red
   vignette because from behind the shoulder a bite is easy to miss; here the
@@ -647,19 +755,47 @@ turn-based additions (`phase`, `round`, `playerCell`, `legalMoves`, `escapeCell`
   would advertise a lattice the player never has to think about — the same
   reason the real-time room leaves its tile grid undrawn. A single slightly
   lighter slab marks the fighting ground so the arena still reads as a place.
+- **The door opens onto somewhere, and you can go there.** Behind the doorway in
+  the south wall runs a corridor, and at the end of it a second chamber the size
+  of the first. The corridor is a chamber's own depth long and about a fifth of
+  one across at the same wall height — **taller than it is broad is the whole of
+  what makes it read as a corridor**; shrink the height with the width and it
+  becomes a crawlspace, widen it and it becomes a third room.
+  - **The world is three rectangles, not one.** `REGIONS` in `shared/tactics.ts`
+    — `BOARD_REGION`, `HALL_REGION`, `FAR_REGION` — is what `inGrid` asks, so
+    everything downstream of it (a walk's legality, `nearestClearCell`, the
+    approach search, the footfall ring) reaches the corridor without knowing the
+    corridor exists. `clampToGrid` clamps into *each* region and keeps the
+    nearest result, or a point in the masonry beside the hall would snap back to
+    the arena a screen away.
+  - **The rules own the corridor's shape; `stage.ts` only dresses it.** The
+    doorway's width, the masonry either side of it and the far chamber's place
+    in the world are all derived from `HALL_REGION` / `FAR_REGION`, so what you
+    can walk down and what you can see are the same corridor by construction.
+  - The far room is `buildChamber` called a second time, with the gap in its
+    north wall instead of its south — which is what "identical" means here.
+    There is one room in `stage.ts`, built twice, so anything done to the arena
+    lands on the far room too.
 - Same testing convention again: the rules are pure and the simulation runs
   headless, so drive `TacticsGame` with a throwaway `node:assert` script under
   `tsx` and delete it. Typecheck and build **in `rpg-tactics/`**.
 
 ### Known limitations (turn-based)
 
-- **No pathfinding is needed and none exists** — every move is one square, so
-  reachability is just `neighbors()` minus occupied squares. If the board ever
-  grows past 3x3 this is the first thing that breaks.
-- **The escape square can be stood on by a hellhound**, which makes it an
-  illegal move until the hound steps off or dies. That is deliberate tension,
-  but it means a run can be walled off for a turn or two with no warning in the
-  UI beyond the tile not lighting up.
+- **No pathfinding exists, and it now shows.** A move is a straight slide to the
+  cell you clicked, so leaving the room means clicking the doorway first and the
+  corridor second — aim at the far end from across the board and the destination
+  is simply refused, because the cells between are not floor. Corners are the
+  player's problem.
+- **A diagonal step can grave the doorway's masonry**, because legality is
+  "is the destination floor, and within `MOVE_RANGE`" with nothing said about
+  the line between. At this cell size it is a graze of a jamb for a fraction of
+  a slide, which is why it is a limitation and not a bug to fix with a swept
+  test.
+- **A hellhound standing in the corridor mouth blocks it**, exactly as one
+  standing on the old escape square did: the cells it occupies are illegal
+  destinations until it moves or dies, with no warning in the UI beyond the
+  footfall ring going red.
 - Mana, the level number and the game clock are inherited from the real-time
   HUD and mean nothing here.
 - Corpses are capped at `MAX_CORPSES` (8) and never decay, but only two
