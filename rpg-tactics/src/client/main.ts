@@ -32,7 +32,6 @@ import { interpolateSnapshot } from "../../../rpg-3d/src/client/playback.js";
 import { toX, toZ } from "../../../rpg-3d/src/client/world.js";
 import {
   cellAtPoint,
-  cellCenter,
   distance,
   isOver,
   type TacticsInput,
@@ -74,6 +73,10 @@ let snapshotInterval = SERVER_TICK_MS;
 
 let actors: Actors | null = null;
 
+// --------------------------------------------------------------- sword swing
+const SWING_DURATION = 250;
+let swingStartTime = -Infinity;
+
 const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
 const wsUrl = `${wsProtocol}//${location.host}`;
 
@@ -83,7 +86,20 @@ function connectWebSocket() {
   ws.addEventListener("message", (event) => {
     try {
       const snap = JSON.parse(event.data as string) as TacticsSnapshot;
-      if (currSnapshot && actors) applyCues(actors, currSnapshot, snap, performance.now(), struckBy);
+      const now = performance.now();
+      if (currSnapshot && actors) applyCues(actors, currSnapshot, snap, now, struckBy);
+
+      // Detect a fresh melee cooldown to trigger the sword swing overlay.
+      const before = currSnapshot?.cooldown;
+      const after = snap.cooldown;
+      if (
+        after &&
+        (!before || before.slot !== after.slot || after.remainingMs > before.remainingMs + 1) &&
+        ACTIONS[snap.activeSlot]?.kind === "melee"
+      ) {
+        swingStartTime = now;
+      }
+
       prevSnapshot = currSnapshot;
       prevSnapshotTime = currSnapshotTime;
       currSnapshot = snap;
@@ -125,12 +141,52 @@ function send(msg: TacticsInput) {
 
 // ---------------------------------------------------------------- keyboard
 
+/**
+ * Tank controls. A/D and arrow left/right turn the camera (yaw). W moves
+ * forward, S moves backward — always along the direction the camera faces.
+ * The camera yaw *is* the player's heading.
+ */
+
+/** Yaw turn speed in radians per second. */
+const TURN_SPEED = 2.8;
+
+const heldKeys = new Set<string>();
+
+function sendMoveDir(): void {
+  const cameraYaw = stage.yaw;
+  const fwdX = -Math.sin(cameraYaw);
+  const fwdY = -Math.cos(cameraYaw);
+
+  let dx = 0;
+  let dy = 0;
+  if (heldKeys.has("w")) { dx += fwdX; dy += fwdY; }
+  if (heldKeys.has("s")) { dx -= fwdX; dy -= fwdY; }
+
+  send({ type: "move", dx, dy });
+}
+
+/** Apply held-key turning each frame. Called from the game loop. */
+function updateTankControls(dt: number): void {
+  let turn = 0;
+  if (heldKeys.has("a") || heldKeys.has("arrowleft")) turn += TURN_SPEED * dt;
+  if (heldKeys.has("d") || heldKeys.has("arrowright")) turn -= TURN_SPEED * dt;
+  // Reverse steering while walking backwards, like driving a car in reverse.
+  if (heldKeys.has("s") && !heldKeys.has("w")) turn = -turn;
+  if (turn !== 0) {
+    // orbit expects screen-pixel deltas; convert radians to the equivalent.
+    // stage.orbit applies yaw -= dx * ROTATE_SPEED, so dx = -turn / ROTATE_SPEED.
+    stage.orbit(-turn / 0.006, 0);
+  }
+
+  // Re-send movement direction whenever keys are held, since the yaw may have
+  // changed from turning.
+  if (heldKeys.has("w") || heldKeys.has("s")) sendMoveDir();
+}
+
 window.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
 
   if (event.code === "Tab") {
-    // Tab cycles the mark, so swallow auto-repeat — held down it would strobe
-    // between the two hounds. preventDefault also keeps focus on the canvas.
     event.preventDefault();
     if (!event.repeat) send({ type: "keydown", key, code: event.code });
     return;
@@ -142,26 +198,38 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
-  // The view is the client's own business — the server has no camera and no
-  // opinion about one, so F never leaves this file.
-  if (key === "f") {
-    stage.toggleFirstPerson();
+  // Tank movement and turning keys.
+  if (key === "w" || key === "a" || key === "s" || key === "d" ||
+      key === "arrowleft" || key === "arrowright" ||
+      key === "arrowup" || key === "arrowdown") {
+    // Map arrow up/down to forward/back.
+    const mapped = key === "arrowup" ? "w" : key === "arrowdown" ? "s" : key;
+    if (!heldKeys.has(mapped)) {
+      heldKeys.add(mapped);
+      if (mapped === "w" || mapped === "s") sendMoveDir();
+    }
     event.preventDefault();
     return;
   }
 
-  // 1-5 choose a weapon (and only that), space swings it, "." passes the turn,
-  // r restarts, escape drops the mark. Nothing here moves you: a step is a
-  // click on a square.
+  // 1-5 choose a weapon, space swings it, r restarts, escape drops the mark.
   if (
     (key.length === 1 && key >= "1" && key <= "5") ||
     key === " " ||
-    key === "." ||
     key === "r" ||
     key === "escape"
   ) {
     send({ type: "keydown", key, code: event.code });
     event.preventDefault();
+  }
+});
+
+window.addEventListener("keyup", (event) => {
+  const key = event.key.toLowerCase();
+  const mapped = key === "arrowup" ? "w" : key === "arrowdown" ? "s" : key;
+  if (heldKeys.has(mapped)) {
+    heldKeys.delete(mapped);
+    if (mapped === "w" || mapped === "s") sendMoveDir();
   }
 });
 
@@ -243,7 +311,7 @@ uiCanvas.addEventListener("mousemove", (event) => {
     lastDragY = event.clientY;
     dragMoved += Math.abs(dx) + Math.abs(dy);
     if (dragMoved > DRAG_THRESHOLD) {
-      if (dragPanning) stage.pan(dx, dy);
+      if (dragPanning && !stage.firstPerson) stage.pan(dx, dy);
       else stage.orbit(dx, dy);
     }
   }
@@ -266,6 +334,15 @@ uiCanvas.addEventListener("wheel", (event) => {
 // Right-drag pans, so the browser menu must never appear on the canvas.
 uiCanvas.addEventListener("contextmenu", (event) => {
   event.preventDefault();
+});
+
+// A right-click (that wasn't a pan drag) toggles whichever door is under it.
+uiCanvas.addEventListener("auxclick", (event) => {
+  if (event.button !== 2) return;
+  if (dragMoved > DRAG_THRESHOLD) return;
+  const ndc = toNdc(event);
+  const doorIndex = stage.toggleDoorAt(ndc.x, ndc.y);
+  if (doorIndex !== null) send({ type: "toggleDoor", index: doorIndex });
 });
 
 // ----------------------------------------------------------------- clicking
@@ -297,10 +374,7 @@ uiCanvas.addEventListener("click", (event) => {
     return;
   }
 
-  if (hitsButton(waitRect(barOrigin), uiPoint)) {
-    send({ type: "wait" });
-    return;
-  }
+  // Wait button removed — no turns to pass.
 
   const slot = squareAtPoint(barOrigin, uiPoint);
   if (slot !== null) {
@@ -346,25 +420,15 @@ function updateCursorStyle(snap: TacticsSnapshot) {
 // ------------------------------------------------------------- board paint
 
 /**
- * Where a click would actually put you, snapped to the invisible grid. Sent to
- * the server as a plain room point — it re-derives the same cell — but resolved
- * here too so the marker under the cursor is exactly where you will end up
- * rather than approximately.
- *
- * **Distance is no longer part of the answer.** Any floor there is may be
- * clicked and will be walked to, a round at a time, so the ring only says
- * whether the cursor is over floor and whether somebody is already standing
- * there. `moveRange` is read for the one thing it still gates: it is zero when
- * it is not your turn.
+ * Where the cursor is on the floor — no grid snapping. Shows a ring at the
+ * exact cursor position; red when an enemy is standing there.
  */
 function hoverDestination(snap: TacticsSnapshot): { at: Point; allowed: boolean } | null {
-  if (!groundCursor || isOver(snap.phase) || snap.moveRange <= 0) return null;
+  if (!groundCursor || isOver(snap.phase)) return null;
   const cell = cellAtPoint(groundCursor);
   if (!cell) return null;
 
-  const at = cellCenter(cell);
-  // The pick radius the server uses for "did you click that hound" is the same
-  // half-body, so a red ring is exactly the click that would mark one instead.
+  const at = { ...groundCursor };
   const occupied = snap.enemies.some((e) => distance(at, { x: e.x, y: e.y }) < snap.meleeRange * 0.5);
   return { at, allowed: !occupied };
 }
@@ -394,6 +458,8 @@ function frame(now: number) {
   const snap = prevSnapshot
     ? interpolateSnapshot(prevSnapshot, currSnapshot, t, now - currSnapshotTime)
     : currSnapshot;
+
+  stage.updateDoors(currSnapshot.doorsClosed);
 
   if (!actors) actors = new Actors(stage.scene, stage.pickables, snap.player.color);
 
@@ -438,6 +504,9 @@ function frame(now: number) {
   stage.animateScenery(elapsed);
   stage.render();
 
+  // Tank controls: apply turning and keep movement direction in sync.
+  updateTankControls(dt);
+
   updateCursorStyle(snap);
   // No hurt flash. The real-time game needs one because from behind the
   // shoulder a bite is easy to miss; here the whole board is on screen, the log
@@ -445,6 +514,52 @@ function frame(now: number) {
   // the way of reading it.
   drawOverlay(ctx, { snap, uiCursor, groundCursor, toScreen, hurt: 0 });
   drawTacticsChrome(ctx, snap, barOrigin, uiCursor);
+
+  // ---- sword swing overlay ----
+  const swingElapsed = now - swingStartTime;
+  if (swingElapsed < SWING_DURATION) {
+    const t = swingElapsed / SWING_DURATION;
+
+    // Pivot near the bottom-right corner of the screen.
+    const pivotX = WORLD_WIDTH * 0.85;
+    const pivotY = WORLD_HEIGHT * 1.1;
+
+    // Sweep from -30 degrees (top-right) to 60 degrees (toward center).
+    const angle = (-30 + 90 * t) * (Math.PI / 180);
+
+    // Blade length in room units.
+    const bladeLen = WORLD_HEIGHT * 0.7;
+    const bladeWidth = 12;
+
+    // Fade out over the last 40% of the swing.
+    const alpha = t < 0.6 ? 0.85 : 0.85 * (1 - (t - 0.6) / 0.4);
+
+    ctx.save();
+    ctx.translate(pivotX, pivotY);
+    ctx.rotate(-angle);
+
+    // Blade: a pointed polygon — wide at the hilt, tapering to a point.
+    ctx.beginPath();
+    ctx.moveTo(-bladeWidth * 0.5, 0);             // hilt left
+    ctx.lineTo(-bladeWidth * 0.4, -bladeLen * 0.9); // taper left
+    ctx.lineTo(0, -bladeLen);                      // tip
+    ctx.lineTo(bladeWidth * 0.4, -bladeLen * 0.9);  // taper right
+    ctx.lineTo(bladeWidth * 0.5, 0);               // hilt right
+    ctx.closePath();
+
+    ctx.fillStyle = `rgba(220, 225, 230, ${alpha})`;
+    ctx.fill();
+
+    // Thin bright edge highlight down the centre.
+    ctx.beginPath();
+    ctx.moveTo(0, -bladeLen * 0.05);
+    ctx.lineTo(0, -bladeLen);
+    ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.6})`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.restore();
+  }
 }
 
 uiCanvas.style.cursor = DEFAULT_CURSOR;

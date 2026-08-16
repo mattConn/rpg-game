@@ -163,6 +163,33 @@ function clampInt(value: number, lo: number, hi: number): number {
   return value < lo ? lo : value > hi ? hi : value;
 }
 
+function clampFloat(value: number, lo: number, hi: number): number {
+  return value < lo ? lo : value > hi ? hi : value;
+}
+
+/**
+ * Clamp a point to the nearest walkable position, in room pixels. Each region
+ * is tried independently and the closest result wins — so a point in the
+ * masonry beside the corridor snaps into the hall rather than across the room.
+ */
+export function clampPointToFloor(point: Point): Point {
+  let best: Point | null = null;
+  let bestGap = Infinity;
+  for (const region of REGIONS) {
+    const minX = ARENA_X + region.col * TILE_PX + TILE_PX / 2;
+    const maxX = ARENA_X + (region.col + region.cols - 1) * TILE_PX + TILE_PX / 2;
+    const minY = ARENA_Y + region.row * TILE_PX + TILE_PX / 2;
+    const maxY = ARENA_Y + (region.row + region.rows - 1) * TILE_PX + TILE_PX / 2;
+    const clamped = {
+      x: clampFloat(point.x, minX, maxX),
+      y: clampFloat(point.y, minY, maxY),
+    };
+    const gap = distance(point, clamped);
+    if (gap < bestGap) { bestGap = gap; best = clamped; }
+  }
+  return best!;
+}
+
 export function inRegion(region: Region, cell: Cell): boolean {
   return (
     cell.col >= region.col && cell.col < region.col + region.cols &&
@@ -172,6 +199,33 @@ export function inRegion(region: Region, cell: Cell): boolean {
 
 export function inGrid(cell: Cell): boolean {
   return REGIONS.some((region) => inRegion(region, cell));
+}
+
+/**
+ * Which of the three regions a cell sits in, as an index: 0 = board,
+ * 1 = hall, 2 = far room. Door *n* separates region *n* from region *n+1*.
+ */
+function regionIndex(cell: Cell): number {
+  if (inRegion(HALL_REGION, cell)) return 1;
+  if (inRegion(FAR_REGION, cell)) return 2;
+  return 0;
+}
+
+/**
+ * True when a step from one cell to another would cross a closed door.
+ * Door 0 sits between the board and the corridor, door 1 between the
+ * corridor and the far room.
+ */
+export function blockedByDoor(from: Cell, to: Cell, doorsClosed: readonly boolean[]): boolean {
+  const a = regionIndex(from);
+  const b = regionIndex(to);
+  if (a === b) return false;
+  const lo = Math.min(a, b);
+  const hi = Math.max(a, b);
+  for (let door = lo; door < hi; door++) {
+    if (doorsClosed[door]) return true;
+  }
+  return false;
 }
 
 export function sameCell(a: Cell, b: Cell): boolean {
@@ -399,6 +453,8 @@ export interface TacticsSnapshot extends GameSnapshot {
   log: string[];
   /** One line telling the player what the board is waiting for. */
   hint: string;
+  /** Which doors are closed: [board↔hall, hall↔far]. */
+  doorsClosed: readonly boolean[];
 }
 
 /**
@@ -421,4 +477,8 @@ export type TacticsInput =
   /** Swing the selected weapon at the mark. Spends the turn either way. */
   | { type: "attack" }
   /** Spend the turn doing nothing. */
-  | { type: "wait" };
+  | { type: "wait" }
+  /** Walk one step in a camera-relative direction. dx/dy are a unit vector. */
+  | { type: "move"; dx: number; dy: number }
+  /** Toggle the door at the given index (0 = board↔hall, 1 = hall↔far). */
+  | { type: "toggleDoor"; index: number };

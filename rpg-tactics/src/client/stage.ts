@@ -136,6 +136,8 @@ export interface Stage {
   /** Swap between the overhead view and the player's own eyes. Returns the new mode. */
   toggleFirstPerson(): boolean;
   readonly firstPerson: boolean;
+  /** The camera's horizontal angle, in radians. */
+  readonly yaw: number;
   resetView(): void;
   update(dt: number): void;
   groundAt(ndcX: number, ndcY: number): { x: number; y: number } | null;
@@ -144,18 +146,256 @@ export interface Stage {
   /** Where a click would put them, and whether it is allowed. */
   setDestination(px: number | null, py: number | null, allowed: boolean): void;
   setTargetRing(px: number | null, py: number | null, color: number): void;
+  /** Raycast against doors; returns the index of the hit door, or null. */
+  toggleDoorAt(ndcX: number, ndcY: number): number | null;
+  /** Set door visual states from the server's authoritative state. */
+  updateDoors(doorsClosed: readonly boolean[]): void;
   animateScenery(elapsed: number): void;
   render(): void;
+}
+
+/** Scene units per texture tile repeat. */
+const TEXTURE_SCALE = 2;
+
+/**
+ * Classic Perlin-style value noise. A 256-entry permutation table hashed with
+ * bit ops, smoothed with Hermite interpolation. Returns values in roughly
+ * [-0.5, 0.5] — the caller scales and biases as needed.
+ */
+const perlinNoise = (() => {
+  const perm = new Uint8Array(512);
+  const grad = new Float32Array(256);
+  for (let i = 0; i < 256; i++) {
+    perm[i] = i;
+    grad[i] = (Math.random() - 0.5) * 2;
+  }
+  // Fisher-Yates shuffle, then mirror.
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [perm[i], perm[j]] = [perm[j]!, perm[i]!];
+  }
+  for (let i = 0; i < 256; i++) perm[i + 256] = perm[i]!;
+
+  const fade = (t: number) => t * t * t * (t * (t * 6 - 15) + 10);
+  const lerp = (a: number, b: number, t: number) => a + t * (b - a);
+
+  return (x: number, y: number): number => {
+    const xi = Math.floor(x) & 255;
+    const yi = Math.floor(y) & 255;
+    const xf = x - Math.floor(x);
+    const yf = y - Math.floor(y);
+    const u = fade(xf);
+    const v = fade(yf);
+
+    const aa = perm[perm[xi]! + yi]!;
+    const ab = perm[perm[xi]! + yi + 1]!;
+    const ba = perm[perm[xi + 1]! + yi]!;
+    const bb = perm[perm[xi + 1]! + yi + 1]!;
+
+    return lerp(
+      lerp(grad[aa]! * xf + grad[aa]! * yf,
+           grad[ba]! * (xf - 1) + grad[ba]! * yf, u),
+      lerp(grad[ab]! * xf + grad[ab]! * (yf - 1),
+           grad[bb]! * (xf - 1) + grad[bb]! * (yf - 1), u),
+      v,
+    );
+  };
+})();
+
+/** Sum several octaves of Perlin noise for fractal detail. */
+function fbm(x: number, y: number, octaves: number, lacunarity = 2, gain = 0.5): number {
+  let sum = 0;
+  let amp = 1;
+  let freq = 1;
+  for (let i = 0; i < octaves; i++) {
+    sum += perlinNoise(x * freq, y * freq) * amp;
+    freq *= lacunarity;
+    amp *= gain;
+  }
+  return sum;
+}
+
+/** Apply Perlin-based variation to every pixel of a canvas via ImageData. */
+function applyPerlinNoise(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  scale: number,
+  strength: number,
+  octaves: number,
+) {
+  const img = ctx.getImageData(0, 0, size, size);
+  const data = img.data;
+  for (let py = 0; py < size; py++) {
+    for (let px = 0; px < size; px++) {
+      const n = fbm(px / scale, py / scale, octaves) * strength;
+      const idx = (py * size + px) * 4;
+      data[idx] = Math.max(0, Math.min(255, data[idx]! + n));
+      data[idx + 1] = Math.max(0, Math.min(255, data[idx + 1]! + n));
+      data[idx + 2] = Math.max(0, Math.min(255, data[idx + 2]! + n));
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function generateWallTexture(): THREE.CanvasTexture {
+  const size = 512;
+  const cvs = document.createElement("canvas");
+  cvs.width = size;
+  cvs.height = size;
+  const ctx = cvs.getContext("2d")!;
+
+  ctx.fillStyle = "#2e2e38";
+  ctx.fillRect(0, 0, size, size);
+
+  // Irregular dark stone blocks with visible mortar gaps.
+  const rows = 8;
+  const cols = 6;
+  const blockH = size / rows;
+  const blockW = size / cols;
+  const mortar = 3;
+
+  for (let row = 0; row < rows; row++) {
+    const offset = (row % 2) * blockW * 0.5;
+    for (let col = -1; col <= cols; col++) {
+      const x = col * blockW + offset + (Math.random() - 0.5) * 4;
+      const y = row * blockH + (Math.random() - 0.5) * 2;
+      const w = blockW - mortar + (Math.random() - 0.5) * 8;
+      const h = blockH - mortar + (Math.random() - 0.5) * 4;
+      const shade = 38 + Math.floor(Math.random() * 22);
+      ctx.fillStyle = `rgb(${shade}, ${shade}, ${shade + 8})`;
+      ctx.fillRect(x + mortar / 2, y + mortar / 2, w, h);
+    }
+  }
+
+  applyPerlinNoise(ctx, size, 64, 18, 4);
+
+  const texture = new THREE.CanvasTexture(cvs);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  return texture;
+}
+
+function generateFloorTexture(): THREE.CanvasTexture {
+  const size = 512;
+  const cvs = document.createElement("canvas");
+  cvs.width = size;
+  cvs.height = size;
+  const ctx = cvs.getContext("2d")!;
+
+  ctx.fillStyle = "#2a2a34";
+  ctx.fillRect(0, 0, size, size);
+
+  // Rounded cobblestones in a brick-like stagger.
+  const rows = 10;
+  const cols = 8;
+  const stoneH = size / rows;
+  const stoneW = size / cols;
+  const gap = 4;
+
+  for (let row = 0; row < rows; row++) {
+    const offset = (row % 2) * stoneW * 0.5;
+    for (let col = -1; col <= cols; col++) {
+      const cx = col * stoneW + stoneW / 2 + offset + (Math.random() - 0.5) * 3;
+      const cy = row * stoneH + stoneH / 2 + (Math.random() - 0.5) * 3;
+      const rw = (stoneW - gap) / 2 + (Math.random() - 0.5) * 4;
+      const rh = (stoneH - gap) / 2 + (Math.random() - 0.5) * 3;
+      const shade = 38 + Math.floor(Math.random() * 25);
+      ctx.fillStyle = `rgb(${shade}, ${shade}, ${shade + 6})`;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rw, rh, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  applyPerlinNoise(ctx, size, 48, 15, 4);
+
+  const texture = new THREE.CanvasTexture(cvs);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  return texture;
+}
+
+function generateDoorTexture(): THREE.CanvasTexture {
+  const size = 512;
+  const cvs = document.createElement("canvas");
+  cvs.width = size;
+  cvs.height = size;
+  const ctx = cvs.getContext("2d")!;
+
+  // Dark brown base.
+  ctx.fillStyle = "#2e1a10";
+  ctx.fillRect(0, 0, size, size);
+
+  // Vertical planks in slightly varying brown shades.
+  const plankCount = 6;
+  const plankWidth = size / plankCount;
+  for (let i = 0; i < plankCount; i++) {
+    const shade = 34 + Math.floor(Math.random() * 16);
+    ctx.fillStyle = `rgb(${shade + 12}, ${shade}, ${shade - 10})`;
+    ctx.fillRect(i * plankWidth + 2, 0, plankWidth - 4, size);
+  }
+
+  // Dark grooves between planks.
+  ctx.strokeStyle = "#1a0e08";
+  ctx.lineWidth = 2;
+  for (let i = 1; i < plankCount; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * plankWidth, 0);
+    ctx.lineTo(i * plankWidth, size);
+    ctx.stroke();
+  }
+
+  // Horizontal cross-braces at ~1/4 and ~3/4 height.
+  const braceH = 28;
+  for (const y of [size * 0.25 - braceH / 2, size * 0.75 - braceH / 2]) {
+    ctx.fillStyle = "#221410";
+    ctx.fillRect(0, y, size, braceH);
+    ctx.strokeStyle = "#1a0e08";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(0, y, size, braceH);
+  }
+
+  // Rectangular barred window in the upper third.
+  const winX = size * 0.2;
+  const winY = size * 0.08;
+  const winW = size * 0.6;
+  const winH = size * 0.2;
+  ctx.fillStyle = "#0a0a0e";
+  ctx.fillRect(winX, winY, winW, winH);
+
+  // Vertical bars across the window.
+  const barCount = 4;
+  const barSpacing = winW / (barCount + 1);
+  ctx.strokeStyle = "#1a1a1e";
+  ctx.lineWidth = 6;
+  for (let i = 1; i <= barCount; i++) {
+    const bx = winX + i * barSpacing;
+    ctx.beginPath();
+    ctx.moveTo(bx, winY);
+    ctx.lineTo(bx, winY + winH);
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = "#1a0e08";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(winX, winY, winW, winH);
+
+  applyPerlinNoise(ctx, size, 64, 14, 4);
+
+  return new THREE.CanvasTexture(cvs);
 }
 
 export function createStage(canvas: HTMLCanvasElement): Stage {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  renderer.setClearColor(0x07070b);
+  renderer.setClearColor(0x111111);
 
   const scene = new THREE.Scene();
-  scene.fog = new THREE.Fog(0x0b0b12, BOARD_W * 3.2, BOARD_W * 7.5);
+  scene.fog = new THREE.Fog(0x111111, BOARD_W * 0.6, BOARD_W * 2.0);
+
+  const wallTexture = generateWallTexture();
+  const floorTexture = generateFloorTexture();
 
   const camera = new THREE.PerspectiveCamera(50, WORLD_WIDTH / WORLD_HEIGHT, 0.1, 300);
 
@@ -195,21 +435,16 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     geometry.rotateX(-Math.PI / 2);
 
     const position = geometry.attributes.position as THREE.BufferAttribute;
-    const colors = new Float32Array(position.count * 3);
-    const stone = new THREE.Color(0x3a3a45);
     for (let i = 0; i < position.count; i++) {
       position.setY(i, (Math.random() - 0.5) * 0.05);
-      const shade = 0.82 + Math.random() * 0.36;
-      colors[i * 3] = stone.r * shade;
-      colors[i * 3 + 1] = stone.g * shade;
-      colors[i * 3 + 2] = stone.b * shade;
     }
-    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
     geometry.computeVertexNormals();
 
+    const tex = floorTexture.clone();
+    tex.repeat.set(w / TEXTURE_SCALE, d / TEXTURE_SCALE);
     const floor = new THREE.Mesh(
       geometry,
-      new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }),
+      new THREE.MeshLambertMaterial({ map: tex, flatShading: true }),
     );
     floor.receiveShadow = true;
     return floor;
@@ -219,21 +454,37 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   // in from outside sees a dungeon continuing into the dark rather than a hole.
   // It has to cover both rooms and the hall between them, so it is sized from
   // the whole complex rather than from the board.
+  const apronW = CHAMBER_W * 3;
+  const apronD = (FAR_CZ - BOARD_CZ) + CHAMBER_D * 3;
+  const apronTex = floorTexture.clone();
+  apronTex.repeat.set(apronW / TEXTURE_SCALE, apronD / TEXTURE_SCALE);
   const apron = new THREE.Mesh(
-    new THREE.PlaneGeometry(CHAMBER_W * 3, (FAR_CZ - BOARD_CZ) + CHAMBER_D * 3).rotateX(-Math.PI / 2),
-    new THREE.MeshLambertMaterial({ color: 0x1e1e26 }),
+    new THREE.PlaneGeometry(apronW, apronD).rotateX(-Math.PI / 2),
+    new THREE.MeshLambertMaterial({ map: apronTex, color: 0x606068, flatShading: true }),
   );
   apron.position.set(BOARD_CX, -0.06, (BOARD_CZ + FAR_CZ) / 2);
   scene.add(apron);
 
   // -------------------------------------------------------------------- walls
 
-  const wallMaterial = new THREE.MeshLambertMaterial({ color: 0x3b3b45, flatShading: true });
+  // ------------------------------------------------------------------- doors
+
+  interface Door {
+    group: THREE.Group;
+    mesh: THREE.Mesh;
+    open: boolean;
+    angle: number;
+    target: number;
+  }
+  const doors: Door[] = [];
+
   const capMaterial = new THREE.MeshLambertMaterial({ color: 0x4c4c58, flatShading: true });
-  const archMaterial = new THREE.MeshLambertMaterial({ color: 0x565062, flatShading: true });
 
   const addWall = (w: number, d: number, x: number, z: number, height = WALL_H) => {
-    const wall = new THREE.Mesh(new THREE.BoxGeometry(w, height, d), wallMaterial);
+    const tex = wallTexture.clone();
+    tex.repeat.set(Math.max(w, d) / TEXTURE_SCALE, height / TEXTURE_SCALE);
+    const mat = new THREE.MeshLambertMaterial({ map: tex, flatShading: true });
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(w, height, d), mat);
     wall.position.set(x, height / 2, z);
     wall.castShadow = true;
     wall.receiveShadow = true;
@@ -262,18 +513,43 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   /** Jambs and a lintel around a gap, so it reads as a doorway and not a hole. */
   const addDoorFrame = (z: number) => {
     for (const x of [archLeft + 0.17, archRight - 0.17]) {
-      const post = new THREE.Mesh(new THREE.BoxGeometry(0.34, WALL_H + 0.5, WALL_T + 0.3), archMaterial);
+      const postTex = wallTexture.clone();
+      postTex.repeat.set(Math.max(0.34, WALL_T + 0.3) / TEXTURE_SCALE, (WALL_H + 0.5) / TEXTURE_SCALE);
+      const postMat = new THREE.MeshLambertMaterial({ map: postTex, flatShading: true });
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.34, WALL_H + 0.5, WALL_T + 0.3), postMat);
       post.position.set(x, (WALL_H + 0.5) / 2, z);
       post.castShadow = true;
       scene.add(post);
     }
+    const lintelTex = wallTexture.clone();
+    lintelTex.repeat.set((PASSAGE_W + 0.5) / TEXTURE_SCALE, Math.max(0.4, WALL_T + 0.4) / TEXTURE_SCALE);
+    const lintelMat = new THREE.MeshLambertMaterial({ map: lintelTex, flatShading: true });
     const lintel = new THREE.Mesh(
       new THREE.BoxGeometry(PASSAGE_W + 0.5, 0.4, WALL_T + 0.4),
-      archMaterial,
+      lintelMat,
     );
     lintel.position.set(ARCH_CENTRE, WALL_H + 0.3, z);
     lintel.castShadow = true;
     scene.add(lintel);
+
+    // The door itself: a thin wooden slab hinged at the left jamb.
+    const doorWidth = PASSAGE_W - 0.34;
+    const doorTex = generateDoorTexture();
+    const doorMat = new THREE.MeshLambertMaterial({ map: doorTex, flatShading: true });
+    const doorMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(doorWidth, WALL_H, 0.12),
+      doorMat,
+    );
+    doorMesh.position.set(doorWidth / 2, WALL_H / 2, 0);
+    doorMesh.castShadow = true;
+    doorMesh.receiveShadow = true;
+
+    const doorGroup = new THREE.Group();
+    doorGroup.position.set(archLeft + 0.17, 0, z);
+    doorGroup.add(doorMesh);
+    scene.add(doorGroup);
+
+    doors.push({ group: doorGroup, mesh: doorMesh, open: false, angle: 0, target: 0 });
   };
 
   // ------------------------------------------------------------- a chamber
@@ -295,16 +571,17 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   const TORCH_INSET = 0.25;
   const torches: Array<ReturnType<typeof buildTorch>> = [];
 
-  const addTorch = (x: number, z: number) => {
+  const addTorch = (x: number, z: number, yaw: number) => {
     const torch = buildTorch();
     torch.group.position.set(x, 1.9, z);
+    torch.group.rotation.y = yaw;
     scene.add(torch.group);
     torches.push(torch);
   };
 
   /**
-   * One room, and the only room there is: floor, slab, four walls with the
-   * passage's gap in one of them, and a torch at the midpoint of each wall.
+   * One room, and the only room there is: floor, four walls with the passage's
+   * gap in one of them, and a torch at the midpoint of each wall.
    *
    * The far room is this same call with the gap on its north side — which is
    * what "identical" means here. There is one room, built twice, so anything
@@ -314,14 +591,6 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     const floor = stoneFloor(CHAMBER_W, CHAMBER_D);
     floor.position.set(BOARD_CX, 0, cz);
     scene.add(floor);
-
-    const slab = new THREE.Mesh(
-      new THREE.BoxGeometry(BOARD_W, 0.1, BOARD_D),
-      new THREE.MeshLambertMaterial({ color: 0x4e4e59, flatShading: true }),
-    );
-    slab.position.set(BOARD_CX, 0.05, cz);
-    slab.receiveShadow = true;
-    scene.add(slab);
 
     const north = cz - CHAMBER_D / 2;
     const south = cz + CHAMBER_D / 2;
@@ -349,10 +618,10 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     // The one over the doorway sits on the middle column, not over the arch
     // itself: the passage has its own light spilling through it, and a torch
     // there would wash the glow out rather than add to it.
-    addTorch(BOARD_CX, north + TORCH_INSET);
-    addTorch(BOARD_CX, south - TORCH_INSET);
-    addTorch(west + TORCH_INSET, cz);
-    addTorch(east - TORCH_INSET, cz);
+    addTorch(BOARD_CX, north + TORCH_INSET, -Math.PI / 2); // north wall, face +Z
+    addTorch(BOARD_CX, south - TORCH_INSET, Math.PI / 2); // south wall, face -Z
+    addTorch(west + TORCH_INSET, cz, 0);                  // west wall, face +X
+    addTorch(east - TORCH_INSET, cz, Math.PI);             // east wall, face -X
   };
 
   buildChamber(BOARD_CZ, "south");
@@ -373,8 +642,8 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   addWall(WALL_T, HALL_LEN, archLeft - WALL_T / 2, hallCZ);
   addWall(WALL_T, HALL_LEN, archRight + WALL_T / 2, hallCZ);
 
-  addTorch(archLeft + TORCH_INSET, hallCZ);
-  addTorch(archRight - TORCH_INSET, hallCZ);
+  addTorch(archLeft + TORCH_INSET, hallCZ, 0);       // left wall, face +X
+  addTorch(archRight - TORCH_INSET, hallCZ, Math.PI); // right wall, face -X
 
   // --------------------------------------------------------------- the arch
 
@@ -420,8 +689,9 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   // ------------------------------------------------------------------ camera
 
-  let yaw = 0;
-  let pitch = PITCH_START;
+  // Start in first-person — the overhead view is disabled.
+  let yaw = -Math.PI / 2; // facing east, matching the player's initial facing
+  let pitch = FP_PITCH_START;
   let distance = CAMERA_START_DISTANCE;
 
   /**
@@ -442,7 +712,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   const focus = new THREE.Vector3(BOARD_CX, 0, BOARD_CZ);
   const applyFocus = () => focus.set(home.x + panOffset.x, 0, home.z + panOffset.z);
   /** Smoothed copy, so a wheel notch or a released drag settles instead of snapping. */
-  const smoothed = { yaw, pitch, distance, x: focus.x, z: focus.z };
+  const smoothed = { yaw, pitch, distance, x: BOARD_CX, z: BOARD_CZ };
 
   /**
    * **First person is the same rig with the distance taken out.** `yaw` and
@@ -459,7 +729,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
    * happened to be behind. Leaving puts the overhead view back exactly as you
    * left it, so F is a look through the eyes and not a loss of your framing.
    */
-  let firstPerson = false;
+  let firstPerson = true;
   let overheadPitch = PITCH_START;
   let overheadYaw = 0;
 
@@ -567,6 +837,10 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       return firstPerson;
     },
 
+    get yaw() {
+      return yaw;
+    },
+
     pan(dx, dy) {
       // A pan is a drag of the board, and in first person there is no board to
       // drag — you are standing on it.
@@ -601,18 +875,12 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     },
 
     resetView() {
-      // V is "put the view back", and first person is a view. Being dropped
-      // into your own head with no way out but the same key you pressed to get
-      // there is the kind of thing a reset exists to undo.
-      firstPerson = false;
-      yaw = 0;
-      pitch = PITCH_START;
-      overheadPitch = PITCH_START;
+      // Reset the first-person view to face the character's direction.
+      pitch = FP_PITCH_START;
+      yaw = playerFacing === 1 ? -Math.PI / 2 : Math.PI / 2;
       smoothed.pitch = pitch;
-      distance = CAMERA_START_DISTANCE;
-      panOffset.x = 0;
-      panOffset.z = 0;
-      applyFocus();
+      smoothed.yaw = yaw;
+      applyCamera();
     },
 
     update(dt) {
@@ -622,6 +890,11 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       smoothed.x = damp(smoothed.x, focus.x, 14, dt);
       smoothed.z = damp(smoothed.z, focus.z, 14, dt);
       applyCamera();
+
+      for (const door of doors) {
+        door.angle = damp(door.angle, door.target, 8, dt);
+        door.group.rotation.y = door.angle;
+      }
     },
 
     groundAt(ndcX, ndcY) {
@@ -670,14 +943,36 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       targetRing.position.set(toX(px), 0.14, toZ(py));
     },
 
+    toggleDoorAt(ndcX, ndcY) {
+      if (doors.length === 0) return null;
+      ndc.set(ndcX, ndcY);
+      raycaster.setFromCamera(ndc, camera);
+      const doorMeshes = doors.map((d) => d.mesh);
+      const hits = raycaster.intersectObjects(doorMeshes, false);
+      if (hits.length === 0) return null;
+      const hitMesh = hits[0]!.object;
+      const idx = doors.findIndex((d) => d.mesh === hitMesh);
+      return idx >= 0 ? idx : null;
+    },
+
+    updateDoors(doorsClosed) {
+      if (!doorsClosed) return;
+      for (let i = 0; i < doors.length; i++) {
+        const door = doors[i]!;
+        const closed = doorsClosed[i] ?? true;
+        door.open = !closed;
+        door.target = closed ? 0 : -Math.PI / 2;
+      }
+    },
+
     animateScenery(elapsed) {
       torches.forEach((torch, i) => {
         const flicker = 0.82 + Math.sin(elapsed * 9 + i * 1.7) * 0.09 + Math.sin(elapsed * 23 + i) * 0.05;
+        torch.flame.scale.setScalar(0.85 + flicker * 0.25);
         // Ten brackets — four to a room and two down the hall. Each has a whole
         // wall to carry, but the rooms are small enough that the real-time
         // game's brightness would wash their floors out.
         torch.light.intensity = 8 * flicker;
-        torch.flame.scale.setScalar(0.85 + flicker * 0.25);
       });
       // The doorway breathes with the same beat the torches keep, so the way
       // through still draws the eye without being a marker.

@@ -1,25 +1,10 @@
 /**
- * The turn-based simulation. Same shape of thing as `src/server/game.ts` — it
- * owns every piece of mutable state, runs whether or not a client is attached,
- * and hands out snapshots — but the rules are a board game rather than a
- * real-time one.
+ * Real-time simulation on the tactics board. The player moves continuously
+ * with WASD or click-to-move, enemies chase and attack on their own clock,
+ * and combat is cooldown-gated rather than turn-gated.
  *
- * **Real time only animates; it never decides.** A round is resolved whole the
- * instant the player asks for it — their action, then every woken hellhound's,
- * in that order — and `busyUntil` then holds the board still for one window
- * while all of it plays out *at once*. Nothing that happens during that window
- * can change the outcome, so the clock is free to be a clock.
- *
- * **The sequence is in the resolution, not in the playback.** Each hound still
- * decides against the board the ones before it left, so what happens is exactly
- * what a strictly sequential round would have produced; what changed is that you
- * watch your step and both of theirs together instead of waiting out three
- * animations end to end. A turn used to cost the sum of everyone's; it now costs
- * the longest of them.
- *
- * The one place that costs something is death, which is resolved *after* the
- * animation rather than at the moment the number changed — a hellhound dies at
- * the end of the blow that killed it, not at the start.
+ * The board, the grid, the rooms and the corridor are unchanged — only the
+ * pacing is different.
  */
 
 import { ACTIONS } from "../../../src/shared/actions.js";
@@ -47,6 +32,9 @@ import {
   ARENA_ROOM,
   ATTACK_MS,
   AUTO_RESTART_DELAY_MS,
+  BOARD_REGION,
+  FAR_REGION,
+  HALL_REGION,
   HOUND_DAMAGE,
   HOUND_MAX_HEALTH,
   HOUND_STARTS,
@@ -59,24 +47,24 @@ import {
   PLAYER_MAX_MANA,
   PLAYER_START,
   RANGED_DAMAGE,
-  STEP_MS,
+  SQUARE_PX,
   TILE_PX,
-  THROW_RECOVER_MS,
-  TURN_GAP_MS,
-  approachCells,
+  blockedByDoor,
   canReach,
   cellAtPoint,
   cellCenter,
+  clampPointToFloor,
   clampToGrid,
   distance,
   facingToward,
   inGrid,
+  inRegion,
   isOver,
-  sameCell,
   stepToward,
   withinAggro,
   type Cell,
   type Phase,
+  type Region,
   type TacticsInput,
   type TacticsSnapshot,
 } from "../shared/tactics.js";
@@ -86,8 +74,35 @@ import {
 const DAMAGE_COLOR_DEALT = "#ffd633";
 const DAMAGE_COLOR_TAKEN = "#ff6b6b";
 
-/** Bodies are permanent, but there are only ever two of them. */
 const MAX_CORPSES = 8;
+
+/** Player walking speed in room pixels per second. */
+const PLAYER_SPEED = 200;
+/** Enemy chase speed in room pixels per second. */
+const ENEMY_SPEED = 140;
+/** Melee cooldown in ms. */
+const MELEE_COOLDOWN_MS = 600;
+/** Ranged cooldown in ms. */
+const RANGED_COOLDOWN_MS = 1000;
+/** How often a hellhound bites, in ms. */
+const ENEMY_ATTACK_INTERVAL_MS = 1500;
+/** Recovery after throwing a dagger, in ms. */
+const THROW_RECOVER_MS = 220;
+/** How fast an un-aggro'd hound patrols, in room pixels per second. */
+const PATROL_SPEED = 50;
+/** Width of the horizontal patrol beat, in room pixels (~1.5 squares). */
+const PATROL_SPAN = SQUARE_PX * 1.5;
+
+// Corridor waypoints for cross-region navigation.
+const HALL_MID_COL = HALL_REGION.col + Math.floor(HALL_REGION.cols / 2);
+/** Inside the board, one cell north of the hall entrance. */
+const BOARD_DOORWAY = cellCenter({ col: HALL_MID_COL, row: BOARD_REGION.row + BOARD_REGION.rows - 1 });
+/** Inside the far room, one cell south of the hall exit. */
+const FAR_DOORWAY = cellCenter({ col: HALL_MID_COL, row: FAR_REGION.row });
+/** First cell inside the hall, on the board side. */
+const HALL_NORTH = cellCenter({ col: HALL_MID_COL, row: HALL_REGION.row });
+/** Last cell inside the hall, on the far-room side. */
+const HALL_SOUTH = cellCenter({ col: HALL_MID_COL, row: HALL_REGION.row + HALL_REGION.rows - 1 });
 
 const FIRST_NAMES = ["Bran", "Kael", "Mira", "Oswin", "Tamsin", "Vek", "Yara", "Dorn", "Isolde", "Rook"];
 const LAST_NAMES = ["the Bold", "Ashfoot", "Quickblade", "of Thornvale", "Emberhand", "Greycloak", "the Lost"];
@@ -96,44 +111,29 @@ const pick = <T,>(values: readonly T[]): T => values[Math.floor(Math.random() * 
 
 // ------------------------------------------------------------------ types
 
-/**
- * A slide between two squares. The *cell* is updated the moment the move is
- * committed; this only carries the model from one square's centre to the next,
- * so what you see is always catching up to what has already been decided.
- */
-interface Slide {
-  from: Point;
-  to: Point;
-  startAt: number;
-  endAt: number;
-}
-
 interface Actor {
   id: string;
   name: string;
   cell: Cell;
-  /** Room pixels — where the model actually is, mid-slide. */
+  pos: Point;
   x: number;
   y: number;
   facing: 1 | -1;
   health: number;
   maxHealth: number;
-  slide: Slide | null;
 }
 
 interface Hound extends Actor {
   glyph: string;
   color: string;
-  /**
-   * Awake and hunting *you*, individually. A hound wakes when you come within a
-   * square of it or when a dagger finds it, and never settles again. Until then
-   * it doesn't take turns at all — it stands where it started and watches.
-   */
   aggro: boolean;
+  nextAttackAt: number;
+  patrolLeft: number;
+  patrolRight: number;
+  patrolDir: 1 | -1;
 }
 
 interface DamageNumber {
-  /** Stable across snapshots, so the client can pair one up to interpolate it. */
   id: string;
   x: number;
   y: number;
@@ -142,7 +142,6 @@ interface DamageNumber {
   age: number;
 }
 
-/** A dagger in flight, with the blow it is carrying. */
 interface Thrown {
   projectile: Projectile;
   target: Point;
@@ -161,14 +160,6 @@ export class TacticsGame {
   private corpses!: Corpse[];
 
   private phase!: Phase;
-  private round!: number;
-
-  /**
-   * No new turn may begin before this — the one window the whole round's
-   * animation plays in. It is the *longest* action of the round, not the sum:
-   * everything was resolved before it opened.
-   */
-  private busyUntil!: number;
 
   private targetId!: string | null;
   private activeSlot = 0;
@@ -179,31 +170,25 @@ export class TacticsGame {
   private tombstones!: Array<{ x: number; y: number; gameElapsedMs: number }>;
   private inspectingId!: string | null;
 
-  /**
-   * Every blow the pack landed in the round just resolved, for the client's
-   * lunges — a list rather than a single blow, because two hounds now bite in
-   * the same instant and one field would only ever animate the last of them.
-   *
-   * The counter is *not* reset between encounters: a client that saw seq 5 and
-   * then sees a fresh 1 would replay a bite that never happened.
-   */
   private strikes!: Array<{ enemyId: string; seq: number }>;
   private strikeSeq = 0;
+  private doorsClosed!: [boolean, boolean];
 
   private deathAt!: number;
   private killCount!: number;
   private nextEnemySeq = 0;
 
-  /**
-   * The action-bar blind, repurposed. There is no cooldown in a turn-based game
-   * — the square darkens when you attack and refills as your turn comes back
-   * round, which is the same information the sweep always carried: *not yet*.
-   */
+  /** The direction WASD is pushing, as a unit vector or zero. */
+  private moveDir: Point = { x: 0, y: 0 };
+  /** Click-to-move destination, cleared on arrival or when WASD overrides. */
+  private moveTarget: Point | null = null;
+
+  /** Player attack cooldown. */
+  private nextAttackAt = 0;
   private cooldownSlot = 0;
   private cooldownStart: number | null = null;
   private cooldownTotal = 0;
 
-  /** Reuses the HUD's Auto-Res toggle: restart the encounter after a death. */
   private autoRestart = false;
 
   private gameElapsedMs = 0;
@@ -220,40 +205,49 @@ export class TacticsGame {
       id: "player",
       name: this.playerName,
       cell: { ...PLAYER_START },
+      pos: cellCenter(PLAYER_START),
       ...cellCenter(PLAYER_START),
-      // Facing the pack across the board — as they are facing you.
       facing: 1,
       health: PLAYER_MAX_HEALTH,
       maxHealth: PLAYER_MAX_HEALTH,
-      slide: null,
     };
 
-    this.enemies = HOUND_STARTS.map((cell) => ({
-      id: `hound-${this.nextEnemySeq++}`,
-      ...HELLHOUND,
-      cell: { ...cell },
-      ...cellCenter(cell),
-      facing: -1,
-      health: HOUND_MAX_HEALTH,
-      maxHealth: HOUND_MAX_HEALTH,
-      slide: null,
-      aggro: false,
-    }));
+    this.enemies = HOUND_STARTS.map((cell) => {
+      const center = cellCenter(cell);
+      const left = clampPointToFloor({ x: center.x - PATROL_SPAN / 2, y: center.y });
+      const right = clampPointToFloor({ x: center.x + PATROL_SPAN / 2, y: center.y });
+      return {
+        id: `hound-${this.nextEnemySeq++}`,
+        ...HELLHOUND,
+        cell: { ...cell },
+        pos: center,
+        ...center,
+        facing: -1 as const,
+        health: HOUND_MAX_HEALTH,
+        maxHealth: HOUND_MAX_HEALTH,
+        aggro: false,
+        nextAttackAt: 0,
+        patrolLeft: left.x,
+        patrolRight: right.x,
+        patrolDir: -1 as const,
+      };
+    });
 
     this.corpses = [];
     this.phase = "player";
-    this.round = 1;
-    this.busyUntil = 0;
     this.targetId = null;
     this.thrown = null;
     this.damageNumbers = [];
     this.tombstones = [];
     this.inspectingId = null;
     this.strikes = [];
-    this.journey = null;
+    this.moveDir = { x: 0, y: 0 };
+    this.moveTarget = null;
+    this.nextAttackAt = 0;
     this.deathAt = 0;
     this.killCount = 0;
     this.cooldownStart = null;
+    this.doorsClosed = [true, true];
     this.log = ["Two hellhounds watch you from across the vault."];
     this.lastTick = now;
   }
@@ -265,21 +259,29 @@ export class TacticsGame {
     this.lastTick = now;
     this.gameElapsedMs += dt * 1000;
 
-    this.advanceSlides(now);
-    this.advanceThrown(dt);
-    this.updateDamageNumbers(dt);
-    this.wakeAdjacent();
-    this.faceThePlayer();
-
     if (this.phase === "dead" && this.autoRestart && now - this.deathAt >= AUTO_RESTART_DELAY_MS) {
       this.restart(now);
       return;
     }
 
-    // Everything below is turn machinery, and a finished encounter has no turns.
     if (isOver(this.phase)) return;
-    if (now < this.busyUntil) return;
 
+    // Player movement — continuous, every tick.
+    this.movePlayer(dt);
+
+    // Enemy AI — woken hounds chase and attack, others patrol.
+    for (const enemy of this.enemies) {
+      if (enemy.aggro) {
+        this.updateEnemy(enemy, dt, now);
+      } else {
+        this.patrolEnemy(enemy, dt);
+      }
+    }
+
+    this.advanceThrown(dt);
+    this.updateDamageNumbers(dt);
+    this.wakeAdjacent();
+    this.faceThePlayer();
     this.retireDead();
 
     if (this.player.health <= 0) {
@@ -290,38 +292,210 @@ export class TacticsGame {
     }
     if (this.enemies.length === 0) {
       this.finish("cleared", "Both hounds are down. The vault is quiet.");
-      return;
     }
-
-    // The pack's round was resolved the moment the player's action was — the
-    // window that has just closed was only the watching of it.
-    if (this.phase !== "enemy") return;
-    this.beginPlayerTurn();
-    // A walk longer than a round spends the turn it just opened, and the next,
-    // until it arrives. This is the only thing that ever takes a turn without
-    // the player asking for it in that turn — which is what committing to a
-    // walk across the room means.
-    this.advanceJourney(now, true);
   }
 
-  /** Carry every mid-move model from one square's centre toward the next. */
-  private advanceSlides(now: number): void {
-    for (const actor of [this.player, ...this.enemies]) {
-      const slide = actor.slide;
-      if (!slide) continue;
-      const span = slide.endAt - slide.startAt;
-      const t = span > 0 ? Math.min(1, Math.max(0, (now - slide.startAt) / span)) : 1;
-      actor.x = slide.from.x + (slide.to.x - slide.from.x) * t;
-      actor.y = slide.from.y + (slide.to.y - slide.from.y) * t;
-      if (t >= 1) actor.slide = null;
+  // --------------------------------------------------------- player movement
+
+  /**
+   * Move the player each tick. WASD (moveDir) has priority over click-to-move
+   * (moveTarget). Position updates are free-form — no grid snapping.
+   */
+  private movePlayer(dt: number): void {
+    const dirLen = Math.hypot(this.moveDir.x, this.moveDir.y);
+
+    if (dirLen > 0.001) {
+      // WASD: move in the held direction, cancelling any click target.
+      this.moveTarget = null;
+      const nx = this.moveDir.x / dirLen;
+      const ny = this.moveDir.y / dirLen;
+      const step = PLAYER_SPEED * dt;
+      this.stepPlayer(nx * step, ny * step);
+    } else if (this.moveTarget) {
+      // Click-to-move: walk toward the target.
+      const from = this.playerAt();
+      const remaining = distance(from, this.moveTarget);
+      if (remaining < 2) {
+        this.moveTarget = null;
+        return;
+      }
+      const step = Math.min(PLAYER_SPEED * dt, remaining);
+      const nx = (this.moveTarget.x - from.x) / remaining;
+      const ny = (this.moveTarget.y - from.y) / remaining;
+      if (!this.stepPlayer(nx * step, ny * step)) this.moveTarget = null;
     }
+  }
+
+  /** Apply a pixel displacement to the player, clamping to the floor. Returns whether it moved. */
+  private stepPlayer(dx: number, dy: number): boolean {
+    const from = this.playerAt();
+    const raw = { x: from.x + dx, y: from.y + dy };
+    const target = clampPointToFloor(raw);
+    if (distance(from, target) < 0.01) return false;
+
+    const targetCell = clampToGrid(target);
+    if (blockedByDoor(this.player.cell, targetCell, this.doorsClosed)) return false;
+
+    this.player.facing = facingToward(from, target, this.player.facing);
+    this.player.pos = { ...target };
+    this.player.x = target.x;
+    this.player.y = target.y;
+    this.player.cell = clampToGrid(target);
+    return true;
+  }
+
+  // --------------------------------------------------------- enemy AI
+
+  /**
+   * Horizontal patrol for a hound that hasn't noticed the player yet. It walks
+   * back and forth within its patrol beat, reversing at either end.
+   */
+  private patrolEnemy(enemy: Hound, dt: number): void {
+    const pos = this.at(enemy);
+    let nx = pos.x + PATROL_SPEED * dt * enemy.patrolDir;
+
+    if (nx <= enemy.patrolLeft) {
+      nx = enemy.patrolLeft;
+      enemy.patrolDir = 1;
+    } else if (nx >= enemy.patrolRight) {
+      nx = enemy.patrolRight;
+      enemy.patrolDir = -1;
+    }
+
+    const target = clampPointToFloor({ x: nx, y: pos.y });
+    const targetCell = clampToGrid(target);
+    if (blockedByDoor(enemy.cell, targetCell, this.doorsClosed)) return;
+    enemy.facing = enemy.patrolDir;
+    enemy.pos = { ...target };
+    enemy.x = target.x;
+    enemy.y = target.y;
+    enemy.cell = targetCell;
   }
 
   /**
-   * Anything you are standing next to notices you. Run every tick rather than
-   * at the end of a move, so it is true of *any* way the gap closed — your step
-   * toward it, or its step toward you.
+   * One enemy's per-tick behaviour: chase the player, bite when close enough.
    */
+  private updateEnemy(enemy: Hound, dt: number, now: number): void {
+    const enemyPos = this.at(enemy);
+    const playerPos = this.playerAt();
+
+    if (canReach(enemyPos, playerPos)) {
+      // In melee range: attack on cooldown.
+      enemy.facing = facingToward(enemyPos, playerPos, enemy.facing);
+      if (now >= enemy.nextAttackAt) {
+        this.strikes.push({ enemyId: enemy.id, seq: ++this.strikeSeq });
+        this.player.health = Math.max(0, this.player.health - HOUND_DAMAGE);
+        this.spawnDamageNumber(this.player.x, this.player.y, HOUND_DAMAGE, DAMAGE_COLOR_TAKEN);
+        this.inspectingId = null;
+        enemy.nextAttackAt = now + ENEMY_ATTACK_INTERVAL_MS;
+      }
+      return;
+    }
+
+    // Chase: move toward a position where the enemy could bite.
+    const goal = this.chooseGoal(enemy);
+    if (!goal) return;
+
+    const gap = distance(enemyPos, goal);
+    if (gap < 1) return;
+    const step = Math.min(ENEMY_SPEED * dt, gap);
+    const nx = (goal.x - enemyPos.x) / gap;
+    const ny = (goal.y - enemyPos.y) / gap;
+
+    const target = clampPointToFloor({ x: enemyPos.x + nx * step, y: enemyPos.y + ny * step });
+    const targetCell = clampToGrid(target);
+    if (blockedByDoor(enemy.cell, targetCell, this.doorsClosed)) return;
+    enemy.facing = facingToward(enemyPos, target, enemy.facing);
+    enemy.pos = { ...target };
+    enemy.x = target.x;
+    enemy.y = target.y;
+    enemy.cell = targetCell;
+  }
+
+  /** Which region a cell belongs to, falling back to the board. */
+  private regionOfCell(cell: Cell): Region {
+    if (inRegion(HALL_REGION, cell)) return HALL_REGION;
+    if (inRegion(FAR_REGION, cell)) return FAR_REGION;
+    return BOARD_REGION;
+  }
+
+  /**
+   * When enemy and player are in different regions, return the next waypoint
+   * on the path through the corridor that connects them. From a wide room
+   * the enemy first walks to the doorway (staying on floor the whole way),
+   * then steps across into the hall once it is close enough.
+   */
+  private nextWaypoint(enemy: Hound): Point | null {
+    const from = this.at(enemy);
+    const enemyRegion = this.regionOfCell(enemy.cell);
+    const playerRegion = this.regionOfCell(this.player.cell);
+
+    if (enemyRegion === BOARD_REGION) {
+      if (this.doorsClosed[0]) return null;
+      if (distance(from, BOARD_DOORWAY) > TILE_PX) return BOARD_DOORWAY;
+      return HALL_NORTH;
+    }
+
+    if (enemyRegion === FAR_REGION) {
+      if (this.doorsClosed[1]) return null;
+      if (distance(from, FAR_DOORWAY) > TILE_PX) return FAR_DOORWAY;
+      return HALL_SOUTH;
+    }
+
+    // In the hall: head toward whichever end leads to the player.
+    if (playerRegion === BOARD_REGION) {
+      if (this.doorsClosed[0]) return null;
+      return BOARD_DOORWAY;
+    }
+    if (this.doorsClosed[1]) return null;
+    return FAR_DOORWAY;
+  }
+
+  /**
+   * Pick a point the enemy wants to reach — somewhere it could bite from, on
+   * the side it is already approaching from so two hounds flank naturally.
+   *
+   * When the enemy and player are in different regions the goal is a corridor
+   * doorway rather than a combat position, so the hound navigates through
+   * the corridor before trying to flank.
+   *
+   * canReach requires dx >= dy (a horizontal cone), so the goal must have
+   * enough horizontal offset. If the hound is coming from nearly straight
+   * above or below the player, nudge the approach to the nearest side of the
+   * cone so it doesn't stand there unable to bite.
+   */
+  private chooseGoal(enemy: Hound): Point | null {
+    const from = this.at(enemy);
+    const player = this.playerAt();
+
+    // Different region: navigate through the corridor doorways first.
+    const enemyRegion = this.regionOfCell(enemy.cell);
+    const playerRegion = this.regionOfCell(this.player.cell);
+    if (enemyRegion !== playerRegion) {
+      return this.nextWaypoint(enemy);
+    }
+
+    // Same region: head for a position within the canReach cone.
+    const toEnemy = distance(player, from);
+    if (toEnemy < 1) return null;
+    let dirX = (from.x - player.x) / toEnemy;
+    let dirY = (from.y - player.y) / toEnemy;
+
+    if (Math.abs(dirX) < Math.abs(dirY)) {
+      dirX = Math.sign(dirX || 1) * Math.abs(dirY);
+      const len = Math.hypot(dirX, dirY);
+      dirX /= len;
+      dirY /= len;
+    }
+
+    return {
+      x: player.x + dirX * (MELEE_RANGE * 0.7),
+      y: player.y + dirY * (MELEE_RANGE * 0.7),
+    };
+  }
+
+  // --------------------------------------------------------- shared tick helpers
+
   private wakeAdjacent(): void {
     const player = this.playerAt();
     for (const enemy of this.enemies) {
@@ -330,15 +504,10 @@ export class TacticsGame {
     }
   }
 
-  /**
-   * A hound that is hunting you looks at you. Only while it is standing still:
-   * mid-step it faces the way it is travelling, or a hound crossing the board
-   * would strafe sideways with its head turned.
-   */
   private faceThePlayer(): void {
     for (const enemy of this.enemies) {
-      if (!enemy.aggro || enemy.slide) continue;
-      enemy.facing = facingToward(this.at(enemy), this.playerAt(), enemy.facing);
+      if (!enemy.aggro) continue;
+      // Only face the player when standing still (not mid-chase, handled in updateEnemy).
     }
   }
 
@@ -351,7 +520,7 @@ export class TacticsGame {
 
     this.thrown = null;
     const enemy = this.enemies.find((e) => e.id === thrown.enemyId);
-    if (!enemy) return; // it died to something else mid-flight
+    if (!enemy) return;
     this.wound(enemy, thrown.damage);
   }
 
@@ -364,14 +533,11 @@ export class TacticsGame {
     }
   }
 
-  /** Move anything at zero health onto the floor as a body. */
   private retireDead(): void {
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const enemy = this.enemies[i]!;
       if (enemy.health > 0) continue;
 
-      // As in the real-time game, dying clears the target: a kill leaves you
-      // holding nothing, and the body has to be clicked afresh.
       if (this.targetId === enemy.id) this.targetId = null;
 
       this.corpses.push(corpseOf({
@@ -394,368 +560,49 @@ export class TacticsGame {
 
   private finish(phase: Phase, line: string): void {
     this.phase = phase;
-    this.journey = null;
+    this.moveTarget = null;
+    this.moveDir = { x: 0, y: 0 };
     this.cooldownStart = null;
     this.inspectingId = null;
     this.say(line);
   }
 
-  // ------------------------------------------------------------ enemy turns
+  // ----------------------------------------------------------- combat
 
-  /**
-   * The pack's whole round, resolved in one call and played out in one window.
-   *
-   * **Order still decides; it just no longer costs time.** The hounds are walked
-   * in queue order and each one reads the board the ones before it left — the
-   * player's committed cell included — so the outcome is the same one a strictly
-   * sequential round produced. Only the woken are in the queue, so a hound you
-   * have not disturbed takes no turn at all.
-   *
-   * Returns the longest single animation, which is what the window has to cover.
-   *
-   * **The round's damage to the player is one number, not one per bite.** Every
-   * blow lands in the same instant, so two hounds used to put two 7s on the same
-   * spot — which had to be nudged apart to be legible at all, and then read as
-   * two separate things happening rather than as the one exchange that actually
-   * did. What the player needs off that number is what the round cost them, so
-   * the round tells them: a single **14** where the pack reached them. The log
-   * still names each hound and each bite, and each biter still animates its own
-   * lunge, so nothing is lost by adding the numbers up.
-   */
-  private resolvePackRound(now: number): number {
-    this.strikes = [];
-    let longest = 0;
-    let taken = 0;
-    for (const enemy of this.enemies.filter((e) => e.aggro)) {
-      const action = this.resolveHoundAction(enemy, now);
-      longest = Math.max(longest, action.ms);
-      taken += action.damage;
-    }
-    // The blows are summed rather than the health difference, so a killing round
-    // still reports what it hit you for instead of the sliver you had left.
-    if (taken > 0) this.spawnDamageNumber(this.player.x, this.player.y, taken, DAMAGE_COLOR_TAKEN);
-    return longest;
-  }
-
-  /**
-   * One hellhound's action, committed now and animated from now: how long it
-   * takes to watch, and what it took off the player.
-   */
-  private resolveHoundAction(enemy: Hound, now: number): { ms: number; damage: number } {
-    if (canReach(this.at(enemy), this.playerAt())) {
-      enemy.facing = facingToward(this.at(enemy), this.playerAt(), enemy.facing);
-      // Name the striker outright. Every hound that bites this round gets its
-      // own lunge because the client is told which one, not left to work it out.
-      this.strikes.push({ enemyId: enemy.id, seq: ++this.strikeSeq });
-      this.player.health = Math.max(0, this.player.health - HOUND_DAMAGE);
-      // A panel parked over the middle of the board hides the thing biting you.
-      this.inspectingId = null;
-      this.say(`The ${enemy.name.toLowerCase()} tears into you for ${HOUND_DAMAGE}.`);
-      return { ms: ATTACK_MS, damage: HOUND_DAMAGE };
-    }
-
-    const destination = this.chooseHoundDestination(enemy);
-    if (!destination) {
-      this.say(`The ${enemy.name.toLowerCase()} circles, hemmed in.`);
-      return { ms: 0, damage: 0 };
-    }
-
-    enemy.facing = facingToward(this.at(enemy), cellCenter(destination), enemy.facing);
-    const travel = this.walkTo(enemy, destination, now);
-    this.say(`The ${enemy.name.toLowerCase()} closes.`);
-    return { ms: travel, damage: 0 };
-  }
-
-  /**
-   * Where a hellhound walks. It aims for a spot it could *bite* from — one of
-   * the cells around the player that its own reach rule allows, which is why the
-   * pack comes at you from the sides rather than from directly above or below —
-   * and covers as much of the way there as a turn allows.
-   *
-   * Picking the approach cell nearest to *itself* is what makes two hounds
-   * flank instead of queueing: whichever side each is already on is the side it
-   * commits to, and the separation check keeps the second one off the first
-   * one's spot.
-   *
-   * Returns null when it is already as close as it can usefully get.
-   */
-  private chooseHoundDestination(enemy: Hound): Cell | null {
-    const from = this.at(enemy);
-    const player = this.playerAt();
-
-    const spots = approachCells(player)
-      .map((cell) => cellCenter(cell))
-      .filter((spot) => this.isClear(spot, enemy.id))
-      .sort((a, b) => distance(from, a) - distance(from, b));
-
-    const goal = spots[0];
-    if (!goal) return null;
-
-    // As far along as this turn allows, then snapped to the nearest cell that
-    // isn't inside someone. Walking *through* another body is fine — nothing
-    // but the walls has ever collided in this game — but stopping in one isn't.
-    const wanted = stepToward(from, goal, MOVE_RANGE);
-    const landing = this.nearestClearCell(wanted, enemy.id);
-    if (!landing) return null;
-    return sameCell(landing, enemy.cell) ? null : landing;
-  }
-
-  /** Nothing living is standing here. Bodies never blocked anything. */
-  private isClear(point: Point, ignoreId?: string): boolean {
-    if (this.player.id !== ignoreId && distance(point, this.playerAt()) < MIN_SEPARATION) return false;
-    return !this.enemies.some(
-      (e) => e.id !== ignoreId && distance(point, this.at(e)) < MIN_SEPARATION,
-    );
-  }
-
-  /**
-   * The closest cell to a point that nobody is standing in, searched outward.
-   * A fine grid means the fallback is usually half a pace away, so being nudged
-   * off an occupied spot is not something the player can feel.
-   */
-  private nearestClearCell(point: Point, ignoreId?: string): Cell | null {
-    const start = clampToGrid(point);
-    for (let radius = 0; radius <= 6; radius++) {
-      let best: Cell | null = null;
-      let bestGap = Infinity;
-      for (let dr = -radius; dr <= radius; dr++) {
-        for (let dc = -radius; dc <= radius; dc++) {
-          if (Math.max(Math.abs(dc), Math.abs(dr)) !== radius) continue;
-          const cell = { col: start.col + dc, row: start.row + dr };
-          if (!inGrid(cell)) continue;
-          if (!this.isClear(cellCenter(cell), ignoreId)) continue;
-          const gap = distance(point, cellCenter(cell));
-          if (gap < bestGap) { bestGap = gap; best = cell; }
-        }
-      }
-      if (best) return best;
-    }
-    return null;
-  }
-
-  // ----------------------------------------------------------- player turns
-
-  private beginPlayerTurn(): void {
-    this.phase = "player";
-    this.round++;
-    this.cooldownStart = null;
-  }
-
-  /**
-   * Hand the board over — which now means resolving the pack's answer as well,
-   * here and now, so the whole round can be watched at once.
-   *
-   * `actionMs` is the player's own animation, gap included. The window is the
-   * **longest** action of the round rather than the sum of them: everything has
-   * already happened by the time it opens, so there is nothing to wait for but
-   * the slowest thing on screen.
-   *
-   * `blindSlot` is the action-bar square to darken, and is null for a step or a
-   * pass. That isn't cosmetic restraint: the 3D client derives the player's
-   * swing from a *fresh cooldown*, so darkening a square for a move would swing
-   * the sword at nothing.
-   *
-   * `gapMs` is the beat left after the round's slowest thing finishes, and is
-   * zero for a leg of a walk that has more walking after it — the beat is what
-   * separates one action from the next, and a walk in progress is one action.
-   */
-  private endPlayerTurn(
-    now: number,
-    actionMs: number,
-    blindSlot: number | null,
-    gapMs: number = TURN_GAP_MS,
-  ): void {
-    // Anything you have walked up to notices you before the round is fixed.
-    this.wakeAdjacent();
-    const packMs = this.resolvePackRound(now);
-    this.phase = "enemy";
-    this.busyUntil = now + Math.max(actionMs, packMs + gapMs);
-
-    if (blindSlot === null) {
-      this.cooldownStart = null;
-      return;
-    }
-
-    // The blind's length is known exactly: it is the window, because the window
-    // is the whole round.
-    this.cooldownSlot = blindSlot;
-    this.cooldownStart = now;
-    this.cooldownTotal = this.busyUntil - now;
-  }
-
-  private canAct(now: number): boolean {
-    return this.phase === "player" && now >= this.busyUntil;
-  }
-
-  /**
-   * **You may click any floor there is, however far away, and you will walk
-   * there.** `MOVE_RANGE` has stopped being a limit on where you may go and
-   * become the price of getting there: it is how much ground a round buys, so a
-   * destination four rounds away costs four rounds, and the pack acts in every
-   * one of them. A walk across the room is a commitment — you arrive having been
-   * bitten the whole way — rather than a click that is simply refused.
-   *
-   * The destination is held here and walked off a leg at a time by
-   * `advanceJourney`, which `tick` calls as each turn opens.
-   */
-  private journey!: Cell | null;
-
-  /** Whether a cell is somewhere the player could set off for at all. */
-  private canWalkTo(cell: Cell, now: number): boolean {
-    return this.canAct(now) && inGrid(cell) && !sameCell(cell, this.player.cell);
-  }
-
-  /**
-   * One leg of a walk: as much of the way as a round buys, and then the pack's
-   * answer, exactly as a single step always did.
-   *
-   * A leg that gets no closer means the way is shut — a wall across the line, or
-   * somebody standing where you were going. Nothing here routes around either,
-   * so the walk gives up and says so instead of spending the rest of the fight
-   * grinding into masonry.
-   */
-  private advanceJourney(now: number, resuming: boolean): void {
-    const destination = this.journey;
-    if (!destination || !this.canAct(now)) return;
-
-    const from = this.playerAt();
-    const to = cellCenter(destination);
-    const remaining = distance(from, to);
-
-    // Arrived, or within a cell of it — the tolerance is there for a
-    // destination that can never be landed on exactly, not to let a walk finish
-    // half a square from where it was pointed.
-    if (sameCell(this.player.cell, destination) || remaining <= TILE_PX) {
-      this.journey = null;
-      return;
-    }
-
-    const landing = this.nearestClearCell(stepToward(from, to, MOVE_RANGE), this.player.id);
-    if (!landing || distance(cellCenter(landing), to) >= remaining - 0.001) {
-      this.journey = null;
-      this.say("Your way is blocked.");
-      return;
-    }
-
-    const arriving = sameCell(landing, destination);
-    this.step(landing, now, !arriving, resuming);
-    if (arriving) this.journey = null;
-  }
-
-  /**
-   * Commit one leg's walk and hand the round over.
-   *
-   * **A leg with more walking after it is timed to run into the next one**, or a
-   * walk across the room reads as stop and go: step, stand, step, stand. Three
-   * things put those pauses in, and `more` takes out all three.
-   *
-   * - The beat between actors (`TURN_GAP_MS`) is a *pause*, which is exactly
-   *   right at the end of a move and wrong in the middle of one.
-   * - The window has to cover the pack as well, so a leg whose own slide is
-   *   shorter than a hound's answer leaves the player standing for the rest of
-   *   it — the slide is therefore **stretched to the whole window**. You walk a
-   *   little slower in a round where something bites you, which is a great deal
-   *   less noticeable than stopping dead in the middle of a corridor.
-   * - `tick` runs every 50ms, so a leg is committed up to a tick *after* the
-   *   window it follows closed. Starting the slide at `busyUntil` rather than at
-   *   `now` hands the stride over at exactly the point the last one put it down,
-   *   and the lateness comes off the new leg instead of showing as a stall.
-   *   That one is only true of a leg that *has* a previous leg, which is what
-   *   `resuming` says: before the first one, `busyUntil` is whatever the last
-   *   action left behind — zero on a fresh encounter — and starting a slide
-   *   there would put its beginning at the epoch and snap the player to the far
-   *   end of it.
-   */
-  private step(cell: Cell, now: number, more: boolean, resuming: boolean): void {
-    const resumeAt = more && resuming ? Math.min(now, this.busyUntil) : now;
-    this.player.facing = facingToward(this.playerAt(), cellCenter(cell), this.player.facing);
-    const travel = this.walkTo(this.player, cell, now);
-
-    // `endPlayerTurn` owns `busyUntil` from here: the pack moves with you, so
-    // the window has to cover whichever of you takes longest.
-    const gap = more ? 0 : TURN_GAP_MS;
-    this.endPlayerTurn(now, travel + gap, null, gap);
-
-    if (more && this.player.slide) {
-      this.player.slide.startAt = resumeAt;
-      this.player.slide.endAt = this.busyUntil;
-    }
-  }
-
-  /**
-   * Stop a walk in progress. A journey takes its own turns the instant each one
-   * opens, so the player never gets a gap to act in — which makes *asking* to
-   * act the way out of it. Anything that would spend a turn, and any click, ends
-   * the walk whether or not it can be obeyed right now.
-   */
-  private stopWalking(): void {
-    this.journey = null;
-  }
-
-  private wait(now: number): void {
-    this.say("You hold your ground.");
-    this.endPlayerTurn(now, TURN_GAP_MS, null);
-  }
-
-  /**
-   * Put a weapon in your hand. That is *all* it does — choosing an attack and
-   * making one are two separate acts here, so the number keys and the bar's
-   * squares can be pressed freely at any point in a turn without spending it.
-   */
   private selectSlot(index: number): void {
     if (!ACTIONS[index]) return;
     this.activeSlot = index;
   }
 
   /**
-   * Swing the selected weapon at the mark. **This always spends the turn** —
-   * with nothing marked, or with the wrong weapon in hand for the distance, you
-   * swing at air and the pack still gets to answer. Committing to an attack is
-   * the decision; whether it lands is the consequence.
+   * Swing the selected weapon at the mark. Gated by a cooldown rather than
+   * by a turn — the player can keep moving while waiting for the next swing.
    */
   private attack(now: number): void {
-    if (!this.canAct(now)) return;
+    if (isOver(this.phase)) return;
+    if (now < this.nextAttackAt) return;
 
     const action = ACTIONS[this.activeSlot];
     const target = this.livingTarget();
     const reach = target ? canReach(this.playerAt(), this.at(target)) : false;
     if (target) this.player.facing = facingToward(this.playerAt(), this.at(target), this.player.facing);
 
-    const spend = (actionMs: number) => {
-      this.endPlayerTurn(now, actionMs, this.activeSlot);
-    };
-
     if (!action || !target) {
-      this.say(target ? "You have nothing to swing." : "You swing at nothing.");
-      spend(ATTACK_MS + TURN_GAP_MS);
-      return;
+      return; // No target or no weapon — just do nothing.
     }
 
     if (action.kind === "melee") {
-      if (!reach) {
-        this.say(`Your blade falls short of the ${target.name.toLowerCase()}.`);
-        spend(ATTACK_MS + TURN_GAP_MS);
-        return;
-      }
+      if (!reach) return; // Out of range — wait until closer.
       this.wound(target, MELEE_DAMAGE);
       this.wake(target);
       this.say(`You cut the ${target.name.toLowerCase()} for ${MELEE_DAMAGE}.`);
-      spend(ATTACK_MS + TURN_GAP_MS);
+      this.startCooldown(now, MELEE_COOLDOWN_MS);
       return;
     }
 
-    // Daggers keep the real-time game's dead zone: anything already inside
-    // sword reach is too close to throw at.
-    if (reach) {
-      this.say(`The ${target.name.toLowerCase()} is too close to throw at.`);
-      spend(ATTACK_MS + TURN_GAP_MS);
-      return;
-    }
+    // Ranged: dead zone inside melee reach.
+    if (reach) return;
 
-    // Woken the moment the dagger leaves the hand, not when it lands. `spend`
-    // fixes the round's queue immediately, so a hound roused on impact — a beat
-    // later, mid-flight — would already have missed the round it was roused in
-    // and stand there for a turn. Waking here is what lets it answer at once.
     this.wake(target);
 
     const from = { x: this.player.x, y: this.player.y };
@@ -769,7 +616,14 @@ export class TacticsGame {
     this.say(`You throw a dagger at the ${target.name.toLowerCase()}.`);
 
     const flightMs = (Math.hypot(to.x - from.x, to.y - from.y) / PROJECTILE_SPEED) * 1000;
-    spend(flightMs + THROW_RECOVER_MS + TURN_GAP_MS);
+    this.startCooldown(now, flightMs + THROW_RECOVER_MS + RANGED_COOLDOWN_MS);
+  }
+
+  private startCooldown(now: number, totalMs: number): void {
+    this.nextAttackAt = now + totalMs;
+    this.cooldownSlot = this.activeSlot;
+    this.cooldownStart = now;
+    this.cooldownTotal = totalMs;
   }
 
   private wound(enemy: Hound, amount: number): void {
@@ -777,12 +631,6 @@ export class TacticsGame {
     this.spawnDamageNumber(enemy.x, enemy.y, amount, DAMAGE_COLOR_DEALT);
   }
 
-  /**
-   * Wake one hellhound, for good. There is no calming down and no calling to the
-   * others: a dagger in one hound's flank is that hound's business, and its
-   * packmate across the room goes on watching until you come within a square of
-   * it or put something in it too.
-   */
   private wake(enemy: Hound): void {
     if (enemy.aggro) return;
     enemy.aggro = true;
@@ -797,9 +645,6 @@ export class TacticsGame {
       return;
     }
 
-    // One guard, as in the real-time game: any input at all dismisses the
-    // inspect menu, except the mouse messages, which have to tell ✕ from inside
-    // from outside first.
     if (this.inspectingId && msg.type !== "click" && msg.type !== "dblclick") {
       this.inspectingId = null;
     }
@@ -809,7 +654,6 @@ export class TacticsGame {
         this.onKey(msg.key, msg.code, now);
         break;
       case "click":
-        this.stopWalking();
         this.onClick({ x: msg.x, y: msg.y }, now);
         break;
       case "dblclick":
@@ -819,12 +663,15 @@ export class TacticsGame {
         this.selectSlot(msg.index);
         break;
       case "attack":
-        this.stopWalking();
         this.attack(now);
         break;
-      case "wait":
-        this.stopWalking();
-        if (this.canAct(now)) this.wait(now);
+      case "move":
+        this.setMoveDir(msg.dx, msg.dy);
+        break;
+      case "toggleDoor":
+        if (msg.index === 0 || msg.index === 1) {
+          this.doorsClosed[msg.index] = !this.doorsClosed[msg.index];
+        }
         break;
       case "resurrect":
         this.restart(now);
@@ -837,26 +684,22 @@ export class TacticsGame {
     }
   }
 
+  /** Set or clear the movement direction from WASD. */
+  private setMoveDir(dx: number, dy: number): void {
+    this.moveDir = { x: dx, y: dy };
+  }
+
   private onKey(key: string, code: string, now: number): void {
     if (code === "Tab") {
       this.cycleTarget();
       return;
     }
-    // The number keys only choose a weapon. Space commits the attack and "."
-    // passes the turn — the two keys that cost you something are the two that
-    // aren't next to each other on the keyboard by accident.
     if (key >= "1" && key <= "5" && key.length === 1) {
       this.selectSlot(Number(key) - 1);
       return;
     }
     if (key === " ") {
-      this.stopWalking();
       this.attack(now);
-      return;
-    }
-    if (key === ".") {
-      this.stopWalking();
-      if (this.canAct(now)) this.wait(now);
       return;
     }
     if (key === "r") {
@@ -869,13 +712,11 @@ export class TacticsGame {
   private onClick(point: Point, now: number): void {
     if (this.inspectingId) {
       if (hitsRect(LOOT_CLOSE_RECT, point)) this.inspectingId = null;
-      else if (hitsRect(LOOT_MENU_RECT, point)) return; // swallowed
-      else this.inspectingId = null; // outside dismisses, and does nothing else
+      else if (hitsRect(LOOT_MENU_RECT, point)) return;
+      else this.inspectingId = null;
       return;
     }
 
-    // A finished encounter takes any click as "again" — except a death, which
-    // has the HUD's own Resurrect button and shouldn't restart by accident.
     if (isOver(this.phase)) {
       if (this.phase !== "dead") this.restart(now);
       return;
@@ -883,19 +724,14 @@ export class TacticsGame {
 
     const enemy = this.enemyNear(point);
     if (enemy) {
-      // Clicking the mark drops it. One gesture both ways, so there is always a
-      // way to end up holding nothing without hunting for a second one.
       this.targetId = this.targetId === enemy.id ? null : enemy.id;
       return;
     }
 
-    // Walking somewhere beats selecting what is lying there: a body underfoot
-    // must never cost you the move. Double-click is how you get at a corpse.
-    //
+    // Click-to-move: walk to the clicked point (no grid snapping).
     const cell = cellAtPoint(point);
-    if (cell && this.canWalkTo(cell, now)) {
-      this.journey = cell;
-      this.advanceJourney(now, false);
+    if (cell && inGrid(cell)) {
+      this.moveTarget = { ...point };
       return;
     }
 
@@ -903,7 +739,6 @@ export class TacticsGame {
     if (corpse) this.targetId = corpse.id;
   }
 
-  /** Pick radius around a body — the same half-body the separation rule uses. */
   private enemyNear(point: Point): Hound | null {
     let best: Hound | null = null;
     let bestGap = MIN_SEPARATION;
@@ -925,7 +760,7 @@ export class TacticsGame {
   }
 
   private onDoubleClick(point: Point): void {
-    if (this.inspectingId) return; // the leading click already handled the panel
+    if (this.inspectingId) return;
 
     const enemy = this.enemyNear(point);
     if (enemy) {
@@ -953,27 +788,8 @@ export class TacticsGame {
 
   // ---------------------------------------------------------------- helpers
 
-  /**
-   * Commit a walk and start playing it out. Returns how long it will take.
-   *
-   * The duration is proportional to the ground covered rather than fixed, so a
-   * half-pace adjustment doesn't take as long as a full stride. On the old
-   * board every move was exactly one square and a constant looked fine; now that
-   * you can stop anywhere, a constant would make short moves crawl.
-   */
-  private walkTo(actor: Actor, cell: Cell, now: number): number {
-    const to = cellCenter(cell);
-    const travelled = distance({ x: actor.x, y: actor.y }, to);
-    const ms = Math.max(120, STEP_MS * (travelled / MOVE_RANGE));
-
-    actor.cell = { ...cell };
-    actor.slide = { from: { x: actor.x, y: actor.y }, to, startAt: now, endAt: now + ms };
-    return ms;
-  }
-
-  /** An actor's committed position — where the rules say it is, mid-walk or not. */
   private at(actor: Actor): Point {
-    return cellCenter(actor.cell);
+    return actor.pos;
   }
 
   private playerAt(): Point {
@@ -998,39 +814,34 @@ export class TacticsGame {
     if (this.log.length > LOG_LINES * 3) this.log.splice(0, this.log.length - LOG_LINES * 3);
   }
 
-  /** Whether the selected weapon would connect right now — the bar's gold border. */
   private selectedCanAttack(now: number): boolean {
-    if (!this.canAct(now)) return false;
+    if (now < this.nextAttackAt) return false;
     const target = this.livingTarget();
     if (!target) return false;
     const reach = canReach(this.playerAt(), this.at(target));
     return ACTIONS[this.activeSlot]?.kind === "melee" ? reach : !reach;
   }
 
-  /** The single line telling the player what the board is waiting for. */
-  private hint(now: number): string {
+  private hint(): string {
     switch (this.phase) {
       case "cleared":
         return "The pack is dead. Click anywhere to go again.";
       case "dead":
         return "Killed. Resurrect on the HUD, or press R.";
-      case "enemy":
-        return "The pack moves.";
       default:
         break;
     }
-    if (!this.canAct(now)) return "…";
 
     const target = this.livingTarget();
     if (!target) {
       return this.anyAwake()
-        ? "Click a hellhound to mark it, or anywhere on the floor to walk there."
-        : "Nothing has noticed you. Mark one and throw, or walk into their reach.";
+        ? "Click a hellhound to mark it, or WASD to move."
+        : "Nothing has noticed you yet. Mark one and throw, or walk closer.";
     }
     if (canReach(this.playerAt(), this.at(target))) {
-      return "In reach — 1 for the sword, Space to swing. Too close to throw.";
+      return "In reach — 1 for the sword, Space to swing.";
     }
-    return "Out of reach — 2 for a dagger, Space to throw. Or step closer.";
+    return "Out of reach — 2 for a dagger, Space to throw. Or move closer.";
   }
 
   private anyAwake(): boolean {
@@ -1078,8 +889,6 @@ export class TacticsGame {
         y: e.y,
         health: e.health,
         maxHealth: e.maxHealth,
-        // `chasing` is what drops a wolf's head and lights its eyes in the 3D
-        // rig; here that posture is simply "awake".
         chasing: e.aggro,
         aggro: e.aggro,
         facing: e.facing,
@@ -1104,14 +913,11 @@ export class TacticsGame {
       projectiles: this.thrown ? [{ ...this.thrown.projectile }] : [],
       damageNumbers: this.damageNumbers.map((dn) => ({ ...dn })),
       targetId: this.targetId,
-      // Drives the enemy portrait and the red target ring: a *living* mark is
-      // one you are fighting, a body is merely one you are looking at.
       attacking: target !== null,
       activeSlot: this.activeSlot,
       cooldown,
       selectedCanAttack: this.selectedCanAttack(now),
-      // The destination ring, shown only while the step is still playing out.
-      moveTarget: this.player.slide ? { ...this.player.slide.to } : null,
+      moveTarget: this.moveTarget ? { ...this.moveTarget } : null,
       pathCells: [],
       gameElapsedMs: this.gameElapsedMs,
       killCount: this.killCount,
@@ -1128,18 +934,17 @@ export class TacticsGame {
         gameElapsedMs: t.gameElapsedMs,
       })),
 
-      // ------------------------------------------------------ turn-based only
+      // Kept for TacticsSnapshot compatibility.
       phase: this.phase,
-      round: this.round,
-      // With nothing drawn on the floor, this disc is the only thing telling the
-      // player where they may go — so it is the rule itself, sent over.
-      moveRange: this.canAct(now) ? MOVE_RANGE : 0,
+      round: 0,
+      moveRange: isOver(this.phase) ? 0 : MOVE_RANGE,
       moveFrom: this.playerAt(),
       meleeRange: MELEE_RANGE,
       aggro: this.anyAwake(),
       strikes: this.strikes.map((s) => ({ ...s })),
       log: this.log.slice(-LOG_LINES),
-      hint: this.hint(now),
+      hint: this.hint(),
+      doorsClosed: [...this.doorsClosed],
     };
   }
 }
