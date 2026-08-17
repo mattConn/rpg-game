@@ -2,6 +2,10 @@
 
 Guidance for working in this repo.
 
+> **Active project: `rpg-tactics/`** (port 3300). This is the main game — a
+> first-person turn-based dungeon. All new work goes here unless stated
+> otherwise. `cd rpg-tactics && npm install && npm start`.
+
 ## What this is
 
 A single-player browser RPG in a dungeon, with **three front ends and two sets
@@ -13,7 +17,7 @@ and draws what comes back, and decides nothing.
 |---|---|---|---|
 | root (`src/`) | 3000 | 2D glyphs on a `<canvas>` | real-time |
 | `rpg-3d/` | 3200 | low-poly WebGL | real-time (the *same* `GameSimulation`) |
-| `rpg-tactics/` | 3300 | low-poly WebGL | **turn-based**, on a 3x3 board |
+| **`rpg-tactics/`** ★ | 3300 | first-person WebGL | **turn-based**, on a 3x3 board |
 
 - The **real-time** game is the original: roam a 3x3 dungeon of rooms, and fight
   one hellhound at a time by engaging it and closing the distance yourself. The
@@ -39,32 +43,41 @@ server simulation and a websocket again — hence `fastify` + `@fastify/static` 
 
 ## Run / build
 
+**The active game is `rpg-tactics/`** — run everything from that directory:
+
 ```bash
+cd rpg-tactics
 npm install
-npm start          # esbuild-bundles the client, then serves at http://localhost:3000
-npm run dev        # same, but restarts the server on change (tsx watch)
+npm start              # bundles the client, then serves at http://localhost:3300
+npm run dev            # same, but restarts the server on file change (tsx watch)
 npm run watch:client   # rebuild the client bundle on change
-npm run typecheck  # tsc --noEmit
+npx tsc --noEmit       # typecheck
+npm run build:client   # rebuild client bundle only
 ```
 
-The client entry `src/client/main.ts` is bundled by esbuild to
-`public/game.js` (IIFE). `public/index.html` loads that bundle. The bundle is
-gitignored — `npm start`/`build:client` regenerates it.
+The client entry `rpg-tactics/src/client/main.ts` is bundled by esbuild to
+`rpg-tactics/public/tactics.js` (IIFE). The bundle is gitignored —
+`npm start`/`build:client` regenerates it.
 
-Each server listens on `PORT`, defaulting to its own, so nothing collides.
-
-The other two front ends are separate npm projects with their own
-`node_modules`, and each is run the same way from its own directory:
+`rpg-tactics` imports shared code from the root `src/` and models from
+`rpg-3d/`, so after changing anything in those directories, typecheck and
+rebuild **in all three projects**:
 
 ```bash
-cd rpg-3d      && npm install && npm start   # real-time 3D, http://localhost:3200
-cd rpg-tactics && npm install && npm start   # turn-based,   http://localhost:3300
+# from the repo root
+npm run typecheck                                   # root src/
+cd rpg-3d      && npx tsc --noEmit && npm run build:client
+cd rpg-tactics && npx tsc --noEmit && npm run build:client
 ```
 
-All three can run at once. **The root project's `typecheck` covers only `src/`**
-— after touching anything under `rpg-3d/` or `rpg-tactics/`, or anything in
-`src/` that they import (which is most of it), run `npx tsc --noEmit` and
-`npm run build:client` **in each of the three**.
+The two older front ends still work if needed:
+
+```bash
+npm install && npm start                             # 2D glyphs,    http://localhost:3000
+cd rpg-3d      && npm install && npm start           # real-time 3D, http://localhost:3200
+```
+
+Each server listens on its own port, so nothing collides.
 
 One thing to know before testing by hand: a server holds **one** simulation
 shared by every client connected to it. Two browser tabs are two views of the
@@ -508,7 +521,9 @@ exactly the points they did when the board was three squares wide.
 
 | | |
 |---|---|
-| click anywhere on the floor | walk there — however far, a round of ground at a time |
+| **W** / **S** (or **↑** / **↓**) | walk forward / backward (relative to facing) |
+| **A** / **D** (or **←** / **→**) | turn left / right |
+| mouse drag | look around |
 | click a hellhound | mark it; click it again to unmark |
 | **1** / **2**, or a bar square | choose sword / dagger. **Costs nothing** |
 | **Space**, or the Attack button | swing the chosen weapon at the mark |
@@ -516,8 +531,8 @@ exactly the points they did when the board was three squares wide.
 | **Tab** / **Esc** | cycle the mark / drop it |
 | double-click a body | inspect it |
 | **R** | restart the encounter |
-| drag / right-drag / wheel / **V** | orbit / pan / zoom / reset the view |
-| **F** | look out of the player's own eyes, and back |
+| **V** | reset view to face the character's direction |
+| right-click a door | open / close it |
 
 The three constants worth holding in your head while reading the rest: a
 hellhound has 24 HP and hits for 7, the player has 100 and hits for 8 (sword) or
@@ -711,44 +726,23 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
     select the slot everywhere, so the label is true everywhere.
 - **Clicking the mark drops it.** One gesture both ways; clicking a *different*
   hellhound switches rather than toggling.
-- **The camera orbits here, and that is safe here.** The real-time client pins
-  its yaw because WASD is world-relative; this game has no directional input at
-  all, so there is nothing a rotation can break. Drag orbits, right/shift-drag
-  pans, wheel zooms, V resets. A drag past `DRAG_THRESHOLD` swallows the click
-  that follows, or looking around would also order a step.
-  - **F is the same rig with the distance taken out.** `yaw` and `pitch` stop
-    saying where the camera hangs and start saying where the player is looking;
-    the eye rides the *interpolated* position undamped, because this is the one
-    point in the scene that has to be exactly where the player is. Each mode
-    keeps its own `yaw`/`pitch` pair, because the numbers mean different things:
-    overhead, pitch is an angle down at the floor that never nears the horizon
-    and yaw is which corner you watch from; from the eyes, the horizon is the
-    middle of the pitch range and yaw is the way you face. **Entering looks the
-    way the character is facing, not the way the camera was** — inheriting the
-    camera's yaw drops you nose-first into whatever wall it was behind — and
-    leaving restores the overhead view exactly. The vertical drag flips with the
-    mode: overhead a drag pulls the *scene*, from the eyes it moves your *head*,
-    and a head that looked up when you dragged down would be the one control
-    here fighting the hand on it. Zoom and pan do nothing in first person, the
-    player's own rig is hidden (`actors.player.root.visible`) rather than left
-    to be seen from inside, and V drops you back out.
-    - `project` returns a point far off-canvas for anything **behind** the
-      camera. Overhead nothing the overlay labels ever is; in first person your
-      own head is, every time something bites you, and the mirrored projection
-      would otherwise put the damage number somewhere arbitrary on screen.
-  - **It frames the board while you are on it, and follows you once you leave.**
-    `stage.follow` sets what the camera is looking at — the board's centre, or
-    the player's own position when their cell is outside `BOARD_REGION` — and a
-    drag is an offset from that, clamped to `PAN_LIMIT`. Pinning the view to the
-    board was right for the whole of a fight and became wrong the moment the
-    door opened: a player who walks into the corridor otherwise walks out of the
-    frame and behind the south wall. Following only off the board leaves the
-    fight framed exactly as it always was.
+- **The camera is first-person only.** The eye rides the player's interpolated
+  position; the player's own model is hidden. WASD uses **tank controls**: W/S
+  move forward/backward relative to the camera's facing, A/D turn left/right
+  (with reversed steering while walking backwards). Mouse drag looks around
+  (yaw + pitch). V resets the view to face the character's current direction.
+  A drag past `DRAG_THRESHOLD` swallows the click that follows, or looking
+  around would also order a step.
+  - `project` returns a point far off-canvas for anything **behind** the
+    camera — the player's own head when something bites you — so a mirrored
+    projection doesn't put the damage number somewhere arbitrary on screen.
+  - **The camera follows the player.** `stage.follow` sets what the camera
+    looks at — the player's position. The code still has an overhead mode in
+    `stage.ts` (`toggleFirstPerson`, overhead yaw/pitch storage) but nothing
+    in `main.ts` binds a key to it; the game starts in first person and stays
+    there.
 - **No hurt flash.** The tactics client passes `hurt: 0` into the shared
-  `drawOverlay` rather than tracking it. The real-time game needs the red
-  vignette because from behind the shoulder a bite is easy to miss; here the
-  whole board is on screen and the log names what hit you, so it only got in the
-  way of reading the board.
+  `drawOverlay` rather than tracking it. The log names what hit you.
 - **Nothing is drawn on the floor.** The board was once nine raised flagstones,
   back when the grid *was* the game and you hopped between squares. Now that a
   cell is a fraction of a pace and you stop where you like, ruling the floor
@@ -776,6 +770,13 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
     north wall instead of its south — which is what "identical" means here.
     There is one room in `stage.ts`, built twice, so anything done to the arena
     lands on the far room too.
+  - **Each doorway has a physical door** — a thick wooden slab with a barred
+    window (procedural texture). Right-click opens/closes it. Door state is
+    **server-authoritative** (`doorsClosed[]` in `TacticsGame`); the server
+    prevents movement through closed doors via `clampToDoors` and
+    `blockedByDoor`. On the client, closed doors have front/back blocker walls
+    and a horizontal ceiling to prevent the camera from seeing through them,
+    plus camera Z clamping (`DOOR_CAM_MARGIN`).
 - Same testing convention again: the rules are pure and the simulation runs
   headless, so drive `TacticsGame` with a throwaway `node:assert` script under
   `tsx` and delete it. Typecheck and build **in `rpg-tactics/`**.
