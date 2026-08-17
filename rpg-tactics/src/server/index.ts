@@ -62,7 +62,7 @@ setInterval(() => {
   const now = Date.now();
   game.tick(now);
 
-  const snapshot = JSON.stringify(game.snapshot(now));
+  const snapshot = JSON.stringify(game.snapshot());
   for (const client of wss.clients) {
     if (client.readyState === 1) client.send(snapshot); // WebSocket.OPEN
   }

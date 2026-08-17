@@ -34,7 +34,6 @@ import {
   ATTACK_MS,
   AUTO_RESTART_DELAY_MS,
   BOARD_REGION,
-  DOOR_BOUNDARY_Y,
   FAR_REGION,
   HALL_REGION,
   HOUND_DAMAGE,
@@ -51,7 +50,6 @@ import {
   RANGED_DAMAGE,
   SQUARE_PX,
   TILE_PX,
-  blockedByDoor,
   canReach,
   cellAtPoint,
   cellCenter,
@@ -82,6 +80,68 @@ const MAX_CORPSES = 8;
 const PLAYER_SPEED = 200;
 /** Enemy chase speed in room pixels per second. */
 const ENEMY_SPEED = 140;
+/**
+ * How far apart, as an angle about the player, two hounds sharing a side come
+ * in — so a pack of two sits at ±40°, which at biting distance is 81px of
+ * daylight against a `MIN_SEPARATION` of 45. That margin is the whole point:
+ * aim them somewhere they *both fit* and the push-apart below never has to
+ * fire, and neither ends up shoved in behind the other.
+ *
+ * An angle rather than a sideways offset because "side by side" is across the
+ * line the pack is coming in on, and that line is wherever the player happens
+ * to be. Spreading them in y reads as abreast only while the chase runs
+ * east-west, and stacks them nose to tail the moment it runs north-south.
+ */
+const FLANK_ANGLE = (80 * Math.PI) / 180;
+/**
+ * How far off due east or west a hound will come at you.
+ *
+ * This was once a hard requirement — `canReach` carried a cone, and a goal
+ * outside it was a goal the hound could not bite from. Reach is a plain circle
+ * now, so nothing enforces it any more and it survives purely as *staging*: the
+ * pack coming in off your shoulders reads as flanking, where hounds converging
+ * from every bearing at once reads as a scrum. Widen it towards 90° and they
+ * swarm; that is a look, not a bug.
+ */
+const APPROACH_HALF_ANGLE = (40 * Math.PI) / 180;
+/**
+ * How close a packmate has to be before a hound starts leaning away from it.
+ * Comfortably wider than `MIN_SEPARATION` so the lean begins *before* the hard
+ * push-apart has to fire, and comfortably narrower than the gap between two
+ * flank slots, so a pack that has reached its places stops shoving and stands
+ * still.
+ */
+const AVOID_RANGE = MIN_SEPARATION * 1.5;
+/** How hard that lean pulls against the goal. Above 1, so it can win up close. */
+const AVOID_WEIGHT = 1.5;
+/** How near its slot counts as standing on it. Slack against per-tick jitter. */
+const ARRIVE_SLACK = 4;
+/**
+ * How long a hellhound's bite keeps the world turning after it lands.
+ *
+ * Long enough for the lunge and the damage number to read as an answer to what
+ * you did, short enough that a pack cannot chain bites into a turn of their
+ * own: they bite every `ENEMY_ATTACK_INTERVAL_MS`, which is far wider than
+ * this, so each extension runs out before the next bite is due.
+ */
+const STRIKE_WINDOW_MS = 400;
+/**
+ * The beat the pack gets to answer any act of yours in — enough at
+ * `ENEMY_SPEED` for a hound to cover most of a square.
+ *
+ * Without it the window is only as long as your own animation, and a swing that
+ * takes 600ms hands the pack 600ms *of that swing*, which is not a turn so much
+ * as an overlap. It also matters that they be given long enough to finish
+ * arriving: with time moving only on acts, a pack left permanently just short
+ * of you is a fight that never starts.
+ */
+const PACK_TURN_MS = 600;
+/**
+ * Passes of the push-apart. Two hounds settle in one; a third shoved out of one
+ * packmate and into another needs the next, and it costs nothing to be right
+ * for a bigger pack than this game ships.
+ */
+const SEPARATION_PASSES = 3;
 /** Melee cooldown in ms. */
 const MELEE_COOLDOWN_MS = 600;
 /** Ranged cooldown in ms. */
@@ -90,6 +150,16 @@ const RANGED_COOLDOWN_MS = 1000;
 const ENEMY_ATTACK_INTERVAL_MS = 1500;
 /** Recovery after throwing a dagger, in ms. */
 const THROW_RECOVER_MS = 220;
+/**
+ * No input at all for this long stops the world wherever it stands, *including*
+ * mid-chase. The rule below already freezes an idle board, but permanent aggro
+ * means a hound that has noticed you is "in combat" for the rest of the
+ * encounter — so without this backstop the one case an away player actually
+ * needs covering, being eaten while not at the keyboard, is the one case that
+ * never froze.
+ */
+const AFK_TIMEOUT_MS = 15_000;
+
 /** How fast an un-aggro'd hound patrols, in room pixels per second. */
 const PATROL_SPEED = 50;
 /** Width of the horizontal patrol beat, in room pixels (~1.5 squares). */
@@ -174,7 +244,15 @@ export class TacticsGame {
 
   private strikes!: Array<{ enemyId: string; seq: number }>;
   private strikeSeq = 0;
-  private doorsClosed!: [boolean, boolean];
+
+  /**
+   * Each pursuing hound's place in the line abreast, as an angle about the
+   * player. Recomputed once at the top of every tick rather than per hound,
+   * because the enemy loop moves them one at a time: worked out inside
+   * `chooseGoal`, the second hound would be solving against a board the first
+   * had already changed, and the two could claim the same slot on the same tick.
+   */
+  private flankSlot = new Map<string, number>();
 
   private deathAt!: number;
   private killCount!: number;
@@ -184,6 +262,16 @@ export class TacticsGame {
   private moveDir: Point = { x: 0, y: 0 };
   /** Click-to-move destination, cleared on arrival or when WASD overrides. */
   private moveTarget: Point | null = null;
+
+  /**
+   * How long the world still has to run, in `simNow` ms — the deadline on the
+   * action being resolved. This is what carries the pseudo-turn: an act opens a
+   * window, the world runs inside it and stops dead at the end of it.
+   */
+  private actingUntil = 0;
+
+  /** Whether the player was walking last tick — see the handover in `tick`. */
+  private wasMoving = false;
 
   /** Player attack cooldown. */
   private nextAttackAt = 0;
@@ -195,6 +283,24 @@ export class TacticsGame {
 
   private gameElapsedMs = 0;
   private lastTick = 0;
+
+  /**
+   * **The simulation's own clock, and the only one any rule reads.** It advances
+   * with the tick while the world is running and simply stops while it isn't, so
+   * a deadline set before a pause — a bite due in 900ms, an attack cooldown, the
+   * auto-resurrect timer — is still 900ms away when the world starts again.
+   *
+   * Everything public still takes wall-clock ms, because `index.ts` and the
+   * freeze rule itself need real time; the conversion happens here and nowhere
+   * else. Deriving deadlines from `Date.now()` instead is what breaks: a minute
+   * of standing still would retire every timer at once and the pack would get a
+   * minute of free bites the instant you moved.
+   */
+  private simNow = 0;
+  /** Wall-clock ms of the last input of any kind. Only the AFK backstop reads it. */
+  private lastInputAt = 0;
+  /** Whether the last tick decided to stand still. Reported on the snapshot. */
+  private paused = false;
 
   constructor(now: number = Date.now()) {
     this.reset(now);
@@ -246,23 +352,55 @@ export class TacticsGame {
     this.moveDir = { x: 0, y: 0 };
     this.moveTarget = null;
     this.nextAttackAt = 0;
+    this.actingUntil = 0;
+    this.wasMoving = false;
     this.deathAt = 0;
     this.killCount = 0;
     this.cooldownStart = null;
-    this.doorsClosed = [true, true];
     this.log = ["Two hellhounds watch you from across the vault."];
     this.lastTick = now;
+    // Real time, not sim time: the backstop measures how long the player has
+    // been away from the keyboard. Left at 0 the encounter would open already
+    // timed out, and the world would never start.
+    this.lastInputAt = now;
+    this.paused = false;
   }
 
   // ------------------------------------------------------------------- tick
 
-  tick(now: number): void {
-    const dt = Math.min((now - this.lastTick) / 1000, 0.1);
-    this.lastTick = now;
+  tick(realNow: number): void {
+    const dt = Math.min((realNow - this.lastTick) / 1000, 0.1);
+    // Advanced whether or not the world runs, so a resume starts from *now*
+    // rather than replaying however long the pause lasted as one huge step.
+    this.lastTick = realNow;
+
+    // Coming to a halt is the end of an act, and the pack answers it like any
+    // other. Checked before the pause test and not inside the movement code,
+    // because the tick that notices you have stopped is exactly the tick that
+    // would otherwise freeze the world — leaving a hound stranded mid-stride,
+    // and quite possibly just short of you, with the fight yet to start.
+    const moving = this.moveTarget !== null || Math.hypot(this.moveDir.x, this.moveDir.y) > 0.001;
+    if (this.wasMoving && !moving) this.act(PACK_TURN_MS);
+    this.wasMoving = moving;
+
+    this.paused = !this.shouldRun(realNow);
+    if (this.paused) {
+      // Damage numbers used to be dropped here, because a still world never
+      // ages them and one caught mid-fade would hang at whatever alpha it had
+      // reached — which was the right call when a pause meant nobody was
+      // playing. Now that the world stops after *every* exchange, dropping them
+      // would blink the round's own numbers out a few hundred ms after they
+      // appeared, and always before they had finished rising. They hold instead,
+      // and resume ageing the moment the next act spends time. A frozen number
+      // over the thing it was taken off is a report of the round just fought.
+      return;
+    }
+
+    this.simNow += dt * 1000;
     this.gameElapsedMs += dt * 1000;
 
-    if (this.phase === "dead" && this.autoRestart && now - this.deathAt >= AUTO_RESTART_DELAY_MS) {
-      this.restart(now);
+    if (this.phase === "dead" && this.autoRestart && this.simNow - this.deathAt >= AUTO_RESTART_DELAY_MS) {
+      this.restart(realNow);
       return;
     }
 
@@ -271,10 +409,12 @@ export class TacticsGame {
     // Player movement — continuous, every tick.
     this.movePlayer(dt);
 
-    // Enemy AI — woken hounds chase and attack, others patrol.
+    // Enemy AI — woken hounds chase and attack, others patrol. The pack picks
+    // its line abreast first, off one board, before any of it moves.
+    this.assignFlanks();
     for (const enemy of this.enemies) {
       if (enemy.aggro) {
-        this.updateEnemy(enemy, dt, now);
+        this.updateEnemy(enemy, dt, this.simNow);
       } else {
         this.patrolEnemy(enemy, dt);
       }
@@ -288,7 +428,7 @@ export class TacticsGame {
 
     if (this.player.health <= 0) {
       this.tombstones.push({ x: this.player.x, y: this.player.y, gameElapsedMs: this.gameElapsedMs });
-      this.deathAt = now;
+      this.deathAt = this.simNow;
       this.finish("dead", "The pack pulls you down.");
       return;
     }
@@ -328,32 +468,12 @@ export class TacticsGame {
     }
   }
 
-  /**
-   * Prevent a raw position from crossing a closed door boundary. The check
-   * is minimal — just stop at the boundary — because `clampPointToFloor`
-   * snaps to cell centres that are already very close (half a tile) to the
-   * boundary. Visual blocking is handled client-side by a ceiling occluder
-   * and camera clamping.
-   */
-  private clampToDoors(from: Point, raw: Point): void {
-    for (let i = 0; i < 2; i++) {
-      if (!this.doorsClosed[i]) continue;
-      const by = DOOR_BOUNDARY_Y[i]!;
-      if (from.y < by && raw.y >= by) raw.y = by - 0.5;
-      else if (from.y >= by && raw.y < by) raw.y = by + 0.5;
-    }
-  }
-
   /** Apply a pixel displacement to the player, clamping to the floor. Returns whether it moved. */
   private stepPlayer(dx: number, dy: number): boolean {
     const from = this.playerAt();
     const raw = { x: from.x + dx, y: from.y + dy };
-    this.clampToDoors(from, raw);
     const target = clampPointToFloor(raw);
     if (distance(from, target) < 0.01) return false;
-
-    const targetCell = clampToGrid(target);
-    if (blockedByDoor(this.player.cell, targetCell, this.doorsClosed)) return false;
 
     this.player.facing = facingToward(from, target, this.player.facing);
     this.player.pos = { ...target };
@@ -364,6 +484,161 @@ export class TacticsGame {
   }
 
   // --------------------------------------------------------- enemy AI
+
+  /** Is anything else in the pack standing where this hound wants to be? */
+  private crowds(enemy: Hound, point: Point): boolean {
+    return this.enemies.some(
+      (other) => other.id !== enemy.id && distance(point, this.at(other)) < MIN_SEPARATION,
+    );
+  }
+
+  /** Is this point somewhere a hound may actually stand? */
+  private onFloor(point: Point): boolean {
+    return distance(clampPointToFloor(point), point) < 0.001;
+  }
+
+  /**
+   * Push a hound's intended position out of any packmate it would be standing
+   * in. `MIN_SEPARATION` has always been documented as "nothing may stand
+   * inside anything else" and until now nothing enforced it for the pack — it
+   * was only ever a click hit-radius — so two hounds converging from the same
+   * side merged into a single silhouette.
+   *
+   * Resolved against the others' *current* positions, which is what the tick's
+   * one-at-a-time loop makes available.
+   */
+  private separate(enemy: Hound, want: Point): Point {
+    let point = want;
+    for (let pass = 0; pass < SEPARATION_PASSES; pass++) {
+      let pushed = false;
+      for (const other of this.enemies) {
+        if (other.id === enemy.id) continue;
+        const at = this.at(other);
+        let dx = point.x - at.x;
+        let dy = point.y - at.y;
+        let gap = Math.hypot(dx, dy);
+        if (gap >= MIN_SEPARATION) continue;
+        // Exactly coincident: there is no direction to push along, so take one
+        // from the ids rather than dividing by zero and writing NaN onto the
+        // wire. Which way hardly matters — that they part, and always the same
+        // way for the same pair, does.
+        if (gap < 0.001) {
+          dx = enemy.id > other.id ? 1 : -1;
+          dy = 0;
+          gap = 1;
+        }
+        point = { x: at.x + (dx / gap) * MIN_SEPARATION, y: at.y + (dy / gap) * MIN_SEPARATION };
+        pushed = true;
+      }
+      if (!pushed) break;
+    }
+    return point;
+  }
+
+  /**
+   * How hard a hound is leaning away from its packmates, as a vector to blend
+   * into the chase.
+   *
+   * The hard push-apart guarantees bodies never overlap, and on its own that is
+   * what puts the pack in single file: a hound whose road is blocked presses
+   * toward its goal, gets clamped back every tick, and stands there grinding
+   * against the one in front for the rest of the fight — out of reach, and
+   * never getting round. Leaning away *while the goal still pulls* turns the
+   * press into a slide around. The two forces together are what make a pack
+   * open out instead of queueing.
+   */
+  private avoid(enemy: Hound, at: Point): Point {
+    let ax = 0;
+    let ay = 0;
+    for (const other of this.enemies) {
+      if (other.id === enemy.id) continue;
+      const there = this.at(other);
+      const dx = at.x - there.x;
+      const dy = at.y - there.y;
+      const gap = Math.hypot(dx, dy);
+      if (gap >= AVOID_RANGE || gap < 0.001) continue;
+      // Hardest right up against a packmate, nothing at all at the edge of
+      // notice — so arriving hounds ease apart rather than bouncing off.
+      const push = (AVOID_RANGE - gap) / AVOID_RANGE;
+      ax += (dx / gap) * push;
+      ay += (dy / gap) * push;
+    }
+    return { x: ax, y: ay };
+  }
+
+  /**
+   * Commit a hound's step: onto floor, and out of its packmates. Every move a
+   * hound makes goes through here — patrol and chase alike — so there is one
+   * place that decides where a body may end up, rather than the same six lines
+   * of bookkeeping twice with the rule in neither.
+   */
+  private place(enemy: Hound, raw: Point): Point {
+    const wanted = clampPointToFloor(raw);
+    let target = wanted;
+
+    if (this.crowds(enemy, wanted)) {
+      const clear = this.separate(enemy, wanted);
+      // The push only counts if it lands on floor. Where it can't — the
+      // corridor, which is barely two hounds wide — the one behind holds where
+      // it is rather than squeezing through its packmate. That is the single
+      // place the pack cannot go side by side, and queueing is what a tunnel
+      // ought to force.
+      target = this.onFloor(clear) ? clear : this.at(enemy);
+    }
+
+    enemy.pos = { ...target };
+    enemy.x = target.x;
+    enemy.y = target.y;
+    enemy.cell = clampToGrid(target);
+    return target;
+  }
+
+  /**
+   * Where each pursuing hound is headed, as an angle about the player.
+   *
+   * Every hound used to solve this alone — the direction from the player out to
+   * itself, at biting distance — which is the *same answer* for any two coming
+   * in from the same side. So the pack converged on one point, and once bodies
+   * stopped passing through each other the one behind spent the rest of the
+   * fight wedged against its packmate's back, out of reach and unable to get
+   * round. Spreading the aim is what stops that happening; the push-apart is
+   * only the backstop for when it isn't enough.
+   *
+   * **Only hounds sharing a side are spread.** Approaches are staged east and
+   * west, so those are the only two sides there are, and two hounds already on
+   * opposite ones are flanking properly — nothing to fix, and rotating them
+   * would walk one round the player for no reason. It is a pack crowding in
+   * from the *same* side that has to open out into a line abreast.
+   *
+   * Sorted by where they already are rather than by their place in the array:
+   * the hound further round takes the slot further round, so each keeps its
+   * place in the line. By array position the pack could swap ends mid-chase and
+   * cross through each other to do it.
+   *
+   * A hound still finding its way through the corridor gets no slot — it is
+   * steering by waypoints, and has no side to hold until it is in the room.
+   */
+  private assignFlanks(): void {
+    this.flankSlot.clear();
+    const player = this.playerAt();
+    const playerRegion = this.regionOfCell(this.player.cell);
+    const pack = this.enemies.filter(
+      (enemy) => enemy.aggro && this.regionOfCell(enemy.cell) === playerRegion,
+    );
+    if (pack.length < 2) return;
+
+    for (const side of [1, -1] as const) {
+      const abreast = pack.filter((enemy) => (this.at(enemy).x >= player.x ? 1 : -1) === side);
+      if (abreast.length < 2) continue;
+
+      // Ascending around the arc. Screen y grows downward, so on the west side
+      // that order is reversed — the same sweep seen from the other end.
+      const order = [...abreast].sort((a, b) => side * (this.at(a).y - this.at(b).y));
+      order.forEach((enemy, i) => {
+        this.flankSlot.set(enemy.id, (i - (order.length - 1) / 2) * FLANK_ANGLE);
+      });
+    }
+  }
 
   /**
    * Horizontal patrol for a hound that hasn't noticed the player yet. It walks
@@ -381,16 +656,8 @@ export class TacticsGame {
       enemy.patrolDir = -1;
     }
 
-    const raw = { x: nx, y: pos.y };
-    this.clampToDoors(pos, raw);
-    const target = clampPointToFloor(raw);
-    const targetCell = clampToGrid(target);
-    if (blockedByDoor(enemy.cell, targetCell, this.doorsClosed)) return;
+    this.place(enemy, { x: nx, y: pos.y });
     enemy.facing = enemy.patrolDir;
-    enemy.pos = { ...target };
-    enemy.x = target.x;
-    enemy.y = target.y;
-    enemy.cell = targetCell;
   }
 
   /**
@@ -400,17 +667,22 @@ export class TacticsGame {
     const enemyPos = this.at(enemy);
     const playerPos = this.playerAt();
 
-    if (canReach(enemyPos, playerPos)) {
-      // In melee range: attack on cooldown.
-      enemy.facing = facingToward(enemyPos, playerPos, enemy.facing);
-      if (now >= enemy.nextAttackAt) {
-        this.strikes.push({ enemyId: enemy.id, seq: ++this.strikeSeq });
-        this.player.health = Math.max(0, this.player.health - HOUND_DAMAGE);
-        this.spawnDamageNumber(this.player.x, this.player.y, HOUND_DAMAGE, DAMAGE_COLOR_TAKEN);
-        this.inspectingId = null;
-        enemy.nextAttackAt = now + ENEMY_ATTACK_INTERVAL_MS;
-      }
-      return;
+    // Biting and moving are not exclusive. Reach is a wide circle and a slot is
+    // one point in it, so a hound that stopped dead the instant it could bite
+    // froze wherever it happened to enter reach — which is how the second one
+    // ended up loitering on the first one's shoulder for the whole fight
+    // instead of coming up alongside. It bites from where it is, and keeps
+    // taking its place while it does.
+    const biting = canReach(enemyPos, playerPos);
+    if (biting && now >= enemy.nextAttackAt) {
+      this.strikes.push({ enemyId: enemy.id, seq: ++this.strikeSeq });
+      this.player.health = Math.max(0, this.player.health - HOUND_DAMAGE);
+      this.spawnDamageNumber(this.player.x, this.player.y, HOUND_DAMAGE, DAMAGE_COLOR_TAKEN);
+      this.inspectingId = null;
+      enemy.nextAttackAt = now + ENEMY_ATTACK_INTERVAL_MS;
+      // The pack's half of "only actions move time": a bite holds the world
+      // open long enough to be seen as the answer it is.
+      this.act(STRIKE_WINDOW_MS);
     }
 
     // Chase: move toward a position where the enemy could bite.
@@ -418,21 +690,29 @@ export class TacticsGame {
     if (!goal) return;
 
     const gap = distance(enemyPos, goal);
-    if (gap < 1) return;
-    const step = Math.min(ENEMY_SPEED * dt, gap);
-    const nx = (goal.x - enemyPos.x) / gap;
-    const ny = (goal.y - enemyPos.y) / gap;
+    // Standing on its place already. The slack is what stops a hound shuffling
+    // on the spot for the rest of the fight over a pixel of arithmetic.
+    if (gap < ARRIVE_SLACK) {
+      if (biting) enemy.facing = facingToward(enemyPos, playerPos, enemy.facing);
+      return;
+    }
 
-    const raw = { x: enemyPos.x + nx * step, y: enemyPos.y + ny * step };
-    this.clampToDoors(enemyPos, raw);
-    const target = clampPointToFloor(raw);
-    const targetCell = clampToGrid(target);
-    if (blockedByDoor(enemy.cell, targetCell, this.doorsClosed)) return;
-    enemy.facing = facingToward(enemyPos, target, enemy.facing);
-    enemy.pos = { ...target };
-    enemy.x = target.x;
-    enemy.y = target.y;
-    enemy.cell = targetCell;
+    // Where it wants to go, bent by how hard it is leaning off its packmates.
+    const steer = this.avoid(enemy, enemyPos);
+    let nx = (goal.x - enemyPos.x) / gap + steer.x * AVOID_WEIGHT;
+    let ny = (goal.y - enemyPos.y) / gap + steer.y * AVOID_WEIGHT;
+    const len = Math.hypot(nx, ny);
+    if (len < 0.001) return;
+    nx /= len;
+    ny /= len;
+
+    const step = Math.min(ENEMY_SPEED * dt, gap);
+    const target = this.place(enemy, { x: enemyPos.x + nx * step, y: enemyPos.y + ny * step });
+    // Close enough to bite, it keeps its head on you while it shifts; crossing
+    // the room, it looks where it is going, or it strafes.
+    enemy.facing = biting
+      ? facingToward(enemyPos, playerPos, enemy.facing)
+      : facingToward(enemyPos, target, enemy.facing);
   }
 
   /** Which region a cell belongs to, falling back to the board. */
@@ -454,23 +734,17 @@ export class TacticsGame {
     const playerRegion = this.regionOfCell(this.player.cell);
 
     if (enemyRegion === BOARD_REGION) {
-      if (this.doorsClosed[0]) return null;
       if (distance(from, BOARD_DOORWAY) > TILE_PX) return BOARD_DOORWAY;
       return HALL_NORTH;
     }
 
     if (enemyRegion === FAR_REGION) {
-      if (this.doorsClosed[1]) return null;
       if (distance(from, FAR_DOORWAY) > TILE_PX) return FAR_DOORWAY;
       return HALL_SOUTH;
     }
 
     // In the hall: head toward whichever end leads to the player.
-    if (playerRegion === BOARD_REGION) {
-      if (this.doorsClosed[0]) return null;
-      return BOARD_DOORWAY;
-    }
-    if (this.doorsClosed[1]) return null;
+    if (playerRegion === BOARD_REGION) return BOARD_DOORWAY;
     return FAR_DOORWAY;
   }
 
@@ -482,10 +756,12 @@ export class TacticsGame {
    * doorway rather than a combat position, so the hound navigates through
    * the corridor before trying to flank.
    *
-   * canReach requires dx >= dy (a horizontal cone), so the goal must have
-   * enough horizontal offset. If the hound is coming from nearly straight
-   * above or below the player, nudge the approach to the nearest side of the
-   * cone so it doesn't stand there unable to bite.
+   * Worked in angles about the player, because both things acting on the goal
+   * are rotations: the hound's place in the line abreast (`assignFlanks`), and
+   * `APPROACH_HALF_ANGLE`, which swings one coming from nearly straight above
+   * or below round towards your shoulder. That second one used to be a hard
+   * requirement of `canReach` and is now only staging — reach is a circle, so
+   * wherever a hound ends up within it, it can bite.
    */
   private chooseGoal(enemy: Hound): Point | null {
     const from = this.at(enemy);
@@ -498,23 +774,27 @@ export class TacticsGame {
       return this.nextWaypoint(enemy);
     }
 
-    // Same region: head for a position within the canReach cone.
+    // Same region: come in on the side it is already on, at its place in the
+    // line, and no further round than the staged approach allows.
     const toEnemy = distance(player, from);
     if (toEnemy < 1) return null;
-    let dirX = (from.x - player.x) / toEnemy;
-    let dirY = (from.y - player.y) / toEnemy;
 
-    if (Math.abs(dirX) < Math.abs(dirY)) {
-      dirX = Math.sign(dirX || 1) * Math.abs(dirY);
-      const len = Math.hypot(dirX, dirY);
-      dirX /= len;
-      dirY /= len;
-    }
+    // The axis of the side it is approaching from — due east or due west.
+    const axis = from.x >= player.x ? 0 : Math.PI;
+    const bearing = Math.atan2(from.y - player.y, from.x - player.x);
 
-    return {
-      x: player.x + dirX * (MELEE_RANGE * 0.7),
-      y: player.y + dirY * (MELEE_RANGE * 0.7),
-    };
+    // A slot is a *place* on that axis, not a nudge from wherever the hound
+    // currently stands. Adding the two pinned a hound already out near the edge
+    // of the arc against the clamp, which bunched the pack onto one bearing
+    // instead of spreading it. With no slot (alone on its side) it comes
+    // straight in from where it is.
+    const slot = this.flankSlot.get(enemy.id);
+    let offset = slot ?? Math.atan2(Math.sin(bearing - axis), Math.cos(bearing - axis));
+    offset = Math.max(-APPROACH_HALF_ANGLE, Math.min(APPROACH_HALF_ANGLE, offset));
+
+    const theta = axis + offset;
+    const reach = MELEE_RANGE * 0.7;
+    return { x: player.x + Math.cos(theta) * reach, y: player.y + Math.sin(theta) * reach };
   }
 
   // --------------------------------------------------------- shared tick helpers
@@ -601,30 +881,51 @@ export class TacticsGame {
    * Swing the selected weapon at the mark. Gated by a cooldown rather than
    * by a turn — the player can keep moving while waiting for the next swing.
    */
-  private attack(now: number): void {
+  private attack(): void {
     if (isOver(this.phase)) return;
-    if (now < this.nextAttackAt) return;
+    if (this.simNow < this.nextAttackAt) return;
 
     const action = ACTIONS[this.activeSlot];
     const target = this.livingTarget();
     const reach = target ? canReach(this.playerAt(), this.at(target)) : false;
     if (target) this.player.facing = facingToward(this.playerAt(), this.at(target), this.player.facing);
 
+    // **Committing is the decision; connecting is the consequence.** A swing
+    // that finds nothing — no mark, or a hound out of reach — still costs
+    // the turn, and the pack still answers it.
+    //
+    // This is load-bearing now rather than merely fair. Time moves only when
+    // something acts, so an attack that quietly did nothing left a player with
+    // the sword out and a hound just out of reach holding *no* action at all:
+    // the swing was refused, nothing spent time, and the world stood there. It
+    // is also the game's only way to spend a turn on purpose, which is the job
+    // the Wait button used to have back when it had nothing to do.
     if (!action || !target) {
-      return; // No target or no weapon — just do nothing.
-    }
-
-    if (action.kind === "melee") {
-      if (!reach) return; // Out of range — wait until closer.
-      this.wound(target, MELEE_DAMAGE);
-      this.wake(target);
-      this.say(`You cut the ${target.name.toLowerCase()} for ${MELEE_DAMAGE}.`);
-      this.startCooldown(now, MELEE_COOLDOWN_MS);
+      this.say("You swing at nothing.");
+      this.startCooldown(MELEE_COOLDOWN_MS);
       return;
     }
 
-    // Ranged: dead zone inside melee reach.
-    if (reach) return;
+    if (action.kind === "melee") {
+      if (!reach) {
+        this.say(`You swing and miss the ${target.name.toLowerCase()}.`);
+        this.startCooldown(MELEE_COOLDOWN_MS);
+        return;
+      }
+      this.wound(target, MELEE_DAMAGE);
+      this.wake(target);
+      this.say(`You cut the ${target.name.toLowerCase()} for ${MELEE_DAMAGE}.`);
+      this.startCooldown(MELEE_COOLDOWN_MS);
+      return;
+    }
+
+    // Ranged: dead zone inside melee reach — too close to get the arm back.
+    // Spends the turn like any other committed attack.
+    if (reach) {
+      this.say("Too close to throw — draw the sword, or back away.");
+      this.startCooldown(RANGED_COOLDOWN_MS);
+      return;
+    }
 
     this.wake(target);
 
@@ -639,14 +940,28 @@ export class TacticsGame {
     this.say(`You throw a dagger at the ${target.name.toLowerCase()}.`);
 
     const flightMs = (Math.hypot(to.x - from.x, to.y - from.y) / PROJECTILE_SPEED) * 1000;
-    this.startCooldown(now, flightMs + THROW_RECOVER_MS + RANGED_COOLDOWN_MS);
+    this.startCooldown(flightMs + THROW_RECOVER_MS + RANGED_COOLDOWN_MS);
   }
 
-  private startCooldown(now: number, totalMs: number): void {
-    this.nextAttackAt = now + totalMs;
+  private startCooldown(totalMs: number): void {
+    this.nextAttackAt = this.simNow + totalMs;
     this.cooldownSlot = this.activeSlot;
-    this.cooldownStart = now;
+    this.cooldownStart = this.simNow;
     this.cooldownTotal = totalMs;
+    // Swinging is what buys the world its time: your own recovery, or the beat
+    // the pack answers in, whichever is longer. For the sword they are the same
+    // number, so the blind on the action bar *is* the round; a dagger's longer
+    // recovery buys the pack more ground, which is the trade it makes.
+    this.act(Math.max(totalMs, PACK_TURN_MS));
+  }
+
+  /**
+   * Open (or extend) the window the world runs in. Never shortens one — an act
+   * landing inside somebody else's window pushes the end out if it needs to and
+   * otherwise leaves it alone, so a fast bite can't cut a slow throw short.
+   */
+  private act(durationMs: number): void {
+    this.actingUntil = Math.max(this.actingUntil, this.simNow + durationMs);
   }
 
   private wound(enemy: Hound, amount: number): void {
@@ -663,6 +978,10 @@ export class TacticsGame {
   // ------------------------------------------------------------------ input
 
   handleInput(msg: TacticsInput, now: number = Date.now()): void {
+    // Every message counts, `keyup` included: letting go of a key is the player
+    // being at the keyboard, and the backstop only asks whether they are there.
+    this.lastInputAt = now;
+
     if (msg.type === "restart") {
       this.restart(now);
       return;
@@ -686,15 +1005,10 @@ export class TacticsGame {
         this.selectSlot(msg.index);
         break;
       case "attack":
-        this.attack(now);
+        this.attack();
         break;
       case "move":
         this.setMoveDir(msg.dx, msg.dy);
-        break;
-      case "toggleDoor":
-        if (msg.index === 0 || msg.index === 1) {
-          this.doorsClosed[msg.index] = !this.doorsClosed[msg.index];
-        }
         break;
       case "resurrect":
         this.restart(now);
@@ -722,7 +1036,7 @@ export class TacticsGame {
       return;
     }
     if (key === " ") {
-      this.attack(now);
+      this.attack();
       return;
     }
     if (key === "r") {
@@ -837,8 +1151,8 @@ export class TacticsGame {
     if (this.log.length > LOG_LINES * 3) this.log.splice(0, this.log.length - LOG_LINES * 3);
   }
 
-  private selectedCanAttack(now: number): boolean {
-    if (now < this.nextAttackAt) return false;
+  private selectedCanAttack(): boolean {
+    if (this.simNow < this.nextAttackAt) return false;
     const target = this.livingTarget();
     if (!target) return false;
     const reach = canReach(this.playerAt(), this.at(target));
@@ -871,9 +1185,53 @@ export class TacticsGame {
     return this.enemies.some((e) => e.aggro);
   }
 
+  /**
+   * **Whether the world has any reason to run — which is to say, whether
+   * anything is being *done*.** Only actions spend time. Standing still spends
+   * none, in a fight exactly as much as out of one: the pack holds mid-stride,
+   * every bite timer holds, the clock holds, and none of it moves again until
+   * you act. Nothing is scaled or skipped — time simply isn't spent.
+   *
+   * That makes the game pseudo-turn-based without a turn structure existing
+   * anywhere in the code. There is no queue, no phase order and no round
+   * counter: there is a window, an act opens one, and the world runs inside it
+   * and stops at the end of it. Two things open a window —
+   *
+   * - **your attack**, for exactly as long as its own cooldown. The window and
+   *   the weapon's cadence are the same number, so the action-bar blind is
+   *   literally the round resolving, and a slow weapon buys the pack more
+   *   ground than a fast one does. That is the trade a dagger makes.
+   * - **a hellhound's bite** (`STRIKE_WINDOW_MS`), so the lunge that answers you
+   *   plays out instead of freezing in the air halfway.
+   *
+   * Walking is the third, and it is not a window but a state: the world runs
+   * while you are moving, because a walk is an action you are still taking. It
+   * is what a hound gets to close on you during, and stopping ends it on the
+   * very next tick.
+   *
+   * **`anyAwake()` used to be the last line here**, and that is the whole of
+   * what changed: a woken pack ran the world by *existing*, so a fight was
+   * continuous real time and only the lull before one was still. Now aggro
+   * grants no time on its own — a hellhound a stride away from your throat stays
+   * there for as long as you leave it.
+   */
+  private shouldRun(realNow: number): boolean {
+    if (realNow - this.lastInputAt >= AFK_TIMEOUT_MS) return false;
+
+    // Dead is not idle: the auto-resurrect timer is the one thing that should
+    // still count down with the player doing nothing, since doing nothing is
+    // exactly what the feature asks of them.
+    if (isOver(this.phase)) return this.phase === "dead" && this.autoRestart;
+
+    if (this.moveTarget !== null) return true;
+    if (Math.hypot(this.moveDir.x, this.moveDir.y) > 0.001) return true;
+
+    return this.simNow < this.actingUntil;
+  }
+
   // --------------------------------------------------------------- snapshot
 
-  snapshot(now: number = Date.now()): TacticsSnapshot {
+  snapshot(): TacticsSnapshot {
     const inspected = this.corpses.find((c) => c.id === this.inspectingId) ?? null;
     const target = this.livingTarget();
     const dead = this.phase === "dead";
@@ -882,7 +1240,7 @@ export class TacticsGame {
       ? null
       : {
           slot: this.cooldownSlot,
-          remainingMs: Math.max(0, this.cooldownStart + this.cooldownTotal - now),
+          remainingMs: Math.max(0, this.cooldownStart + this.cooldownTotal - this.simNow),
           totalMs: this.cooldownTotal,
         };
 
@@ -939,7 +1297,7 @@ export class TacticsGame {
       attacking: target !== null,
       activeSlot: this.activeSlot,
       cooldown,
-      selectedCanAttack: this.selectedCanAttack(now),
+      selectedCanAttack: this.selectedCanAttack(),
       moveTarget: this.moveTarget ? { ...this.moveTarget } : null,
       pathCells: [],
       gameElapsedMs: this.gameElapsedMs,
@@ -948,7 +1306,7 @@ export class TacticsGame {
       autoResurrect: this.autoRestart,
       resurrectInMs:
         dead && this.autoRestart
-          ? Math.max(0, AUTO_RESTART_DELAY_MS - (now - this.deathAt))
+          ? Math.max(0, AUTO_RESTART_DELAY_MS - (this.simNow - this.deathAt))
           : null,
       tombstones: this.tombstones.map((t) => ({
         x: t.x,
@@ -966,8 +1324,14 @@ export class TacticsGame {
       aggro: this.anyAwake(),
       strikes: this.strikes.map((s) => ({ ...s })),
       log: this.log.slice(-LOG_LINES),
-      hint: this.hint(),
-      doorsClosed: [...this.doorsClosed],
+      hint: this.paused
+        ? this.anyAwake()
+          // A still world in a fight is the player being waited on, not a game
+          // that has stopped — so the line says what it is waiting *for*.
+          ? "Your turn — nothing moves until you do. Space to swing, WASD to move."
+          : "Paused — move, or act, to start the world again."
+        : this.hint(),
+      paused: this.paused,
     };
   }
 }

@@ -122,15 +122,6 @@ export const FAR_REGION: Region = {
 
 export const REGIONS: readonly Region[] = [BOARD_REGION, HALL_REGION, FAR_REGION];
 
-/**
- * Y-coordinate of each door in room pixels, sitting at the boundary between
- * the two regions it separates. Door 0: board ↔ hall. Door 1: hall ↔ far.
- */
-export const DOOR_BOUNDARY_Y: readonly number[] = [
-  ARENA_Y + GRID_ROWS * TILE_PX,
-  ARENA_Y + (GRID_ROWS + HALL_ROWS) * TILE_PX,
-];
-
 /** A region's middle, in room pixels — where the client frames and lights it. */
 export function regionCentre(region: Region): Point {
   return {
@@ -210,33 +201,6 @@ export function inGrid(cell: Cell): boolean {
   return REGIONS.some((region) => inRegion(region, cell));
 }
 
-/**
- * Which of the three regions a cell sits in, as an index: 0 = board,
- * 1 = hall, 2 = far room. Door *n* separates region *n* from region *n+1*.
- */
-function regionIndex(cell: Cell): number {
-  if (inRegion(HALL_REGION, cell)) return 1;
-  if (inRegion(FAR_REGION, cell)) return 2;
-  return 0;
-}
-
-/**
- * True when a step from one cell to another would cross a closed door.
- * Door 0 sits between the board and the corridor, door 1 between the
- * corridor and the far room.
- */
-export function blockedByDoor(from: Cell, to: Cell, doorsClosed: readonly boolean[]): boolean {
-  const a = regionIndex(from);
-  const b = regionIndex(to);
-  if (a === b) return false;
-  const lo = Math.min(a, b);
-  const hi = Math.max(a, b);
-  for (let door = lo; door < hi; door++) {
-    if (doorsClosed[door]) return true;
-  }
-  return false;
-}
-
 export function sameCell(a: Cell, b: Cell): boolean {
   return a.col === b.col && a.row === b.row;
 }
@@ -304,20 +268,29 @@ export const MIN_SEPARATION = SQUARE_PX * 0.5;
 // --------------------------------------------------------------------- rules
 
 /**
- * **Reach goes sideways and across, never straight up or down.** A blade needs a
- * shoulder's worth of room, so something directly above or below is not
- * something either side can swing at — move off its line first.
+ * **Reach is a circle: anything within `MELEE_RANGE` can be hit, from any
+ * direction.** Symmetric, so it gates the hellhounds' bite exactly as it gates
+ * the player's sword.
  *
- * On the old 3x3 this was "one column across, at most one row up or down". The
- * generalisation to a fine grid is `|dx| >= |dy|`: a quarter-turn cone opening
- * left and right, which is exactly the set of squares the original rule allowed
- * and nothing more. It stays symmetric, so it gates the hellhounds' bite as it
- * gates the player's sword, and the pack plans its approach with the same test.
+ * It used to carry a cone as well — `|dx| >= |dy|`, "reach goes sideways and
+ * across, never straight up or down" — inherited from the 3x3 board, where it
+ * read as "one column across, at most one row up or down" and made sense to
+ * someone looking down at a grid. **Two later changes killed it.**
+ *
+ * The camera came down to eye level, where the rule is invisible: a hellhound
+ * one pace in front of you, filling the screen, marked, is a hound your sword
+ * passes straight through, three swings running, with nothing on screen saying
+ * why. The cone was a fact about world axes, and first person gives the player
+ * no sense of where those are.
+ *
+ * Then the corridor made it not merely opaque but unplayable. The hall runs
+ * north-south and is one square wide, so *every* approach in it is along y, and
+ * along y was precisely what the cone forbade. Neither side could touch the
+ * other in there — and since time only moves when something acts, two actors
+ * who cannot act is a standoff that never resolves.
  */
 export function canReach(from: Point, to: Point): boolean {
-  const dx = Math.abs(to.x - from.x);
-  const dy = Math.abs(to.y - from.y);
-  return dx >= dy && distance(from, to) <= MELEE_RANGE;
+  return distance(from, to) <= MELEE_RANGE;
 }
 
 /** Close enough for a hellhound to notice you. A circle, not a cone. */
@@ -462,8 +435,13 @@ export interface TacticsSnapshot extends GameSnapshot {
   log: string[];
   /** One line telling the player what the board is waiting for. */
   hint: string;
-  /** Which doors are closed: [board↔hall, hall↔far]. */
-  doorsClosed: readonly boolean[];
+  /**
+   * True while the world is standing still because nothing is asking it to
+   * run — see `shouldRun` in `TacticsGame`. Purely for the client to say so;
+   * every rule already reads the simulation's own clock, which is what
+   * actually stopped.
+   */
+  paused: boolean;
 }
 
 /**
@@ -483,11 +461,7 @@ export interface TacticsSnapshot extends GameSnapshot {
 export type TacticsInput =
   | InputMessage
   | { type: "restart" }
-  /** Swing the selected weapon at the mark. Spends the turn either way. */
+  /** Swing the selected weapon at the mark, landing or not. */
   | { type: "attack" }
-  /** Spend the turn doing nothing. */
-  | { type: "wait" }
   /** Walk one step in a camera-relative direction. dx/dy are a unit vector. */
-  | { type: "move"; dx: number; dy: number }
-  /** Toggle the door at the given index (0 = board↔hall, 1 = hall↔far). */
-  | { type: "toggleDoor"; index: number };
+  | { type: "move"; dx: number; dy: number };

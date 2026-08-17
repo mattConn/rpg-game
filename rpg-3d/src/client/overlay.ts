@@ -23,7 +23,7 @@ import type { GameSnapshot } from "../../../src/shared/protocol.js";
 import { ACTIONS } from "../../../src/shared/actions.js";
 import { DAMAGE_NUMBER_LIFETIME, DAMAGE_NUMBER_SPEED } from "../../../src/shared/combat.js";
 import { corpseLabel } from "../../../src/shared/loot.js";
-import { ACTION_BAR_DEFAULT_ORIGIN, drawActionBar } from "../../../src/client/actionbar.js";
+import { ACTION_BAR_ROW, ACTION_BAR_DEFAULT_ORIGIN, drawActionBar, type ActionBarLayout } from "../../../src/client/actionbar.js";
 import { HUD_DEFAULT_ORIGIN, HUD_WIDTH, NAME_GAP, NAME_HEIGHT, PORTRAIT_SIZE, drawEnemyHud, drawHud } from "../../../src/client/hud.js";
 import { drawLootMenu } from "../../../src/client/lootmenu.js";
 
@@ -100,10 +100,17 @@ export interface OverlayParams {
   toScreen: ToScreen;
   /** 0..1 fading flash after taking a hit. */
   hurt: number;
+  /**
+   * How to arrange the action bar. Omitted is the horizontal strip this client
+   * has always drawn; the turn-based front end stacks it instead, and passes
+   * the same layout to its own hit-testing so the two can't disagree.
+   */
+  barLayout?: ActionBarLayout;
 }
 
 export function drawOverlay(ctx: CanvasRenderingContext2D, params: OverlayParams): void {
   const { snap, uiCursor, groundCursor, toScreen } = params;
+  const barLayout = params.barLayout ?? ACTION_BAR_ROW;
 
   ctx.clearRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
   ctx.setLineDash([]);
@@ -155,7 +162,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, params: OverlayParams
     }
   }
 
-  drawActionBar(ctx, barOrigin, ACTIONS, snap.activeSlot, snap.cooldown, snap.selectedCanAttack);
+  drawActionBar(ctx, barOrigin, ACTIONS, snap.activeSlot, snap.cooldown, snap.selectedCanAttack, barLayout);
   drawGameClock(ctx, snap.gameElapsedMs);
 
   if (params.hurt > 0) drawHurtFlash(ctx, params.hurt);

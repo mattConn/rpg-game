@@ -186,6 +186,11 @@ and no time scaling anywhere; a turn-based layer and a 2× "wait" mode both
 existed here briefly and were removed, so don't reintroduce a second time
 domain. The server simulates whether or not a client is connected.
 
+**This is still true of the root game and `rpg-3d/`, and is no longer true of
+`rpg-tactics/`**, which now stops its world when nothing is happening — see
+[auto-pause](#auto-pause-rpg-tactics). It has a sim clock precisely because that
+feature needs one; don't copy the pattern back here without a reason to.
+
 ### Death + auto-resurrect
 
 Dying drops a tombstone and stops the player; the world keeps running.
@@ -220,6 +225,16 @@ the drag doesn't also register as a game click.
   wouldn't** (`selectedCanAttack`). That's range and target only — the cooldown
   is deliberately excluded, or the border would strobe on every swing, and the
   cooldown blind already shows it.
+  - **The arrangement is a parameter, not a fork.** `ActionBarLayout`
+    (orientation + square size + gap) is threaded through `actionBarSize`,
+    `squareRect`, `squareAtPoint` and `drawActionBar`, all defaulting to
+    `ACTION_BAR_ROW` — this strip, unchanged, in the 2D and `rpg-3d` clients.
+    `rpg-tactics` passes `ACTION_BAR_COLUMN` instead and gets a stack of larger
+    squares; see its own section. The icons are sized as a fraction of the
+    square rather than in fixed px, so a bigger square carries a bigger sword
+    instead of the same one adrift in it. One layout value reaches the drawing,
+    the hit-test *and* the buttons beside it, so those three can never describe
+    different rectangles.
 
 ### Enemies + combat
 
@@ -527,12 +542,10 @@ exactly the points they did when the board was three squares wide.
 | click a hellhound | mark it; click it again to unmark |
 | **1** / **2**, or a bar square | choose sword / dagger. **Costs nothing** |
 | **Space**, or the Attack button | swing the chosen weapon at the mark |
-| **.**, or the Wait button | hold your ground |
 | **Tab** / **Esc** | cycle the mark / drop it |
 | double-click a body | inspect it |
 | **R** | restart the encounter |
 | **V** | reset view to face the character's direction |
-| right-click a door | open / close it |
 
 The three constants worth holding in your head while reading the rest: a
 hellhound has 24 HP and hits for 7, the player has 100 and hits for 8 (sword) or
@@ -588,23 +601,68 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
     more and `tick` walks nothing — when the window closes, the next turn opens.
     The action-bar blind is exactly that window, so it is no longer an estimate
     built out of `ENEMY_ACTION_MS`, which is gone.
-- **Reach is horizontal and diagonal, never vertical** — `canReach`, which is
-  `|dx| >= |dy|` and within `MELEE_RANGE`: a quarter-turn cone opening left and
-  right. On the old 3x3 this was "one column across, at most one row up or
-  down"; the cone is exactly that set of squares generalised to a fine grid and
-  nothing more. It is symmetric, so it gates the bite as it gates the sword, and
-  the pack plans its approach with the same test — `approachCells` is every cell
-  within reach of the player filtered through `canReach`, which is *why* hounds
-  come at you from the sides rather than from directly above or below. It
-  searches the grid rather than a ring around the player because the floor is
-  no longer one rectangle: the two points on a ring that a hound could bite from
-  lie far out to the left and right, which is floor in a room and masonry in the
-  corridor, and a ring left the pack following you through the door and then
-  standing there hemmed in for the rest of the game. Daggers keep the
-  real-time dead zone: in sword reach is too close to throw.
-- **Two hounds flank rather than queue** because each picks the approach point
-  nearest *itself*, so whichever side it is already on is the side it commits
-  to, and `MIN_SEPARATION` keeps the second off the first one's spot.
+- **Reach is a circle** — `canReach` is `within MELEE_RANGE`, from any bearing,
+  and nothing else. Symmetric, so it gates the bite exactly as it gates the
+  sword. Daggers keep the real-time dead zone: in sword reach is too close to
+  throw.
+  - **It used to carry a cone as well** — `|dx| >= |dy|`, "reach goes sideways
+    and across, never straight up or down", which on the old 3x3 read as "one
+    column across, at most one row up or down". Two later changes killed it, and
+    the reasoning is worth keeping because it is a lesson about board rules
+    surviving into a different camera.
+  - The camera came down to eye level, and there the cone is **invisible**: a
+    hellhound one pace in front of you, filling the screen, marked, is a hound
+    your sword passes straight through — three swings running, with nothing on
+    screen saying why. It was a fact about *world axes*, and first person gives
+    the player no sense of where those are.
+  - Then the corridor made it not merely opaque but **unplayable**. The hall
+    runs north-south and is one square wide, so every approach in it is along y
+    — and along y was precisely what the cone forbade. Neither side could touch
+    the other in there. Combined with time only moving when something acts, two
+    actors who cannot act is a standoff that never resolves.
+  - What the cone *did* buy was hounds coming at you off your shoulders rather
+    than from any bearing at once. That survives as `APPROACH_HALF_ANGLE` (40°)
+    in `chooseGoal` — pure staging now, enforced by nothing. Widen it towards
+    90° and the pack swarms instead of flanking; that is a look, not a bug.
+  - `approachCells` in `shared/tactics.ts` is **dead code** — it was the pack's
+    old cone-filtered approach search and nothing imports it any more.
+- **Two hounds flank rather than queue**, and it takes three things working
+  together — remove any one and the pack goes back into single file.
+  - **They are aimed somewhere they both fit.** `assignFlanks` runs once at the
+    top of the tick, before anything moves, and hands each pursuer a place in
+    the line as an *angle* about the player (`FLANK_ANGLE`, ±40° for a pair).
+    Only hounds sharing a side are spread: approaches are staged east and west,
+    so two already on opposite ones are flanking properly and rotating them
+    would walk one round the player for nothing. An angle rather than a sideways
+    offset because "side by side" is across the line the pack is coming in on,
+    and spreading them in y reads as abreast only while the chase runs
+    east-west. Slots go by where the hounds already are, not by their place in
+    the array, or the pack could swap ends mid-chase and cross through each
+    other to do it. Computed once per tick and not per hound, because the enemy
+    loop moves them one at a time and the second would otherwise solve against a
+    board the first had already changed.
+  - **Nothing may stand inside anything else** — `place` is the one door every
+    hound's every step goes through, patrol and chase alike, and `MIN_SEPARATION`
+    is enforced there. It used to be enforced nowhere: the constant was only ever
+    a click hit-radius, and two hounds converging from the same side merged into
+    one silhouette. A push that would land in masonry is refused and the hound
+    holds station instead, which is what makes the corridor queue.
+  - **A blocked hound leans away rather than pressing** (`avoid`, blended into
+    the chase at `AVOID_WEIGHT`). The hard clamp alone is what *creates* a conga
+    line: the hound behind presses at its goal, gets clamped back every tick,
+    and grinds against the one in front for the rest of the fight — out of reach
+    and never getting round. Leaning off while the goal still pulls turns that
+    press into a slide around.
+  - **Biting and moving are not exclusive.** `updateEnemy` used to return the
+    instant `canReach` went true, so a hound froze wherever it first entered
+    reach — which is wide, and a slot is one point in it, so the second one
+    loitered on the first's shoulder all fight. It bites from where it is and
+    keeps taking its place while it does. A lone hound closes to its goal at
+    0.7 of reach instead of stopping at the edge of it.
+  - Measured on the live server, two hounds chasing a retreating player: 100% of
+    pursuit abreast, 0% of it spent riding the separation bound, and the pair
+    settling 81px apart either side of the player. The corridor is the deliberate
+    exception — 90px wide against a 45px body, so there the pack files.
 - **A click anywhere on the floor walks you there, and the ground is what costs
   turns.** `MOVE_RANGE` stopped being a limit on where you may go and became the
   price of getting there: `onClick` records the destination as a *journey*, and
@@ -646,10 +704,13 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
     that would mark a hound instead. `snapshot.moveRange` is still sent, now
     read only for "is it my turn" (it is zero off turn) and as what a round of
     walking buys.
-- **Bodies never block, but you cannot stop inside one.** Walking *through*
-  another actor is fine — nothing but walls has ever collided in this game — and
-  a destination that lands in someone is nudged to `nearestClearCell`, which on
-  a grid this fine is half a pace away and imperceptible.
+- **Bodies never block the player, but hounds block each other.** Walking
+  *through* another actor is fine for you — a destination that lands in someone
+  is nudged to `nearestClearCell`, half a pace away on a grid this fine and
+  imperceptible. The pack is the exception, and the only one: hound-against-hound
+  is the single piece of actor collision in any of the three games, and it exists
+  because two of them converging on you otherwise occupy the same ground and read
+  as one animal. Corpses still stop nothing.
 - **A walk's duration is proportional to the ground covered** (`walkTo`), floored
   at 120ms — except for a leg with more walking after it, which is stretched to
   fill its whole round (see the journey below). A constant looked right when
@@ -710,17 +771,81 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
   and all of that is gone. Walking onto it is an ordinary walk that hands over
   the turn like any other, and the pack follows you down the corridor.
 - **Choosing an attack and making one are separate acts.** The bar's squares and
-  1–5 only put a weapon in your hand and cost nothing; the turn is committed by
-  the stacked **Attack** / **Wait** buttons to the right of the bar, or by
-  **Space** / **`.`**. That split is in the protocol too — `slot` selects,
-  `attack` and `wait` commit — because one of those ends your turn and the other
-  doesn't, and a weapon swap must never be an accidental swing.
+  1–5 only put a weapon in your hand; the swing is committed by the **Attack**
+  button at the foot of the stack, or by **Space**. That split is in the
+  protocol too — `slot` selects and `attack` commits — because a weapon swap
+  must never be an accidental swing.
   - **Attack always spends the turn**, landing or not: with nothing marked, or
     with the sword out at two columns, you swing at air and the pack still
     answers. Committing is the decision; connecting is the consequence.
   - The cooldown blind is repurposed as "waiting for your turn". It is set only
     by attacks, never by a step, because `applyCues` derives the player's swing
     from a fresh cooldown and a step would otherwise swing at nothing.
+  - **The bar is a stack down the left, under the player's status panel**, not
+    the strip along the bottom the other two front ends draw — `BAR_LAYOUT` in
+    `chrome.ts` is `ACTION_BAR_COLUMN` (56px squares against the strip's 44),
+    and `main.ts` parks `barOrigin` under `hudOrigin + HUD_HEIGHT`, with enough
+    gap to clear the Auto-Res toggle hanging below the name plate. That one
+    constant is passed to `drawOverlay`, to `squareAtPoint` for both the click
+    and the cursor, and to `attackRect`. **Nothing is duplicated to do this** —
+    it is the same shared `drawActionBar` handed a different layout.
+    **Attack sits at the foot of the stack**, squared off to the column's own
+    width, so the left edge reads as one object: five weapons, then the thing
+    that swings the one you picked. Its label and key are stacked rather than
+    side by side, because at the column's width they do not fit on one line.
+  - **Wait is gone entirely** — button, `.` binding and the `wait` message. The
+    server had already stopped handling it. Holding still *is* the pause; and
+    now that only acts spend time, **swinging at air is the pass**, which is the
+    job a Wait button would have had. It costs a turn and the pack answers it,
+    which is exactly what waiting should mean — so there is nothing left for a
+    separate button to do.
+  - **The selected weapon is drawn in your hands**, bottom-right, in
+    `viewmodel.ts` — the only part of the player's own body that survives first
+    person, where the player model is hidden and nothing else on screen says
+    what you are holding. It is one shape function: `drawBlade` is the sword,
+    the dagger, the swing *and* the throw, so a held weapon can never turn into
+    a different weapon to attack with. The dagger is that same blade, shorter
+    and slimmer. The corner previously drew a tapered blade for the swing and
+    nothing at all the rest of the time.
+    - **Rest and attack are two poses facing opposite ways, and never share the
+      screen.** At rest the blade is mirrored about the hand (`scale(-1, 1)`) so
+      it points in across the view — unmirrored, the sword's tip sits at x =
+      1335 in a 1200-wide room, aimed at the corner the hand already occupies.
+      An attack is drawn *unmirrored*: a 120-degree sweep entering from past the
+      right edge, coming over the top and carrying on **down and out through the
+      bottom of the screen**, which is what makes it read as a swing. The hand
+      sits below the room (`PIVOT_Y` is 1.1 of it), so the last of the stroke
+      takes the blade out of frame on its own — the tip crosses the bottom edge
+      at 94% of the swing. There is no fade any more for exactly that reason:
+      the stroke *leaves*, and a blade dissolving in mid-air was standing in for
+      an exit it never made. `SWING_DURATION` grew with the arc (250ms → 330ms)
+      so the blade travels at the speed it always did rather than a third faster
+      to cover a third more ground.
+    - **A thrown dagger has no corner animation at all — it is simply gone,
+      cut rather than faded.** The thing that left your hand is already being
+      drawn: the server flies it across the room as a projectile, so a second
+      dagger animating in the corner told the same throw twice. It stays gone
+      for exactly as long as the ranged cooldown says it is spent, so the hand
+      refills at the moment you could throw the next one. Measured against the
+      live server: gone at 26ms, back at 1344ms, against a `totalMs` of 1351.
+      - `spent` is read off the **live cooldown**, not a timer of the client's
+        own — `interpolateSnapshot` counts `remainingMs` down in real time, so
+        this tracks the server's number instead of duplicating it, and retuning
+        `RANGED_COOLDOWN_MS` carries the corner with it.
+      - It applies only while the dagger is selected: swapping to the sword puts
+        the sword in your hand at once, because that is what drawing it means.
+        The sword has no gap of its own — it returns the instant its swing ends.
+    - Nothing has to reconcile rest and attack, because **an attack replaces the
+      carried weapon rather than drawing over it** — `drawHeldWeapon` returns early on a
+      live animation, so the resting pose is hidden for its duration and comes
+      back when it ends. Exactly one blade is ever on screen. That also settles
+      what happens when the player swaps weapons mid-animation: the swing
+      belongs to the attack that fired it, not to whatever is selected now.
+    - Both animations are stamped from a **fresh cooldown** — the protocol's way
+      of saying an attack happened, the same derivation `applyCues` uses —
+      rather than a new event on the wire. Which one plays is read off
+      `cooldown.slot`, the slot that actually fired, not `activeSlot`: swapping
+      weapons mid-cooldown would otherwise replay a swing as a throw.
   - `drawActionBar` prints the selecting key `(1)`–`(5)` in each square's corner.
     That is in the **shared** bar, so it shows in all three front ends — 1–5
     select the slot everywhere, so the label is true everywhere.
@@ -741,6 +866,107 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
     `stage.ts` (`toggleFirstPerson`, overhead yaw/pitch storage) but nothing
     in `main.ts` binds a key to it; the game starts in first person and stays
     there.
+- <a id="auto-pause-rpg-tactics"></a>**Only acts spend time, and that is what
+  makes this pseudo-turn-based.** The world holds still — the pack mid-stride,
+  every bite timer, the clock, every deadline — and moves only while something
+  is being *done*. **In a fight exactly as much as out of one**: a hellhound a
+  stride from your throat stays there for as long as you leave it, and you may
+  stand and think for an hour at no cost. Nothing is scaled or skipped; time
+  simply isn't spent.
+  - **There is no turn structure in the code** — no queue, no phase order, no
+    round counter. There is a *window*, an act opens one, and the world runs
+    inside it and stops at the end of it. `shouldRun` is still the whole rule
+    and still asks about movement; what changed is its last line, which used to
+    be `anyAwake()`. A woken pack ran the world by merely existing, so a fight
+    was continuous real time and only the lull before one was still. Aggro now
+    grants no time at all on its own.
+  - **Three things open a window.** Your attack, for `max(its own cooldown,
+    PACK_TURN_MS)` — for the sword those are the same 600ms, so the action-bar
+    blind *is* the round; a dagger's longer recovery buys the pack more ground,
+    which is the trade it makes. A hellhound's bite, for `STRIKE_WINDOW_MS`, so
+    the lunge answering you plays out instead of freezing in the air. And
+    **coming to a halt**, which is the end of a walk and gets answered like any
+    other act — checked at the top of `tick` against `wasMoving`, because the
+    tick that notices you have stopped is the very tick that would otherwise
+    freeze the world. Walking itself is not a window but a state: the world runs
+    while you move, and stopping ends it on the next tick.
+  - **A swing that finds nothing still spends the turn**, and this is now
+    load-bearing rather than merely fair. `attack` used to return early on no
+    mark or no reach, spending nothing — which in this regime left a player with
+    the sword out and a hound just out of reach holding *no action at all*: the
+    swing was refused, nothing spent time, and the world sat there looking hung.
+    It is also the only way to spend a turn on purpose, which is the job the
+    Wait button never managed to have.
+  - **A flank slot is an absolute place on the approach axis**, not a nudge from
+    wherever the hound already stands — added to its current bearing, a hound
+    already out near the edge of the arc got pinned against the clamp, which
+    bunched the pack onto one bearing instead of spreading it.
+  - **Standoffs are the failure mode to watch for in this regime.** Any pair of
+    positions where neither side can act is permanent, because waiting is what
+    the game is made of. The reach cone produced exactly that and had to go; if
+    you add a rule that can refuse an action, check first that the other side
+    can always still do *something*.
+  - **Damage numbers are no longer dropped on the way into a pause.** They were,
+    because a still world never ages them and one caught mid-fade would hang at
+    whatever alpha it had reached — right, when a pause meant nobody was playing.
+    Now that the world stops after *every* exchange, dropping them would blink
+    the round's own numbers out a few hundred ms after they appeared. They hold,
+    and resume ageing when the next act spends time; a frozen number over the
+    thing it came off is a report of the round just fought.
+  - **`simNow` is the simulation's own clock and the only one any rule reads.**
+    It advances with the tick while the world runs and stops while it doesn't,
+    so a bite due in 900ms is still 900ms away afterwards. `tick`, `handleInput`
+    and `index.ts` still speak wall-clock ms — the conversion happens in `tick`
+    and nowhere else. Deadlines off `Date.now()` are the trap: a minute of
+    standing still would retire every timer at once, and the pack would collect
+    a minute of free bites the instant you moved. `lastTick` is still advanced
+    on a paused tick for the same reason, or resuming would replay the whole
+    pause as one enormous `dt`.
+  - **Aggro is permanent, so combat alone would never let go.** Once a hound has
+    noticed you it is "in combat" for the rest of the encounter, which means the
+    one case an away player actually needs covering — being eaten while not at
+    the keyboard — is the one case the rule above never catches. Hence
+    `AFK_TIMEOUT_MS` (15s): no input of any kind for that long stops the world
+    wherever it stands, mid-chase included. `keyup` counts as input, because
+    letting go of a key is still a player at the keyboard.
+  - Dying is deliberately *not* idle: `shouldRun` keeps running for a dead
+    player with Auto-Res on, since counting down while they do nothing is
+    exactly what that feature is for.
+  - The client only reports it. `snapshot.paused` drives a badge high and centred
+    (`drawStanding` in `chrome.ts`) plus a hint line, because a frozen hellhound
+    otherwise reads as a hung server. **What the badge says depends on
+    `snapshot.aggro`**: with the pack awake a still world is the player's turn,
+    so it reads **YOUR TURN**, and only an idle board says **PAUSED**. Since acts
+    are the only thing that spends time, a fight is still most of the time — and
+    a PAUSED banner hanging over every exchange would read as the game having
+    hung at the exact moments it is waiting on the player hardest. The doorway
+    lamp's pulse is client-side and keeps going — it is scenery, not simulation.
+- **The dark closes in near.** `scene.fog` runs `BOARD_W * 0.4` to
+  `BOARD_W * 1.4` — multiples of the board's width, like the camera framing, so
+  resizing the squares carries the murk with it instead of stranding it at a
+  fixed distance. With `BOARD_W` at 9 units that is 3.6 to 12.6: a hound at
+  melee reach or a square away is untouched, the far side of the arena is 60%
+  eaten, the wall across the chamber 93%, and the corridor runs into black
+  rather than showing you the room at its end. Combat stays legible because
+  engagements happen inside ~3 units, which is short of the near plane. The
+  near plane is worth as much thought as the far one: start it too far out and
+  the fog reads as a wall of haze at a fixed distance rather than as air.
+- **Lit, but unshadowed.** `renderer.shadowMap.enabled` is **false** in
+  `stage.ts`, and that one line is the whole of it: three renders no shadow pass,
+  and the `castShadow` / `receiveShadow` flags still set on the sun, the walls,
+  the floor and the imported models simply do nothing. Illumination is
+  untouched — ambient, hemisphere, the directional sun and the doorway lamp
+  contribute exactly as before, because a Lambert surface's brightness is
+  the light reaching it and the shadow map only ever subtracted from that. The
+  rig is left standing rather than stripped, so switching shadows back on is
+  that line and nothing else. `rpg-3d/` still has them on; this is a
+  tactics-only choice.
+- **Nothing hangs on the walls.** The chambers and the corridor carried a
+  `buildTorch` bracket apiece and no longer do — the masonry is bare and the
+  rooms are lit by the ambient / hemisphere / sun rig alone, with the doorway
+  lamp (`archLight`) the only point light and the only thing `animateScenery`
+  still has to move. `rpg-3d/` keeps its torches; `buildTorch` stays in
+  `models.ts` for it.
 - **No hurt flash.** The tactics client passes `hurt: 0` into the shared
   `drawOverlay` rather than tracking it. The log names what hit you.
 - **Nothing is drawn on the floor.** The board was once nine raised flagstones,
@@ -770,13 +996,14 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
     north wall instead of its south — which is what "identical" means here.
     There is one room in `stage.ts`, built twice, so anything done to the arena
     lands on the far room too.
-  - **Each doorway has a physical door** — a thick wooden slab with a barred
-    window (procedural texture). Right-click opens/closes it. Door state is
-    **server-authoritative** (`doorsClosed[]` in `TacticsGame`); the server
-    prevents movement through closed doors via `clampToDoors` and
-    `blockedByDoor`. On the client, closed doors have front/back blocker walls
-    and a horizontal ceiling to prevent the camera from seeing through them,
-    plus camera Z clamping (`DOOR_CAM_MARGIN`).
+  - **The doorways are open arches, and nothing shuts them.** Each is dressed
+    with two jambs and a lintel (`addDoorFrame`) so it reads as a doorway rather
+    than a hole, and that is all it is — you walk through without asking. Hinged
+    doors were tried and removed: `doorsClosed[]`, `clampToDoors`,
+    `blockedByDoor`, the right-click toggle and the client's blocker walls,
+    ceiling occluder and `DOOR_CAM_MARGIN` camera clamp all went with them.
+    Don't reintroduce a door without reading this line — the pack's corridor
+    navigation (`nextWaypoint`) assumes it can always path between regions.
 - Same testing convention again: the rules are pure and the simulation runs
   headless, so drive `TacticsGame` with a throwaway `node:assert` script under
   `tsx` and delete it. Typecheck and build **in `rpg-tactics/`**.

@@ -2,11 +2,11 @@
  * The board: a lit stone chamber with nine flagstones in it, and the camera rig
  * that looks at them.
  *
- * The dungeon look is the real-time game's — flat-shaded stone, warm guttering
- * torchlight, fog eating the far dark — but the room is a different room, so
- * this is built here rather than imported. What *is* imported is every model in
- * it: the torches on these walls are `buildTorch` from `rpg-3d`, because there
- * is one dungeon aesthetic and it lives in one file.
+ * The dungeon look is the real-time game's — flat-shaded stone, fog eating the
+ * far dark — but the room is a different room, so this is built here rather than
+ * imported. The walls carry no torches: the rooms are lit by the ambient,
+ * hemisphere and directional rig alone, with the one warm point light left being
+ * the lamp in the doorway.
  *
  * **The camera orbits here, and that is safe here.** The real-time client pins
  * its yaw because WASD is world-relative on its server, so a turnable view would
@@ -19,7 +19,6 @@ import * as THREE from "three";
 
 import { WORLD_HEIGHT, WORLD_WIDTH } from "../../../src/shared/constants.js";
 import { clamp } from "../../../src/shared/movement.js";
-import { buildTorch } from "../../../rpg-3d/src/client/models.js";
 import { damp, toPixelX, toPixelY, toX, toZ } from "../../../rpg-3d/src/client/world.js";
 import {
   ARENA_H,
@@ -146,10 +145,6 @@ export interface Stage {
   /** Where a click would put them, and whether it is allowed. */
   setDestination(px: number | null, py: number | null, allowed: boolean): void;
   setTargetRing(px: number | null, py: number | null, color: number): void;
-  /** Raycast against doors; returns the index of the hit door, or null. */
-  toggleDoorAt(ndcX: number, ndcY: number): number | null;
-  /** Set door visual states from the server's authoritative state. */
-  updateDoors(doorsClosed: readonly boolean[]): void;
   animateScenery(elapsed: number): void;
   render(): void;
 }
@@ -315,84 +310,37 @@ function generateFloorTexture(): THREE.CanvasTexture {
   return texture;
 }
 
-function generateDoorTexture(): THREE.CanvasTexture {
-  const size = 512;
-  const cvs = document.createElement("canvas");
-  cvs.width = size;
-  cvs.height = size;
-  const ctx = cvs.getContext("2d")!;
-
-  // Dark brown base.
-  ctx.fillStyle = "#2e1a10";
-  ctx.fillRect(0, 0, size, size);
-
-  // Vertical planks in slightly varying brown shades.
-  const plankCount = 6;
-  const plankWidth = size / plankCount;
-  for (let i = 0; i < plankCount; i++) {
-    const shade = 34 + Math.floor(Math.random() * 16);
-    ctx.fillStyle = `rgb(${shade + 12}, ${shade}, ${shade - 10})`;
-    ctx.fillRect(i * plankWidth + 2, 0, plankWidth - 4, size);
-  }
-
-  // Dark grooves between planks.
-  ctx.strokeStyle = "#1a0e08";
-  ctx.lineWidth = 2;
-  for (let i = 1; i < plankCount; i++) {
-    ctx.beginPath();
-    ctx.moveTo(i * plankWidth, 0);
-    ctx.lineTo(i * plankWidth, size);
-    ctx.stroke();
-  }
-
-  // Horizontal cross-braces at ~1/4 and ~3/4 height.
-  const braceH = 28;
-  for (const y of [size * 0.25 - braceH / 2, size * 0.75 - braceH / 2]) {
-    ctx.fillStyle = "#221410";
-    ctx.fillRect(0, y, size, braceH);
-    ctx.strokeStyle = "#1a0e08";
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(0, y, size, braceH);
-  }
-
-  // Rectangular barred window in the upper third.
-  const winX = size * 0.2;
-  const winY = size * 0.08;
-  const winW = size * 0.6;
-  const winH = size * 0.2;
-  ctx.fillStyle = "#0a0a0e";
-  ctx.fillRect(winX, winY, winW, winH);
-
-  // Vertical bars across the window.
-  const barCount = 4;
-  const barSpacing = winW / (barCount + 1);
-  ctx.strokeStyle = "#1a1a1e";
-  ctx.lineWidth = 6;
-  for (let i = 1; i <= barCount; i++) {
-    const bx = winX + i * barSpacing;
-    ctx.beginPath();
-    ctx.moveTo(bx, winY);
-    ctx.lineTo(bx, winY + winH);
-    ctx.stroke();
-  }
-
-  ctx.strokeStyle = "#1a0e08";
-  ctx.lineWidth = 3;
-  ctx.strokeRect(winX, winY, winW, winH);
-
-  applyPerlinNoise(ctx, size, 64, 14, 4);
-
-  return new THREE.CanvasTexture(cvs);
-}
-
 export function createStage(canvas: HTMLCanvasElement): Stage {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  renderer.shadowMap.enabled = true;
+  /**
+   * **No shadows, but every light still lights.** This is the one switch for it:
+   * with the shadow map off, three renders no shadow pass at all and the
+   * `castShadow` / `receiveShadow` flags left on the meshes and the sun below
+   * simply do nothing. Nothing about illumination changes — the ambient,
+   * hemisphere and directional lights all contribute exactly as before, because
+   * a Lambert surface's brightness is the lights hitting it and the shadow map
+   * only ever subtracted from that.
+   *
+   * The rig is deliberately left standing rather than stripped out, so turning
+   * shadows back on is this line rather than an archaeology exercise.
+   */
+  renderer.shadowMap.enabled = false;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.setClearColor(0x111111);
 
   const scene = new THREE.Scene();
-  scene.fog = new THREE.Fog(0x111111, BOARD_W * 0.6, BOARD_W * 2.0);
+  /**
+   * **The dark closes in near.** Multiples of the board's width, like the camera
+   * framing above, so resizing the squares carries the murk with it rather than
+   * leaving it stranded at a fixed distance.
+   *
+   * Pulled in from 0.6/2.0: the far plane now sits just past the width of a
+   * chamber, so the wall across the room is already half-eaten and the corridor
+   * runs into black rather than showing you the room at the end of it. The near
+   * plane matters as much as the far one — start it too far out and the fog
+   * reads as a wall of haze hanging at a fixed distance instead of as air.
+   */
+  scene.fog = new THREE.Fog(0x111111, BOARD_W * 0.4, BOARD_W * 1.4);
 
   const wallTexture = generateWallTexture();
   const floorTexture = generateFloorTexture();
@@ -467,17 +415,6 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   // -------------------------------------------------------------------- walls
 
-  // ------------------------------------------------------------------- doors
-
-  interface Door {
-    group: THREE.Group;
-    mesh: THREE.Mesh;
-    open: boolean;
-    angle: number;
-    target: number;
-  }
-  const doors: Door[] = [];
-
   const capMaterial = new THREE.MeshLambertMaterial({ color: 0x4c4c58, flatShading: true });
 
   const addWall = (w: number, d: number, x: number, z: number, height = WALL_H) => {
@@ -531,59 +468,6 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     lintel.position.set(ARCH_CENTRE, WALL_H + 0.3, z);
     lintel.castShadow = true;
     scene.add(lintel);
-
-    // The door: a thick wooden slab like a wall, hinged at the left jamb.
-    const doorWidth = PASSAGE_W - 0.34;
-    const DOOR_DEPTH = 4;     // thick as a wall — can't clip through
-    const doorTex = generateDoorTexture();
-    const doorMat = new THREE.MeshLambertMaterial({ map: doorTex, flatShading: true });
-    const doorMesh = new THREE.Mesh(
-      new THREE.BoxGeometry(doorWidth, WALL_H, DOOR_DEPTH),
-      doorMat,
-    );
-    doorMesh.position.set(doorWidth / 2, WALL_H / 2, 0);
-    doorMesh.castShadow = true;
-    doorMesh.receiveShadow = true;
-
-    // Two dark blocker walls on either side of the door. They sit flush
-    // against its front and back faces and extend well past the passage
-    // width, so the camera can never peek around the door's edges. They
-    // swing with the door group and are hidden when the door opens.
-    const blockerMat = new THREE.MeshBasicMaterial({ color: 0x111111, fog: false });
-    const BLOCKER_W = PASSAGE_W + 4;   // wider than the passage
-    const BLOCKER_H = WALL_H + 2;      // taller than the wall
-    const frontBlocker = new THREE.Mesh(
-      new THREE.PlaneGeometry(BLOCKER_W, BLOCKER_H),
-      blockerMat,
-    );
-    frontBlocker.position.set(doorWidth / 2, BLOCKER_H / 2, -DOOR_DEPTH / 2 - 0.01);
-
-    const backBlocker = new THREE.Mesh(
-      new THREE.PlaneGeometry(BLOCKER_W, BLOCKER_H),
-      blockerMat,
-    );
-    backBlocker.position.set(doorWidth / 2, BLOCKER_H / 2, DOOR_DEPTH / 2 + 0.01);
-    backBlocker.rotation.y = Math.PI;  // face the other way
-
-    // Horizontal ceiling that blocks the overhead camera from seeing past
-    // the door. Extends generously so no orbit angle can peek under.
-    const CEILING_DEPTH = 30;
-    const ceiling = new THREE.Mesh(
-      new THREE.PlaneGeometry(BLOCKER_W, CEILING_DEPTH),
-      new THREE.MeshBasicMaterial({ color: 0x0a0a0a, fog: false, side: THREE.DoubleSide }),
-    );
-    ceiling.rotation.x = -Math.PI / 2;
-    ceiling.position.set(doorWidth / 2, WALL_H + 0.05, 0);
-
-    const doorGroup = new THREE.Group();
-    doorGroup.position.set(archLeft + 0.17, 0, z);
-    doorGroup.add(doorMesh);
-    doorGroup.add(frontBlocker);
-    doorGroup.add(backBlocker);
-    doorGroup.add(ceiling);
-    scene.add(doorGroup);
-
-    doors.push({ group: doorGroup, mesh: doorMesh, open: false, angle: 0, target: 0 });
   };
 
   // ------------------------------------------------------------- a chamber
@@ -602,20 +486,9 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   // A slightly lighter slab marks the fighting ground so the arena still reads
   // as a place, with no lines on it.
 
-  const TORCH_INSET = 0.25;
-  const torches: Array<ReturnType<typeof buildTorch>> = [];
-
-  const addTorch = (x: number, z: number, yaw: number) => {
-    const torch = buildTorch();
-    torch.group.position.set(x, 1.9, z);
-    torch.group.rotation.y = yaw;
-    scene.add(torch.group);
-    torches.push(torch);
-  };
-
   /**
-   * One room, and the only room there is: floor, four walls with the passage's
-   * gap in one of them, and a torch at the midpoint of each wall.
+   * One room, and the only room there is: floor and four walls with the
+   * passage's gap in one of them. Nothing hangs on the masonry.
    *
    * The far room is this same call with the gap on its north side — which is
    * what "identical" means here. There is one room, built twice, so anything
@@ -644,18 +517,6 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       addDoorFrame(northZ);
       addWall(CHAMBER_W + WALL_T * 2, WALL_T, BOARD_CX, southZ);
     }
-
-    // One bracket at the midpoint of each wall. These are the walls' *inner*
-    // faces, so each offset points into the room — get the sign wrong and the
-    // torch is buried in its own masonry.
-    //
-    // The one over the doorway sits on the middle column, not over the arch
-    // itself: the passage has its own light spilling through it, and a torch
-    // there would wash the glow out rather than add to it.
-    addTorch(BOARD_CX, north + TORCH_INSET, -Math.PI / 2); // north wall, face +Z
-    addTorch(BOARD_CX, south - TORCH_INSET, Math.PI / 2); // south wall, face -Z
-    addTorch(west + TORCH_INSET, cz, 0);                  // west wall, face +X
-    addTorch(east - TORCH_INSET, cz, Math.PI);             // east wall, face -X
   };
 
   buildChamber(BOARD_CZ, "south");
@@ -663,9 +524,9 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   // ------------------------------------------------------------ the hallway
 
-  // Between the two doorways: floor, two long walls a passage-width apart, and a
-  // torch on each side at the halfway mark. Nothing else — it is a distance to
-  // be crossed, and the room at the end of it should be the thing you look at.
+  // Between the two doorways: floor and two long walls a passage-width apart.
+  // Nothing else — it is a distance to be crossed, and the room at the end of it
+  // should be the thing you look at.
   const hallZ0 = BOARD_CZ + CHAMBER_D / 2 + WALL_T;
   const hallCZ = hallZ0 + HALL_LEN / 2;
 
@@ -675,9 +536,6 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   addWall(WALL_T, HALL_LEN, archLeft - WALL_T / 2, hallCZ);
   addWall(WALL_T, HALL_LEN, archRight + WALL_T / 2, hallCZ);
-
-  addTorch(archLeft + TORCH_INSET, hallCZ, 0);       // left wall, face +X
-  addTorch(archRight - TORCH_INSET, hallCZ, Math.PI); // right wall, face -X
 
   // --------------------------------------------------------------- the arch
 
@@ -790,23 +648,8 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       camera.lookAt(eye.x + forward.x, eye.y + forward.y, eye.z + forward.z);
     } else {
       const horizontal = Math.cos(smoothed.pitch) * smoothed.distance;
-      let camZ = smoothed.z + Math.cos(smoothed.yaw) * horizontal;
-
-      // Keep both the camera and its look-target on the focus's side of any
-      // closed door, well clear of it so the frustum cannot peek through.
-      let lookZ = smoothed.z;
-      const DOOR_CAM_MARGIN = 3;
-      for (const door of doors) {
-        if (door.open) continue;
-        const dz = door.group.position.z;
-        if (smoothed.z < dz) {
-          if (camZ > dz - DOOR_CAM_MARGIN) camZ = dz - DOOR_CAM_MARGIN;
-          if (lookZ > dz - DOOR_CAM_MARGIN) lookZ = dz - DOOR_CAM_MARGIN;
-        } else {
-          if (camZ < dz + DOOR_CAM_MARGIN) camZ = dz + DOOR_CAM_MARGIN;
-          if (lookZ < dz + DOOR_CAM_MARGIN) lookZ = dz + DOOR_CAM_MARGIN;
-        }
-      }
+      const camZ = smoothed.z + Math.cos(smoothed.yaw) * horizontal;
+      const lookZ = smoothed.z;
 
       camera.position.set(
         smoothed.x + Math.sin(smoothed.yaw) * horizontal,
@@ -942,11 +785,6 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       smoothed.x = damp(smoothed.x, focus.x, 14, dt);
       smoothed.z = damp(smoothed.z, focus.z, 14, dt);
       applyCamera();
-
-      for (const door of doors) {
-        door.angle = damp(door.angle, door.target, 8, dt);
-        door.group.rotation.y = door.angle;
-      }
     },
 
     groundAt(ndcX, ndcY) {
@@ -995,39 +833,10 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       targetRing.position.set(toX(px), 0.14, toZ(py));
     },
 
-    toggleDoorAt(ndcX, ndcY) {
-      if (doors.length === 0) return null;
-      ndc.set(ndcX, ndcY);
-      raycaster.setFromCamera(ndc, camera);
-      const doorMeshes = doors.map((d) => d.mesh);
-      const hits = raycaster.intersectObjects(doorMeshes, false);
-      if (hits.length === 0) return null;
-      const hitMesh = hits[0]!.object;
-      const idx = doors.findIndex((d) => d.mesh === hitMesh);
-      return idx >= 0 ? idx : null;
-    },
-
-    updateDoors(doorsClosed) {
-      if (!doorsClosed) return;
-      for (let i = 0; i < doors.length; i++) {
-        const door = doors[i]!;
-        const closed = doorsClosed[i] ?? true;
-        door.open = !closed;
-        door.target = closed ? 0 : -Math.PI / 2;
-      }
-    },
-
     animateScenery(elapsed) {
-      torches.forEach((torch, i) => {
-        const flicker = 0.82 + Math.sin(elapsed * 9 + i * 1.7) * 0.09 + Math.sin(elapsed * 23 + i) * 0.05;
-        torch.flame.scale.setScalar(0.85 + flicker * 0.25);
-        // Ten brackets — four to a room and two down the hall. Each has a whole
-        // wall to carry, but the rooms are small enough that the real-time
-        // game's brightness would wash their floors out.
-        torch.light.intensity = 8 * flicker;
-      });
-      // The doorway breathes with the same beat the torches keep, so the way
-      // through still draws the eye without being a marker.
+      // The lamp in the doorway is the only thing on the walls that moves, and
+      // the only thing left in here to animate. It breathes so the way through
+      // draws the eye without being a marker.
       archLight.intensity = 4.5 + Math.sin(elapsed * 2.2) * 1.1;
     },
 

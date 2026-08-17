@@ -13,8 +13,36 @@ const SQUARE = 44;
 const GAP = 6;
 const MARGIN = 16;
 
-export const ACTION_BAR_WIDTH = ACTION_SLOTS * SQUARE + (ACTION_SLOTS - 1) * GAP;
-export const ACTION_BAR_HEIGHT = SQUARE;
+/**
+ * **How the five squares are arranged.** The bar began as one strip along the
+ * bottom and is still exactly that everywhere it isn't told otherwise; a front
+ * end that wants a column of larger squares says so with a layout rather than
+ * with a second copy of this file. Everything geometric here — the backing, the
+ * hit-test, the cooldown blind — reads the layout, so a caller can never draw
+ * one shape and click another.
+ */
+export interface ActionBarLayout {
+  readonly orientation: "row" | "column";
+  /** Edge of one square, in room units. The icons are sized from this. */
+  readonly square: number;
+  readonly gap: number;
+}
+
+/** The original: a horizontal strip of 44px squares. */
+export const ACTION_BAR_ROW: ActionBarLayout = { orientation: "row", square: SQUARE, gap: GAP };
+
+/** Stacked, and bigger — the squares carry an icon each with room to read it. */
+export const ACTION_BAR_COLUMN: ActionBarLayout = { orientation: "column", square: 56, gap: 8 };
+
+export function actionBarSize(layout: ActionBarLayout = ACTION_BAR_ROW): { width: number; height: number } {
+  const along = ACTION_SLOTS * layout.square + (ACTION_SLOTS - 1) * layout.gap;
+  return layout.orientation === "row"
+    ? { width: along, height: layout.square }
+    : { width: layout.square, height: along };
+}
+
+export const ACTION_BAR_WIDTH = actionBarSize(ACTION_BAR_ROW).width;
+export const ACTION_BAR_HEIGHT = actionBarSize(ACTION_BAR_ROW).height;
 
 /** Centred along the bottom edge by default. */
 export const ACTION_BAR_DEFAULT_ORIGIN: Point = {
@@ -22,18 +50,22 @@ export const ACTION_BAR_DEFAULT_ORIGIN: Point = {
   y: WORLD_HEIGHT - MARGIN - SQUARE,
 };
 
-export function clampActionBarOrigin(origin: Point): Point {
-  return clampPanelOrigin(origin, ACTION_BAR_WIDTH, ACTION_BAR_HEIGHT);
+export function clampActionBarOrigin(origin: Point, layout: ActionBarLayout = ACTION_BAR_ROW): Point {
+  const { width, height } = actionBarSize(layout);
+  return clampPanelOrigin(origin, width, height);
 }
 
-export function squareRect(origin: Point, index: number) {
-  return { x: origin.x + index * (SQUARE + GAP), y: origin.y, width: SQUARE, height: SQUARE };
+export function squareRect(origin: Point, index: number, layout: ActionBarLayout = ACTION_BAR_ROW) {
+  const offset = index * (layout.square + layout.gap);
+  return layout.orientation === "row"
+    ? { x: origin.x + offset, y: origin.y, width: layout.square, height: layout.square }
+    : { x: origin.x, y: origin.y + offset, width: layout.square, height: layout.square };
 }
 
 /** Index of the slot under a point, or null. */
-export function squareAtPoint(origin: Point, point: Point): number | null {
+export function squareAtPoint(origin: Point, point: Point, layout: ActionBarLayout = ACTION_BAR_ROW): number | null {
   for (let i = 0; i < ACTION_SLOTS; i++) {
-    const r = squareRect(origin, i);
+    const r = squareRect(origin, i, layout);
     if (point.x >= r.x && point.x <= r.x + r.width && point.y >= r.y && point.y <= r.y + r.height) {
       return i;
     }
@@ -70,12 +102,19 @@ export function drawActionBar(
   cooldown: { slot: number; remainingMs: number; totalMs: number } | null = null,
   /** Whether the selected attack is in range of a live target right now. */
   canAttack = false,
+  layout: ActionBarLayout = ACTION_BAR_ROW,
 ): void {
   ctx.setLineDash([]);
-  drawPanelBacking(ctx, origin, ACTION_BAR_WIDTH, ACTION_BAR_HEIGHT);
+  const size = actionBarSize(layout);
+  drawPanelBacking(ctx, origin, size.width, size.height);
+
+  // The icons are a fraction of the square rather than fixed, so a bigger
+  // square carries a bigger sword instead of the same one adrift in space.
+  const swordLength = layout.square * 0.64;
+  const daggerLength = layout.square * 0.45;
 
   for (let i = 0; i < ACTION_SLOTS; i++) {
-    const r = squareRect(origin, i);
+    const r = squareRect(origin, i, layout);
 
     ctx.fillStyle = "#141414";
     ctx.fillRect(r.x, r.y, r.width, r.height);
@@ -101,9 +140,9 @@ export function drawActionBar(
     const cx = r.x + r.width / 2;
     const cy = r.y + r.height / 2;
     if (action.kind === "melee") {
-      drawDagger(ctx, cx, cy, daggerAngle(0, -1), 28, "#d6dbdf"); // upright sword, blade up
+      drawDagger(ctx, cx, cy, daggerAngle(0, -1), swordLength, "#d6dbdf"); // upright sword, blade up
     } else {
-      drawDagger(ctx, cx, cy, daggerAngle(-1, -1), 20, "#d6dbdf"); // smaller dagger, blade NW
+      drawDagger(ctx, cx, cy, daggerAngle(-1, -1), daggerLength, "#d6dbdf"); // smaller dagger, blade NW
     }
 
     // Cooldown blind. Drawn last so it darkens the icon too: full square at the

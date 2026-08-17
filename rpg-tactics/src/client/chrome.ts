@@ -12,7 +12,7 @@
  * the hint between the two in the strip over the action bar.
  */
 
-import { ACTION_BAR_HEIGHT, ACTION_BAR_WIDTH } from "../../../src/client/actionbar.js";
+import { ACTION_BAR_COLUMN, actionBarSize } from "../../../src/client/actionbar.js";
 import { WORLD_HEIGHT, WORLD_WIDTH } from "../../../src/shared/constants.js";
 import type { Point } from "../../../src/shared/movement.js";
 import { isOver, type TacticsSnapshot } from "../shared/tactics.js";
@@ -45,6 +45,7 @@ export function drawTacticsChrome(
   drawLog(ctx, snap);
   drawHint(ctx, snap);
   drawTurnButtons(ctx, snap, barOrigin, cursor);
+  if (snap.paused && !isOver(snap.phase)) drawStanding(ctx, snap.aggro);
   if (isOver(snap.phase)) drawOutcome(ctx, snap);
 }
 
@@ -64,10 +65,19 @@ export function drawTacticsChrome(
  * press in two different places is what stops a weapon swap from accidentally
  * being a swing.
  */
+/**
+ * **The bar is a stack on the left here, under the player's status**, rather
+ * than the strip along the bottom the other two front ends draw. It is the same
+ * `drawActionBar`, handed a different `ActionBarLayout` — the layout travels to
+ * the drawing, the hit-test and these buttons from this one constant, so they
+ * cannot end up describing different rectangles.
+ */
+export const BAR_LAYOUT = ACTION_BAR_COLUMN;
+const BAR_SIZE = actionBarSize(BAR_LAYOUT);
+
 const TURN_BUTTON_GAP = 6;
-const TURN_BUTTON_WIDTH = 132;
-/** Two rows sharing the action bar's height exactly, so the strip reads as one. */
-const TURN_BUTTON_HEIGHT = (ACTION_BAR_HEIGHT - TURN_BUTTON_GAP) / 2;
+/** Shallower than a slot, so it reads as a button rather than a sixth weapon. */
+const TURN_BUTTON_HEIGHT = Math.round(BAR_LAYOUT.square * 0.62);
 
 const TURN_BUTTON_FONT = "12px monospace";
 const TURN_KEY_FONT = "10px monospace";
@@ -77,19 +87,24 @@ export interface Rect { x: number; y: number; width: number; height: number }
 export const hitsButton = (r: Rect, p: Point): boolean =>
   p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height;
 
-/** Attack sits on top — it is the one you reach for. */
+/**
+ * **The foot of the stack**, squared off to the column's own width so the whole
+ * left edge reads as one object: five weapons, then the thing that swings the
+ * one you picked. Beside the bar it needed a width of its own and left the
+ * column looking like half a UI.
+ *
+ * Wait went with the turns entirely: the button, the `.` binding and the `wait`
+ * message are all gone, and the server had already stopped handling it. A
+ * button for passing time is meaningless in a world that only runs while you
+ * act — holding still *is* the pause now.
+ */
 export function attackRect(barOrigin: Point): Rect {
   return {
-    x: barOrigin.x + ACTION_BAR_WIDTH + TURN_BUTTON_GAP,
-    y: barOrigin.y,
-    width: TURN_BUTTON_WIDTH,
+    x: barOrigin.x,
+    y: barOrigin.y + BAR_SIZE.height + TURN_BUTTON_GAP,
+    width: BAR_SIZE.width,
     height: TURN_BUTTON_HEIGHT,
   };
-}
-
-export function waitRect(barOrigin: Point): Rect {
-  const above = attackRect(barOrigin);
-  return { ...above, y: above.y + TURN_BUTTON_HEIGHT + TURN_BUTTON_GAP };
 }
 
 function drawTurnButton(
@@ -106,18 +121,19 @@ function drawTurnButton(
   ctx.lineWidth = hovered ? 2 : 1;
   ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.width - 1, rect.height - 1);
 
-  const cy = rect.y + rect.height / 2;
+  // Stacked, not side by side: at the column's width there is no room for a
+  // key and a word on one line, and the word has to stay the readable one.
+  const cx = rect.x + rect.width / 2;
+  ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-
-  // Key on the left, dimmer than the word it belongs to.
-  ctx.font = TURN_KEY_FONT;
-  ctx.textAlign = "left";
-  ctx.fillStyle = "#7a7a7a";
-  ctx.fillText(keyLabel, rect.x + 8, cy);
 
   ctx.font = TURN_BUTTON_FONT;
   ctx.fillStyle = color;
-  ctx.fillText(label, rect.x + 62, cy);
+  ctx.fillText(label, cx, rect.y + rect.height * 0.36);
+
+  ctx.font = TURN_KEY_FONT;
+  ctx.fillStyle = "#7a7a7a";
+  ctx.fillText(keyLabel, cx, rect.y + rect.height * 0.72);
 }
 
 function drawTurnButtons(
@@ -132,7 +148,6 @@ function drawTurnButtons(
   // turn, grey when it isn't yours to spend. Same three-state reading as the
   // selected slot's border, so the two never disagree.
   const attack = attackRect(barOrigin);
-  const wait = waitRect(barOrigin);
 
   drawTurnButton(
     ctx,
@@ -141,15 +156,6 @@ function drawTurnButtons(
     "Attack",
     !yours ? "#444444" : snap.selectedCanAttack ? GOLD : "#ffffff",
     !!cursor && yours && hitsButton(attack, cursor),
-  );
-
-  drawTurnButton(
-    ctx,
-    wait,
-    "(.)",
-    "Wait",
-    yours ? "#cccccc" : "#444444",
-    !!cursor && yours && hitsButton(wait, cursor),
   );
 }
 
@@ -209,6 +215,34 @@ function drawHint(ctx: CanvasRenderingContext2D, snap: TacticsSnapshot): void {
   ctx.textBaseline = "middle";
   ctx.fillStyle = snap.phase === "player" ? "#cccccc" : DIM;
   ctx.fillText(snap.hint, WORLD_WIDTH / 2, HINT_Y);
+}
+
+/**
+ * A standing world needs saying, or a frozen hellhound reads as a hung server.
+ * It sits high and centred rather than over the bar, because the hint line is
+ * already carrying the sentence — this is just the state, where the eye is.
+ *
+ * **What a still world means depends on whether anything has noticed you**, and
+ * since only acts spend time, in a fight it is still *most* of the time. A
+ * PAUSED banner hanging over every exchange would read as the game having hung
+ * at the exact moments it is waiting on the player hardest. With the pack awake
+ * the same stillness is the player's turn, so that is what it says.
+ */
+function drawStanding(ctx: CanvasRenderingContext2D, awake: boolean): void {
+  const y = WORLD_HEIGHT * 0.12;
+  const label = awake ? "YOUR TURN" : "PAUSED";
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "600 26px monospace";
+  // Outlined, like the damage numbers: it can land over lit stone, the glow of
+  // the doorway, or the black of the corridor, and has to stay legible over all
+  // three.
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+  ctx.strokeText(label, WORLD_WIDTH / 2, y);
+  ctx.fillStyle = "#ffd633";
+  ctx.fillText(label, WORLD_WIDTH / 2, y);
 }
 
 /** The end of the encounter, centred over the board. */

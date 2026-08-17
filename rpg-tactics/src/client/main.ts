@@ -23,11 +23,12 @@ import { WORLD_HEIGHT, WORLD_WIDTH } from "../../../src/shared/constants.js";
 import { LOOT_CLOSE_RECT, hitsRect, lootMenuProxyPoint } from "../../../src/shared/loot.js";
 import type { Point } from "../../../src/shared/movement.js";
 import { squareAtPoint } from "../../../src/client/actionbar.js";
+import { HUD_HEIGHT } from "../../../src/client/hud.js";
 import { DEFAULT_CURSOR } from "../../../src/client/cursors.js";
 import { SERVER_TICK_MS, renderFraction, smoothInterval } from "../../../src/client/interpolation.js";
 import { fitToViewport } from "../../../src/client/viewport.js";
 import { Actors, applyCues, entityIdOf } from "../../../rpg-3d/src/client/entities.js";
-import { autoResRect, barOrigin, drawOverlay, hits, resurrectRect } from "../../../rpg-3d/src/client/overlay.js";
+import { autoResRect, barOrigin, drawOverlay, hits, hudOrigin, resurrectRect } from "../../../rpg-3d/src/client/overlay.js";
 import { interpolateSnapshot } from "../../../rpg-3d/src/client/playback.js";
 import { toX, toZ } from "../../../rpg-3d/src/client/world.js";
 import {
@@ -37,8 +38,9 @@ import {
   type TacticsInput,
   type TacticsSnapshot,
 } from "../shared/tactics.js";
-import { attackRect, drawTacticsChrome, hitsButton, waitRect } from "./chrome.js";
+import { BAR_LAYOUT, attackRect, drawTacticsChrome, hitsButton } from "./chrome.js";
 import { createStage } from "./stage.js";
+import { drawHeldWeapon } from "./viewmodel.js";
 
 // ------------------------------------------------------------------ canvases
 
@@ -47,6 +49,15 @@ const uiCanvas = document.getElementById("ui") as HTMLCanvasElement;
 const ctx = uiCanvas.getContext("2d")!;
 
 const stage = createStage(sceneCanvas);
+
+/**
+ * The bar is stacked down the left, under the player's status panel. Far enough
+ * below it to clear the Auto-Res toggle that hangs beneath the name plate, which
+ * the HUD's own height does not account for.
+ */
+const BAR_TOP_GAP = 46;
+barOrigin.x = hudOrigin.x;
+barOrigin.y = hudOrigin.y + HUD_HEIGHT + BAR_TOP_GAP;
 
 function resize() {
   const fit = fitToViewport(window.innerWidth, window.innerHeight, window.devicePixelRatio || 1);
@@ -73,8 +84,11 @@ let snapshotInterval = SERVER_TICK_MS;
 
 let actors: Actors | null = null;
 
-// --------------------------------------------------------------- sword swing
-const SWING_DURATION = 250;
+// ------------------------------------------------------- the weapon in hand
+// The sword's swing is stamped from a *fresh cooldown*, the protocol's way of
+// saying "an attack just happened" — the same derivation `applyCues` uses,
+// rather than a second event on the wire. The dagger needs no stamp: it has no
+// animation, and whether it is in your hand is read from the cooldown itself.
 let swingStartTime = -Infinity;
 
 const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -89,15 +103,17 @@ function connectWebSocket() {
       const now = performance.now();
       if (currSnapshot && actors) applyCues(actors, currSnapshot, snap, now, struckBy);
 
-      // Detect a fresh melee cooldown to trigger the sword swing overlay.
+      // A fresh cooldown means an attack just landed. Which animation plays is
+      // read off `cooldown.slot` — the slot that actually fired — and not off
+      // `activeSlot`, or swapping weapons mid-cooldown would replay the swing
+      // as a throw.
       const before = currSnapshot?.cooldown;
       const after = snap.cooldown;
       if (
         after &&
-        (!before || before.slot !== after.slot || after.remainingMs > before.remainingMs + 1) &&
-        ACTIONS[snap.activeSlot]?.kind === "melee"
+        (!before || before.slot !== after.slot || after.remainingMs > before.remainingMs + 1)
       ) {
-        swingStartTime = now;
+        if (ACTIONS[after.slot]?.kind === "melee") swingStartTime = now;
       }
 
       prevSnapshot = currSnapshot;
@@ -336,15 +352,6 @@ uiCanvas.addEventListener("contextmenu", (event) => {
   event.preventDefault();
 });
 
-// A right-click (that wasn't a pan drag) toggles whichever door is under it.
-uiCanvas.addEventListener("auxclick", (event) => {
-  if (event.button !== 2) return;
-  if (dragMoved > DRAG_THRESHOLD) return;
-  const ndc = toNdc(event);
-  const doorIndex = stage.toggleDoorAt(ndc.x, ndc.y);
-  if (doorIndex !== null) send({ type: "toggleDoor", index: doorIndex });
-});
-
 // ----------------------------------------------------------------- clicking
 
 uiCanvas.addEventListener("click", (event) => {
@@ -367,16 +374,15 @@ uiCanvas.addEventListener("click", (event) => {
     return;
   }
 
-  // The two buttons that spend a turn, then the bar's squares, which only
-  // choose a weapon.
+  // The Attack button at the foot of the stack, then the squares above it,
+  // which only choose a weapon.
   if (hitsButton(attackRect(barOrigin), uiPoint)) {
     send({ type: "attack" });
     return;
   }
 
-  // Wait button removed — no turns to pass.
 
-  const slot = squareAtPoint(barOrigin, uiPoint);
+  const slot = squareAtPoint(barOrigin, uiPoint, BAR_LAYOUT);
   if (slot !== null) {
     if (ACTIONS[slot]) send({ type: "slot", index: slot });
     return;
@@ -406,9 +412,8 @@ function updateCursorStyle(snap: TacticsSnapshot) {
     if (snap.inspect && hitsRect(LOOT_CLOSE_RECT, uiCursor)) wanted = "pointer";
     else if (snap.dead && hits(resurrectRect(ctx), uiCursor)) wanted = "pointer";
     else if (hits(autoResRect(ctx), uiCursor)) wanted = "pointer";
-    else if (squareAtPoint(barOrigin, uiCursor) !== null) wanted = "pointer";
+    else if (squareAtPoint(barOrigin, uiCursor, BAR_LAYOUT) !== null) wanted = "pointer";
     else if (hitsButton(attackRect(barOrigin), uiCursor)) wanted = "pointer";
-    else if (hitsButton(waitRect(barOrigin), uiCursor)) wanted = "pointer";
   }
 
   if (wanted !== appliedCursor) {
@@ -458,8 +463,6 @@ function frame(now: number) {
   const snap = prevSnapshot
     ? interpolateSnapshot(prevSnapshot, currSnapshot, t, now - currSnapshotTime)
     : currSnapshot;
-
-  stage.updateDoors(currSnapshot.doorsClosed);
 
   if (!actors) actors = new Actors(stage.scene, stage.pickables, snap.player.color);
 
@@ -512,53 +515,24 @@ function frame(now: number) {
   // shoulder a bite is easy to miss; here the whole board is on screen, the log
   // names what hit you, and a red vignette over a turn-based fight just gets in
   // the way of reading it.
-  drawOverlay(ctx, { snap, uiCursor, groundCursor, toScreen, hurt: 0 });
+  drawOverlay(ctx, { snap, uiCursor, groundCursor, toScreen, hurt: 0, barLayout: BAR_LAYOUT });
   drawTacticsChrome(ctx, snap, barOrigin, uiCursor);
 
-  // ---- sword swing overlay ----
-  const swingElapsed = now - swingStartTime;
-  if (swingElapsed < SWING_DURATION) {
-    const t = swingElapsed / SWING_DURATION;
-
-    // Pivot near the bottom-right corner of the screen.
-    const pivotX = WORLD_WIDTH * 0.85;
-    const pivotY = WORLD_HEIGHT * 1.1;
-
-    // Sweep from -30 degrees (top-right) to 60 degrees (toward center).
-    const angle = (-30 + 90 * t) * (Math.PI / 180);
-
-    // Blade length in room units.
-    const bladeLen = WORLD_HEIGHT * 0.7;
-    const bladeWidth = 12;
-
-    // Fade out over the last 40% of the swing.
-    const alpha = t < 0.6 ? 0.85 : 0.85 * (1 - (t - 0.6) / 0.4);
-
-    ctx.save();
-    ctx.translate(pivotX, pivotY);
-    ctx.rotate(-angle);
-
-    // Blade: a pointed polygon — wide at the hilt, tapering to a point.
-    ctx.beginPath();
-    ctx.moveTo(-bladeWidth * 0.5, 0);             // hilt left
-    ctx.lineTo(-bladeWidth * 0.4, -bladeLen * 0.9); // taper left
-    ctx.lineTo(0, -bladeLen);                      // tip
-    ctx.lineTo(bladeWidth * 0.4, -bladeLen * 0.9);  // taper right
-    ctx.lineTo(bladeWidth * 0.5, 0);               // hilt right
-    ctx.closePath();
-
-    ctx.fillStyle = `rgba(220, 225, 230, ${alpha})`;
-    ctx.fill();
-
-    // Thin bright edge highlight down the centre.
-    ctx.beginPath();
-    ctx.moveTo(0, -bladeLen * 0.05);
-    ctx.lineTo(0, -bladeLen);
-    ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.6})`;
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-
-    ctx.restore();
+  // ---- the weapon in hand ----
+  // Drawn last so nothing covers it: it is the closest thing to the camera
+  // there is. Hidden once the encounter is over, when the outcome card owns
+  // the screen.
+  const heldAction = ACTIONS[snap.activeSlot];
+  if (heldAction && !isOver(snap.phase)) {
+    // `spent` comes off the live cooldown rather than a timer of the client's
+    // own: `interpolateSnapshot` counts `remainingMs` down in real time, so the
+    // dagger reappears exactly when the server would let you throw the next one.
+    const cd = snap.cooldown;
+    drawHeldWeapon(ctx, {
+      kind: heldAction.kind,
+      sinceSwing: Number.isFinite(swingStartTime) ? now - swingStartTime : null,
+      spent: !!cd && cd.remainingMs > 0 && ACTIONS[cd.slot]?.kind === "ranged",
+    });
   }
 }
 
