@@ -30,9 +30,11 @@ import type { Point } from "../../../src/shared/movement.js";
 import {
   AGGRO_RANGE,
   ARENA_ROOM,
+  ARENA_X,
   ATTACK_MS,
   AUTO_RESTART_DELAY_MS,
   BOARD_REGION,
+  DOOR_BOUNDARY_Y,
   FAR_REGION,
   HALL_REGION,
   HOUND_DAMAGE,
@@ -326,10 +328,27 @@ export class TacticsGame {
     }
   }
 
+  /**
+   * Prevent a raw position from crossing a closed door boundary. The check
+   * is minimal — just stop at the boundary — because `clampPointToFloor`
+   * snaps to cell centres that are already very close (half a tile) to the
+   * boundary. Visual blocking is handled client-side by a ceiling occluder
+   * and camera clamping.
+   */
+  private clampToDoors(from: Point, raw: Point): void {
+    for (let i = 0; i < 2; i++) {
+      if (!this.doorsClosed[i]) continue;
+      const by = DOOR_BOUNDARY_Y[i]!;
+      if (from.y < by && raw.y >= by) raw.y = by - 0.5;
+      else if (from.y >= by && raw.y < by) raw.y = by + 0.5;
+    }
+  }
+
   /** Apply a pixel displacement to the player, clamping to the floor. Returns whether it moved. */
   private stepPlayer(dx: number, dy: number): boolean {
     const from = this.playerAt();
     const raw = { x: from.x + dx, y: from.y + dy };
+    this.clampToDoors(from, raw);
     const target = clampPointToFloor(raw);
     if (distance(from, target) < 0.01) return false;
 
@@ -362,7 +381,9 @@ export class TacticsGame {
       enemy.patrolDir = -1;
     }
 
-    const target = clampPointToFloor({ x: nx, y: pos.y });
+    const raw = { x: nx, y: pos.y };
+    this.clampToDoors(pos, raw);
+    const target = clampPointToFloor(raw);
     const targetCell = clampToGrid(target);
     if (blockedByDoor(enemy.cell, targetCell, this.doorsClosed)) return;
     enemy.facing = enemy.patrolDir;
@@ -402,7 +423,9 @@ export class TacticsGame {
     const nx = (goal.x - enemyPos.x) / gap;
     const ny = (goal.y - enemyPos.y) / gap;
 
-    const target = clampPointToFloor({ x: enemyPos.x + nx * step, y: enemyPos.y + ny * step });
+    const raw = { x: enemyPos.x + nx * step, y: enemyPos.y + ny * step };
+    this.clampToDoors(enemyPos, raw);
+    const target = clampPointToFloor(raw);
     const targetCell = clampToGrid(target);
     if (blockedByDoor(enemy.cell, targetCell, this.doorsClosed)) return;
     enemy.facing = facingToward(enemyPos, target, enemy.facing);

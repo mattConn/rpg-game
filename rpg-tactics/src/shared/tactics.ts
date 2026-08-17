@@ -122,6 +122,15 @@ export const FAR_REGION: Region = {
 
 export const REGIONS: readonly Region[] = [BOARD_REGION, HALL_REGION, FAR_REGION];
 
+/**
+ * Y-coordinate of each door in room pixels, sitting at the boundary between
+ * the two regions it separates. Door 0: board ↔ hall. Door 1: hall ↔ far.
+ */
+export const DOOR_BOUNDARY_Y: readonly number[] = [
+  ARENA_Y + GRID_ROWS * TILE_PX,
+  ARENA_Y + (GRID_ROWS + HALL_ROWS) * TILE_PX,
+];
+
 /** A region's middle, in room pixels — where the client frames and lights it. */
 export function regionCentre(region: Region): Point {
   return {

@@ -532,21 +532,55 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     lintel.castShadow = true;
     scene.add(lintel);
 
-    // The door itself: a thin wooden slab hinged at the left jamb.
+    // The door: a thick wooden slab like a wall, hinged at the left jamb.
     const doorWidth = PASSAGE_W - 0.34;
+    const DOOR_DEPTH = 4;     // thick as a wall — can't clip through
     const doorTex = generateDoorTexture();
     const doorMat = new THREE.MeshLambertMaterial({ map: doorTex, flatShading: true });
     const doorMesh = new THREE.Mesh(
-      new THREE.BoxGeometry(doorWidth, WALL_H, 0.12),
+      new THREE.BoxGeometry(doorWidth, WALL_H, DOOR_DEPTH),
       doorMat,
     );
     doorMesh.position.set(doorWidth / 2, WALL_H / 2, 0);
     doorMesh.castShadow = true;
     doorMesh.receiveShadow = true;
 
+    // Two dark blocker walls on either side of the door. They sit flush
+    // against its front and back faces and extend well past the passage
+    // width, so the camera can never peek around the door's edges. They
+    // swing with the door group and are hidden when the door opens.
+    const blockerMat = new THREE.MeshBasicMaterial({ color: 0x111111, fog: false });
+    const BLOCKER_W = PASSAGE_W + 4;   // wider than the passage
+    const BLOCKER_H = WALL_H + 2;      // taller than the wall
+    const frontBlocker = new THREE.Mesh(
+      new THREE.PlaneGeometry(BLOCKER_W, BLOCKER_H),
+      blockerMat,
+    );
+    frontBlocker.position.set(doorWidth / 2, BLOCKER_H / 2, -DOOR_DEPTH / 2 - 0.01);
+
+    const backBlocker = new THREE.Mesh(
+      new THREE.PlaneGeometry(BLOCKER_W, BLOCKER_H),
+      blockerMat,
+    );
+    backBlocker.position.set(doorWidth / 2, BLOCKER_H / 2, DOOR_DEPTH / 2 + 0.01);
+    backBlocker.rotation.y = Math.PI;  // face the other way
+
+    // Horizontal ceiling that blocks the overhead camera from seeing past
+    // the door. Extends generously so no orbit angle can peek under.
+    const CEILING_DEPTH = 30;
+    const ceiling = new THREE.Mesh(
+      new THREE.PlaneGeometry(BLOCKER_W, CEILING_DEPTH),
+      new THREE.MeshBasicMaterial({ color: 0x0a0a0a, fog: false, side: THREE.DoubleSide }),
+    );
+    ceiling.rotation.x = -Math.PI / 2;
+    ceiling.position.set(doorWidth / 2, WALL_H + 0.05, 0);
+
     const doorGroup = new THREE.Group();
     doorGroup.position.set(archLeft + 0.17, 0, z);
     doorGroup.add(doorMesh);
+    doorGroup.add(frontBlocker);
+    doorGroup.add(backBlocker);
+    doorGroup.add(ceiling);
     scene.add(doorGroup);
 
     doors.push({ group: doorGroup, mesh: doorMesh, open: false, angle: 0, target: 0 });
@@ -756,12 +790,30 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       camera.lookAt(eye.x + forward.x, eye.y + forward.y, eye.z + forward.z);
     } else {
       const horizontal = Math.cos(smoothed.pitch) * smoothed.distance;
+      let camZ = smoothed.z + Math.cos(smoothed.yaw) * horizontal;
+
+      // Keep both the camera and its look-target on the focus's side of any
+      // closed door, well clear of it so the frustum cannot peek through.
+      let lookZ = smoothed.z;
+      const DOOR_CAM_MARGIN = 3;
+      for (const door of doors) {
+        if (door.open) continue;
+        const dz = door.group.position.z;
+        if (smoothed.z < dz) {
+          if (camZ > dz - DOOR_CAM_MARGIN) camZ = dz - DOOR_CAM_MARGIN;
+          if (lookZ > dz - DOOR_CAM_MARGIN) lookZ = dz - DOOR_CAM_MARGIN;
+        } else {
+          if (camZ < dz + DOOR_CAM_MARGIN) camZ = dz + DOOR_CAM_MARGIN;
+          if (lookZ < dz + DOOR_CAM_MARGIN) lookZ = dz + DOOR_CAM_MARGIN;
+        }
+      }
+
       camera.position.set(
         smoothed.x + Math.sin(smoothed.yaw) * horizontal,
         Math.sin(smoothed.pitch) * smoothed.distance,
-        smoothed.z + Math.cos(smoothed.yaw) * horizontal,
+        camZ,
       );
-      camera.lookAt(smoothed.x, 0.9, smoothed.z);
+      camera.lookAt(smoothed.x, 0.9, lookZ);
     }
     // Kept fresh here rather than left to the renderer: picking and the
     // overlay's world-label projection both run before the next render.

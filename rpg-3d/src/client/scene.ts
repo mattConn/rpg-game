@@ -166,12 +166,12 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     [0.3, ROOM_D * 0.3], [0.3, ROOM_D * 0.72],
     [ROOM_W - 0.3, ROOM_D * 0.3], [ROOM_W - 0.3, ROOM_D * 0.72],
   ];
-  for (const [x, z] of torchSpots) {
+  torchSpots.forEach(([x, z]) => {
     const torch = buildTorch();
     torch.group.position.set(x, 2.1, z);
     scene.add(torch.group);
     torches.push(torch);
-  }
+  });
 
   // ------------------------------------------------------------------ markers
 
@@ -328,8 +328,8 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       // Torches flicker on their own offset so they don't pulse in unison.
       torches.forEach((torch, i) => {
         const flicker = 0.82 + Math.sin(elapsed * 9 + i * 1.7) * 0.09 + Math.sin(elapsed * 23 + i) * 0.05;
-        torch.light.intensity = 9 * flicker;
         torch.flame.scale.setScalar(0.85 + flicker * 0.25);
+        torch.light.intensity = 9 * flicker;
       });
       moveMarker.scale.setScalar(1 + Math.sin(elapsed * 6) * 0.08);
     },
