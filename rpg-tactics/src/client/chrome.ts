@@ -44,8 +44,10 @@ export function drawTacticsChrome(
   ctx: CanvasRenderingContext2D,
   snap: TacticsSnapshot,
   viewWidth: number = WORLD_WIDTH,
+  hoveredActionSlot: number | null = null,
 ): void {
   ctx.setLineDash([]);
+  drawHoveredActionName(ctx, hoveredActionSlot);
   drawTurnBanner(ctx, snap, viewWidth);
   drawLog(ctx, snap);
   drawHint(ctx, snap, viewWidth);
@@ -54,6 +56,18 @@ export function drawTacticsChrome(
   if (!isOver(snap.phase) && (snap.aggro || snap.nearAggro)) drawHuntedEye(ctx, !snap.aggro);
   if (snap.paused && !isOver(snap.phase)) drawStanding(ctx, snap.aggro, viewWidth);
   if (isOver(snap.phase)) drawOutcome(ctx, snap, viewWidth);
+}
+
+const ACTION_NAMES = ["Shortsword", "Small dagger", "Weak health potion", "Spell of slumber", "Interact"] as const;
+
+/** Uses the line beneath the player HUD formerly occupied by Auto-Res. */
+function drawHoveredActionName(ctx: CanvasRenderingContext2D, slot: number | null): void {
+  if (slot === null || slot < 0 || slot >= ACTION_NAMES.length) return;
+  ctx.font = "11px monospace";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillStyle = GOLD;
+  ctx.fillText(ACTION_NAMES[slot]!, hudOrigin.x, hudOrigin.y + HUD_HEIGHT + 20);
 }
 
 // ----------------------------------------------------------------- hunted eye

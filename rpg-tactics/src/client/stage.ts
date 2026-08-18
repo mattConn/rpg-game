@@ -27,7 +27,6 @@ import {
   ARENA_Y,
   BOARD_REGION,
   CHAMBER_MARGIN_PX,
-  DOOR_CLEARANCE_PX,
   DOOR_Y,
   type DoorId,
   type DoorStates,
@@ -91,18 +90,17 @@ const HALL_LEN = FAR_CZ - BOARD_CZ - CHAMBER_D - WALL_T * 2;
  * here would quietly leave the view halfway across the dungeon the first time
  * the squares were resized.
  */
-const CAMERA_MIN_DISTANCE = BOARD_W * 0.8;
-const CAMERA_MAX_DISTANCE = BOARD_W * 3.4;
-const CAMERA_START_DISTANCE = BOARD_W * 2.35;
+const CAMERA_MIN_DISTANCE = BOARD_W * 0.42;
+const CAMERA_MAX_DISTANCE = BOARD_W * 1.15;
+const CAMERA_START_DISTANCE = CAMERA_MAX_DISTANCE;
 
 /**
- * Pitch bounds. The floor is the thing being read, so the low end stops well
- * short of the horizon — below about 24 degrees the near wall starts getting
- * between the camera and the back rank.
+ * Full vertical orbit: almost level with the floor at one end and almost
+ * perfectly top-down at the other. Tiny margins avoid singular camera maths.
  */
-const PITCH_MIN = 0.42;
-const PITCH_MAX = 1.42;
-const PITCH_START = 0.95;
+const PITCH_MIN = 0.03;
+const PITCH_MAX = Math.PI / 2 - 0.01;
+const PITCH_START = 0.82;
 
 /**
  * First person needs its own bounds, because the number means something else
@@ -172,7 +170,11 @@ export interface Stage {
   groundAt(ndcX: number, ndcY: number): { x: number; y: number } | null;
   pickAt(ndcX: number, ndcY: number): THREE.Object3D | null;
   project(point: THREE.Vector3): { x: number; y: number };
+  /** Show a faint floor marker, colored for enemies and interactables. */
+  setCursorRing(px: number | null, py: number | null, kind: "floor" | "enemy" | "interactable"): void;
   setTargetRing(px: number | null, py: number | null, color: number): void;
+  setDoorTargetRing(door: DoorId): void;
+  setDoorHoverRing(door: DoorId | null): void;
   doorAt(ndcX: number, ndcY: number): DoorId | null;
   setDoors(doors: DoorStates): void;
   animateScenery(elapsed: number): void;
@@ -370,7 +372,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
    * plane matters as much as the far one — start it too far out and the fog
    * reads as a wall of haze hanging at a fixed distance instead of as air.
    */
-  scene.fog = new THREE.Fog(0x111111, BOARD_W * 0.4, BOARD_W * 1.4);
+  scene.fog = new THREE.Fog(0x111111, BOARD_W * 0.75, BOARD_W * 2.35);
 
   const loadStoneTexture = (path: string) => {
     const texture = new THREE.TextureLoader().load(path);
@@ -457,7 +459,6 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   // -------------------------------------------------------------------- walls
 
   const capMaterial = new THREE.MeshLambertMaterial({ color: 0x4c4c58, flatShading: true });
-
   const addWall = (w: number, d: number, x: number, z: number, height = WALL_H) => {
     const tex = wallTexture.clone();
     tex.repeat.set(Math.max(w, d) / TEXTURE_SCALE, height / TEXTURE_SCALE);
@@ -467,7 +468,6 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     wall.castShadow = true;
     wall.receiveShadow = true;
     scene.add(wall);
-
     const cap = new THREE.Mesh(new THREE.BoxGeometry(w + 0.18, 0.2, d + 0.18), capMaterial);
     cap.position.set(x, height + 0.1, z);
     cap.castShadow = true;
@@ -566,7 +566,41 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   // --------------------------------------------------------------- doors
 
   const doors = new Map<DoorId, THREE.Group>();
+  const doorSlabs = new Map<DoorId, THREE.Mesh>();
   let doorStates: DoorStates = { arena: false, far: false };
+  let playerSceneZ = BOARD_CZ;
+  const clipNorth = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
+  const clipSouth = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+  const updateDoorClipping = () => {
+    const arenaZ = toZ(DOOR_Y.arena);
+    const farZ = toZ(DOOR_Y.far);
+    const edge = 0.11;
+    const planes: THREE.Plane[] = [];
+
+    if (playerSceneZ < arenaZ) {
+      const boundary = doorStates.arena ? (!doorStates.far ? farZ : null) : arenaZ;
+      if (boundary !== null) {
+        clipNorth.constant = boundary + edge;
+        planes.push(clipNorth);
+      }
+    } else if (playerSceneZ > farZ) {
+      const boundary = doorStates.far ? (!doorStates.arena ? arenaZ : null) : farZ;
+      if (boundary !== null) {
+        clipSouth.constant = -(boundary - edge);
+        planes.push(clipSouth);
+      }
+    } else {
+      if (!doorStates.arena) {
+        clipSouth.constant = -(arenaZ - edge);
+        planes.push(clipSouth);
+      }
+      if (!doorStates.far) {
+        clipNorth.constant = farZ + edge;
+        planes.push(clipNorth);
+      }
+    }
+    renderer.clippingPlanes = planes;
+  };
   const doorPickables: THREE.Object3D[] = [];
   const woodTexture = new THREE.TextureLoader().load("/textures/door-oak.png");
   woodTexture.colorSpace = THREE.SRGBColorSpace;
@@ -601,6 +635,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     }
     doorPickables.push(slab);
     doors.set(id, pivot);
+    doorSlabs.set(id, slab);
     scene.add(pivot);
   };
 
@@ -624,7 +659,8 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   // --------------------------------------------------------------- the arch
 
-  // A lamp in the doorway, throwing warm light over the wooden door.
+  // A wall torch beside the near doorway: enough warm light to reveal the
+  // wood, deliberately too dim to flatten the dungeon's blue-gray darkness.
   //
   // Both of the marks that used to be here are gone with the escape rule they
   // belonged to: the amber ring on the floor said "stand here and the encounter
@@ -632,9 +668,65 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   // else. The old glowing curtain is still gone: the wooden slab now makes the
   // opening's state visible without pretending light itself is a barrier.
   const southZ = BOARD_CZ + CHAMBER_D / 2 + WALL_T / 2;
-  const archLight = new THREE.PointLight(0xffb45a, 5, BOARD_W, 2);
-  archLight.position.set(ARCH_CENTRE, 1.6, southZ - 0.6);
-  scene.add(archLight);
+  const torchX = archLeft - 0.75;
+  const torchZ = southZ - WALL_T * 0.72;
+
+  const bracket = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.045, 0.055, 0.42, 7),
+    new THREE.MeshLambertMaterial({ color: 0x332d2a, flatShading: true }),
+  );
+  bracket.castShadow = true;
+  bracket.rotation.x = -0.42;
+  bracket.position.set(torchX, 1.73, torchZ - 0.08);
+  scene.add(bracket);
+  const ironCup = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.13, 0.075, 0.16, 7),
+    new THREE.MeshLambertMaterial({ color: 0x403a36, flatShading: true }),
+  );
+  ironCup.castShadow = true;
+  ironCup.position.set(torchX, 1.97, torchZ - 0.18);
+  scene.add(ironCup);
+
+  const outerFlameMaterial = new THREE.MeshBasicMaterial({
+    color: 0xf06a24,
+    transparent: true,
+    opacity: 0.88,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const innerFlameMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffd86a,
+    transparent: true,
+    opacity: 0.95,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const outerFlame = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.3, 7), outerFlameMaterial);
+  outerFlame.position.set(torchX, 2.17, torchZ - 0.18);
+  scene.add(outerFlame);
+  const innerFlame = new THREE.Mesh(new THREE.ConeGeometry(0.048, 0.18, 7), innerFlameMaterial);
+  innerFlame.position.set(torchX, 2.11, torchZ - 0.2);
+  scene.add(innerFlame);
+
+  const torchLight = new THREE.PointLight(0xff8a3d, 0.85, STRIDE * 2.4, 2);
+  torchLight.position.set(torchX, 2.17, torchZ - 0.38);
+  scene.add(torchLight);
+
+  const EMBER_COUNT = 5;
+  const emberPositions = new Float32Array(EMBER_COUNT * 3);
+  const emberGeometry = new THREE.BufferGeometry();
+  emberGeometry.setAttribute("position", new THREE.BufferAttribute(emberPositions, 3));
+  const emberMaterial = new THREE.PointsMaterial({
+    color: 0xff9b47,
+    size: 0.035,
+    transparent: true,
+    opacity: 0.45,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    sizeAttenuation: true,
+  });
+  const embers = new THREE.Points(emberGeometry, emberMaterial);
+  scene.add(embers);
 
   // ------------------------------------------------------------- highlights
 
@@ -660,12 +752,37 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   targetGlow.visible = false;
   scene.add(targetGlow);
 
+  const cursorRingGeometry = new THREE.RingGeometry(STRIDE * 0.16, STRIDE * 0.18, 32);
+  cursorRingGeometry.rotateX(-Math.PI / 2);
+  const cursorRingMaterial = new THREE.MeshBasicMaterial({
+    color: 0xd8cba6,
+    transparent: true,
+    opacity: 0.3,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const cursorRing = new THREE.Mesh(cursorRingGeometry, cursorRingMaterial);
+  cursorRing.visible = false;
+  scene.add(cursorRing);
+
+  const doorHoverMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffd633,
+    transparent: true,
+    opacity: 0.28,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const doorHoverRing = new THREE.Mesh(targetGlowGeometry, doorHoverMaterial);
+  doorHoverRing.scale.setScalar(1.85);
+  doorHoverRing.visible = false;
+  scene.add(doorHoverRing);
+
 
   // ------------------------------------------------------------------ camera
 
-  // Start in first-person — the overhead view is disabled.
+  // Start in a high overhead orbit behind the visible player.
   let yaw = -Math.PI / 2; // facing east, matching the player's initial facing
-  let pitch = FP_PITCH_START;
+  let pitch = PITCH_START;
   let distance = CAMERA_START_DISTANCE;
 
   /**
@@ -703,15 +820,16 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
    * happened to be behind. Leaving puts the overhead view back exactly as you
    * left it, so F is a look through the eyes and not a loss of your framing.
    */
-  let firstPerson = true;
+  let firstPerson = false;
   let overheadPitch = PITCH_START;
-  let overheadYaw = 0;
+  let overheadYaw = -Math.PI / 2;
 
   /** The player's head, in scene units — where the eyes are when they are ours. */
   const eye = new THREE.Vector3(BOARD_CX, EYE_HEIGHT, BOARD_CZ);
   const forward = new THREE.Vector3();
   /** Which way the player's model is facing: +1 east, -1 west. */
   let playerFacing: 1 | -1 = 1;
+  const doorWorldPosition = new THREE.Vector3();
 
   const clampPitch = (value: number) =>
     firstPerson ? clamp(value, FP_PITCH_MIN, FP_PITCH_MAX) : clamp(value, PITCH_MIN, PITCH_MAX);
@@ -730,27 +848,17 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       camera.lookAt(eye.x + forward.x, eye.y + forward.y, eye.z + forward.z);
     } else {
       const horizontal = Math.cos(smoothed.pitch) * smoothed.distance;
-      const camZ = smoothed.z + Math.cos(smoothed.yaw) * horizontal;
+      const armX = Math.sin(smoothed.yaw);
+      const armZ = Math.cos(smoothed.yaw);
+      const lookX = smoothed.x;
       const lookZ = smoothed.z;
 
       camera.position.set(
-        smoothed.x + Math.sin(smoothed.yaw) * horizontal,
+        smoothed.x + armX * horizontal,
         Math.sin(smoothed.pitch) * smoothed.distance,
-        camZ,
+        smoothed.z + armZ * horizontal,
       );
-      // A closed doorway is part of its wall for the camera too. Keep the
-      // orbit rig on the player's side; otherwise a low orbit can put the eye
-      // through the slab and render the room from behind it. The clearance is
-      // larger than the camera near plane, so the door cannot be clipped away.
-      const clearance = toZ(DOOR_CLEARANCE_PX);
-      for (const id of ["arena", "far"] as const) {
-        if (doorStates[id]) continue;
-        const doorZ = toZ(DOOR_Y[id]);
-        camera.position.z = eye.z < doorZ
-          ? Math.min(camera.position.z, doorZ - clearance)
-          : Math.max(camera.position.z, doorZ + clearance);
-      }
-      camera.lookAt(smoothed.x, 0.9, lookZ);
+      camera.lookAt(lookX, 0.9, lookZ);
     }
     // Kept fresh here rather than left to the renderer: picking and the
     // overlay's world-label projection both run before the next render.
@@ -881,34 +989,26 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       // point in the scene that has to be exactly where the player is, and a
       // damped head lags a half-step behind its own body on every walk.
       eye.set(toX(px), EYE_HEIGHT, toZ(py));
+      playerSceneZ = toZ(py);
+      updateDoorClipping();
 
-      // On the board, the board. Off it — in the corridor or the far room —
-      // them. `damp` in `update` does the rest, so stepping through the doorway
-      // eases the view along instead of cutting to it.
-      const cell = cellAtPoint({ x: px, y: py });
-      const onBoard = cell !== null && inRegion(BOARD_REGION, cell);
-      home.set(onBoard ? BOARD_CX : toX(px), 0, onBoard ? BOARD_CZ : toZ(py));
+      // Follow the player at every third-person zoom, including the new
+      // pulled-back default. Damping keeps the wide view from jolting after
+      // each small movement update.
+      if (!firstPerson) home.set(toX(px), 0, toZ(py));
       applyFocus();
     },
 
     resetView() {
-      // Reset the first-person view to face the character's direction.
-      pitch = FP_PITCH_START;
+      pitch = firstPerson ? FP_PITCH_START : PITCH_START;
       yaw = playerFacing === 1 ? -Math.PI / 2 : Math.PI / 2;
-      smoothed.pitch = pitch;
-      smoothed.yaw = yaw;
-      applyCamera();
+      // `update` eases to both targets; resetting the view must not cut there.
     },
 
     flip() {
-      // `smoothed.yaw` is moved with it rather than left to `damp`, which would
-      // sweep the view through everything between here and there — half a turn
-      // of scenery, and a needless one: the point of the button is to be facing
-      // the other way *now*. Snapping is also the only unambiguous half-turn;
-      // damping toward an angle exactly pi away has no preferred direction.
+      // Choose the positive half-turn explicitly, then let `update` ease across
+      // it. This keeps the direction deterministic without cutting the camera.
       yaw += Math.PI;
-      smoothed.yaw = yaw;
-      applyCamera();
     },
 
     update(dt) {
@@ -947,6 +1047,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       for (const [id, door] of doors) {
         door.rotation.y = states[id] ? door.userData.openAngle as number : 0;
       }
+      updateDoorClipping();
       applyCamera();
     },
 
@@ -963,6 +1064,19 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       };
     },
 
+    setCursorRing(px, py, kind) {
+      if (px === null || py === null) {
+        cursorRing.visible = false;
+        return;
+      }
+      cursorRing.visible = true;
+      cursorRingMaterial.color.setHex(
+        kind === "enemy" ? 0xe23b3b : kind === "interactable" ? 0xffd633 : 0xd8cba6,
+      );
+      cursorRingMaterial.opacity = kind === "floor" ? 0.3 : 0.5;
+      cursorRing.position.set(toX(px), 0.145, toZ(py));
+    },
+
     setTargetRing(px, py, color) {
       if (px === null || py === null) {
         targetRing.visible = false;
@@ -973,15 +1087,52 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       targetGlow.visible = true;
       targetRingMaterial.color.setHex(color);
       targetGlowMaterial.color.setHex(color);
+      targetRing.scale.setScalar(1);
+      targetGlow.scale.setScalar(1);
       targetRing.position.set(toX(px), 0.14, toZ(py));
       targetGlow.position.set(toX(px), 0.135, toZ(py));
     },
 
+    setDoorTargetRing(door) {
+      targetRing.visible = true;
+      targetGlow.visible = true;
+      targetRingMaterial.color.setHex(0xffd633);
+      targetGlowMaterial.color.setHex(0xffd633);
+      targetRing.scale.setScalar(1.85);
+      targetGlow.scale.setScalar(1.85);
+      const slab = doorSlabs.get(door)!;
+      slab.getWorldPosition(doorWorldPosition);
+      targetRing.position.set(doorWorldPosition.x, 0.14, doorWorldPosition.z);
+      targetGlow.position.set(doorWorldPosition.x, 0.135, doorWorldPosition.z);
+    },
+
+    setDoorHoverRing(door) {
+      if (!door) {
+        doorHoverRing.visible = false;
+        return;
+      }
+      doorHoverRing.visible = true;
+      const slab = doorSlabs.get(door)!;
+      slab.getWorldPosition(doorWorldPosition);
+      doorHoverRing.position.set(doorWorldPosition.x, 0.15, doorWorldPosition.z);
+    },
+
     animateScenery(elapsed) {
-      // The lamp in the doorway is the only thing on the walls that moves, and
-      // the only thing left in here to animate. It breathes so the way through
-      // draws the eye without being a marker.
-      archLight.intensity = 4.5 + Math.sin(elapsed * 2.2) * 1.1;
+      const flicker = Math.sin(elapsed * 9) * 0.025 + Math.sin(elapsed * 15.7) * 0.015;
+      outerFlame.scale.set(1 + flicker, 1 + Math.sin(elapsed * 10) * 0.045, 1 - flicker * 0.4);
+      innerFlame.scale.set(1 - flicker * 0.5, 1 + Math.sin(elapsed * 12 + 1.2) * 0.04, 1 + flicker);
+      outerFlame.rotation.y = elapsed * 0.55;
+      innerFlame.rotation.y = -elapsed * 0.7;
+      torchLight.intensity = 0.78 + Math.sin(elapsed * 8.3) * 0.035 + Math.sin(elapsed * 13.1) * 0.02;
+
+      for (let i = 0; i < EMBER_COUNT; i++) {
+        const age = (elapsed * 0.28 + i / EMBER_COUNT) % 1;
+        const idx = i * 3;
+        emberPositions[idx] = torchX + Math.sin(elapsed * 3.1 + i * 2.4) * 0.055 * age;
+        emberPositions[idx + 1] = 2.22 + age * 0.48;
+        emberPositions[idx + 2] = torchZ - 0.2 + Math.cos(elapsed * 2.7 + i * 1.9) * 0.04 * age;
+      }
+      (emberGeometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     },
 
     render() {

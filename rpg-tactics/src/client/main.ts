@@ -18,7 +18,6 @@
 
 import * as THREE from "three";
 
-import { ACTIONS } from "../../../src/shared/actions.js";
 import { WORLD_HEIGHT, WORLD_WIDTH } from "../../../src/shared/constants.js";
 import { LOOT_CLOSE_RECT, hitsRect, lootMenuProxyPoint } from "../../../src/shared/loot.js";
 import type { Point } from "../../../src/shared/movement.js";
@@ -28,11 +27,12 @@ import { DEFAULT_CURSOR } from "../../../src/client/cursors.js";
 import { SERVER_TICK_MS, renderFraction, smoothInterval } from "../../../src/client/interpolation.js";
 import { fillViewport } from "../../../src/client/viewport.js";
 import { Actors, applyCues, entityIdOf } from "../../../rpg-3d/src/client/entities.js";
-import { autoResRect, barOrigin, centreShift, drawOverlay, hits, hudOrigin, resurrectRect } from "../../../rpg-3d/src/client/overlay.js";
+import { barOrigin, centreShift, drawOverlay, hits, hudOrigin, resurrectRect } from "../../../rpg-3d/src/client/overlay.js";
 import { interpolateSnapshot } from "../../../rpg-3d/src/client/playback.js";
 import { toX, toZ } from "../../../rpg-3d/src/client/world.js";
 import {
   isOver,
+  TACTICS_ACTIONS,
   type TacticsInput,
   type TacticsSnapshot,
 } from "../shared/tactics.js";
@@ -99,6 +99,8 @@ let actors: Actors | null = null;
 // rather than a second event on the wire. The dagger needs no stamp: it has no
 // animation, and whether it is in your hand is read from the cooldown itself.
 let swingStartTime = -Infinity;
+/** A deliberately faint edge glow, stamped whenever a hound lands a bite. */
+let hurt = 0;
 
 const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
 const wsUrl = `${wsProtocol}//${location.host}`;
@@ -110,7 +112,16 @@ function connectWebSocket() {
     try {
       const snap = JSON.parse(event.data as string) as TacticsSnapshot;
       const now = performance.now();
-      if (currSnapshot && actors) applyCues(actors, currSnapshot, snap, now, struckBy);
+      // Once movement is released, carry its final turn back into the local
+      // tank-control heading so the next W/A/D input begins from what the model
+      // is visibly facing. Do not rewrite it while W/S is held or reverse input
+      // would repeatedly invert its own direction.
+      if (!heldKeys.has("w") && !heldKeys.has("s")) {
+        playerYaw = Math.atan2(-snap.playerHeading.x, -snap.playerHeading.y);
+      }
+      if (currSnapshot && actors && applyCues(actors, currSnapshot, snap, now, struckBy)) {
+        hurt = 0.32;
+      }
 
       // A fresh cooldown means an attack just landed. Which animation plays is
       // read off `cooldown.slot` — the slot that actually fired — and not off
@@ -122,7 +133,7 @@ function connectWebSocket() {
         after &&
         (!before || before.slot !== after.slot || after.remainingMs > before.remainingMs + 1)
       ) {
-        if (ACTIONS[after.slot]?.kind === "melee") swingStartTime = now;
+        if (TACTICS_ACTIONS[after.slot]?.kind === "melee") swingStartTime = now;
       }
 
       prevSnapshot = currSnapshot;
@@ -167,31 +178,30 @@ function send(msg: TacticsInput) {
 // ---------------------------------------------------------------- keyboard
 
 /**
- * Tank controls. A/D and arrow left/right turn the camera (yaw). W moves
- * forward, S moves backward — always along the direction the camera faces.
- * The camera yaw *is* the player's heading.
+ * Tank controls independent of the orbit camera. A/D turn the character;
+ * W/S move along that heading. Mouse drag only moves the camera.
  */
 
 /** Yaw turn speed in radians per second. */
-const TURN_SPEED = 2.8;
+const TURN_SPEED = 5.8;
 
 const heldKeys = new Set<string>();
+let playerYaw = -Math.PI / 2;
 
 function sendMoveDir(): void {
-  const cameraYaw = stage.yaw;
-  const fwdX = -Math.sin(cameraYaw);
-  const fwdY = -Math.cos(cameraYaw);
+  const fwdX = -Math.sin(playerYaw);
+  const fwdY = -Math.cos(playerYaw);
 
   let dx = 0;
   let dy = 0;
   if (heldKeys.has("w")) { dx += fwdX; dy += fwdY; }
   if (heldKeys.has("s")) { dx -= fwdX; dy -= fwdY; }
 
-  send({ type: "move", dx, dy });
+  send({ type: "move", dx, dy, turn: heldKeys.has("w") });
 }
 
 function facingDirection(): Point {
-  return { x: -Math.sin(stage.yaw), y: -Math.cos(stage.yaw) };
+  return { x: -Math.sin(playerYaw), y: -Math.cos(playerYaw) };
 }
 
 /** Apply held-key turning each frame. Called from the game loop. */
@@ -205,9 +215,9 @@ function updateTankControls(dt: number): void {
   // person walking backwards still turns their own left when they mean left.
   // The camera is the head here, and a head does not steer like a rear axle.
   if (turn !== 0) {
-    // orbit expects screen-pixel deltas; convert radians to the equivalent.
-    // stage.orbit applies yaw -= dx * ROTATE_SPEED, so dx = -turn / ROTATE_SPEED.
-    stage.orbit(-turn / 0.006, 0);
+    playerYaw += turn;
+    const facing = facingDirection();
+    send({ type: "face", dx: facing.x, dy: facing.y });
   }
 
   // Re-send movement direction whenever keys are held, since the yaw may have
@@ -222,7 +232,6 @@ function updateTankControls(dt: number): void {
  */
 function flipAbout() {
   stage.flip();
-  if (heldKeys.has("w") || heldKeys.has("s")) sendMoveDir();
 }
 
 /**
@@ -392,6 +401,9 @@ window.addEventListener("mouseup", (event) => {
 /** Cursor in overlay units (UI hit-testing) and on the floor (world reveals). */
 let uiCursor: Point | null = null;
 let groundCursor: Point | null = null;
+let hoveredEntityId: string | null = null;
+let hoveredDoor: import("../shared/tactics.js").DoorId | null = null;
+const PLAYER_CURSOR_ID = "__player";
 
 
 uiCanvas.addEventListener("mousemove", (event) => {
@@ -418,11 +430,15 @@ uiCanvas.addEventListener("mousemove", (event) => {
   uiCursor = toOverlay(event);
   const ndc = toNdc(event);
   groundCursor = stage.groundAt(ndc.x, ndc.y);
+  hoveredEntityId = entityIdOf(stage.pickAt(ndc.x, ndc.y));
+  hoveredDoor = stage.doorAt(ndc.x, ndc.y);
 });
 
 uiCanvas.addEventListener("mouseleave", () => {
   uiCursor = null;
   groundCursor = null;
+  hoveredEntityId = null;
+  hoveredDoor = null;
 });
 
 uiCanvas.addEventListener("wheel", (event) => {
@@ -435,13 +451,6 @@ uiCanvas.addEventListener("contextmenu", (event) => {
   event.preventDefault();
   if (rightDragWasMove) {
     rightDragWasMove = false;
-    return;
-  }
-  const ndc = toNdc(event);
-  const door = stage.doorAt(ndc.x, ndc.y);
-  if (door) {
-    const facing = facingDirection();
-    send({ type: "toggleDoor", door, dx: facing.x, dy: facing.y });
   }
 });
 
@@ -454,6 +463,7 @@ uiCanvas.addEventListener("click", (event) => {
   }
 
   const uiPoint = toOverlay(event);
+  const ndc = toNdc(event);
 
   // The HUD's own buttons first, exactly as in the other two clients — here
   // they restart the encounter rather than revive you mid-fight.
@@ -462,14 +472,15 @@ uiCanvas.addEventListener("click", (event) => {
     return;
   }
 
-  if (hits(autoResRect(ctx), uiPoint)) {
-    send({ type: "toggleAutoResurrect" });
+  const slot = squareAtPoint(barOrigin, uiPoint, BAR_LAYOUT);
+  if (slot !== null) {
+    if (TACTICS_ACTIONS[slot]) send({ type: "slot", index: slot });
     return;
   }
 
-  const slot = squareAtPoint(barOrigin, uiPoint, BAR_LAYOUT);
-  if (slot !== null) {
-    if (ACTIONS[slot]) send({ type: "slot", index: slot });
+  const clickedDoor = stage.doorAt(ndc.x, ndc.y);
+  if (clickedDoor) {
+    send({ type: "targetDoor", door: clickedDoor });
     return;
   }
 
@@ -500,7 +511,6 @@ function updateCursorStyle(snap: TacticsSnapshot) {
   if (uiCursor) {
     if (snap.inspect && hitsRect(LOOT_CLOSE_RECT, { x: uiCursor.x - centreShift(viewWidth), y: uiCursor.y })) wanted = "pointer";
     else if (snap.dead && hits(resurrectRect(ctx), uiCursor)) wanted = "pointer";
-    else if (hits(autoResRect(ctx), uiCursor)) wanted = "pointer";
     else if (squareAtPoint(barOrigin, uiCursor, BAR_LAYOUT) !== null) wanted = "pointer";
   }
 
@@ -530,6 +540,7 @@ function frame(now: number) {
   const dt = Math.min((now - lastFrameTime) / 1000, 0.1);
   lastFrameTime = now;
   const elapsed = now / 1000;
+  hurt = Math.max(0, hurt - dt * 0.8);
 
   if (!currSnapshot) return;
 
@@ -538,9 +549,14 @@ function frame(now: number) {
     ? interpolateSnapshot(prevSnapshot, currSnapshot, t, now - currSnapshotTime)
     : currSnapshot;
 
-  if (!actors) actors = new Actors(stage.scene, stage.pickables, snap.player.color);
+  if (!actors) {
+    actors = new Actors(stage.scene, stage.pickables, snap.player.color);
+    actors.player.root.userData["entityId"] = PLAYER_CURSOR_ID;
+    stage.pickables.push(actors.player.root);
+  }
 
-  actors.player.setWeapon(ACTIONS[snap.activeSlot]?.kind ?? "melee");
+  const activeKind = TACTICS_ACTIONS[snap.activeSlot]?.kind;
+  actors.player.setWeapon(activeKind === "ranged" ? "ranged" : "melee");
 
   // Both sides square up to what they are fighting. On a board where reach is a
   // rule, "who is looking at whom" is worth reading at a glance.
@@ -561,16 +577,25 @@ function frame(now: number) {
   actors.syncProjectiles(snap, elapsed);
   actors.syncTombstones(snap);
 
-  // Nothing is drawn on the floor around the player: the footfall ring under the
-  // cursor is what says whether a click would land, and where.
+  const hoveredEnemy = hoveredEntityId
+    ? snap.enemies.find((enemy) => enemy.id === hoveredEntityId)
+    : undefined;
+  const hoveringPlayer = hoveredEntityId === PLAYER_CURSOR_ID;
+  stage.setCursorRing(
+    hoveredDoor ? null : hoveredEnemy?.x ?? (hoveringPlayer ? snap.player.x : groundCursor?.x) ?? null,
+    hoveredDoor ? null : hoveredEnemy?.y ?? (hoveringPlayer ? snap.player.y : groundCursor?.y) ?? null,
+    hoveredEnemy ? "enemy" : hoveringPlayer ? "interactable" : "floor",
+  );
+  stage.setDoorHoverRing(hoveredDoor);
 
   // Red under something you are fighting, yellow under a body you have merely
   // selected — the real-time game's ring colours, on a bigger ring.
   const targeted = snap.targetId
     ? snap.enemies.find((e) => e.id === snap.targetId) ?? snap.corpses.find((c) => c.id === snap.targetId)
     : undefined;
-  stage.setTargetRing(targeted?.x ?? null, targeted?.y ?? null, marked ? 0xe23b3b : 0xffd633);
   stage.setDoors(snap.doors);
+  if (snap.targetDoor) stage.setDoorTargetRing(snap.targetDoor);
+  else stage.setTargetRing(targeted?.x ?? null, targeted?.y ?? null, marked ? 0xe23b3b : 0xffd633);
 
   // The board frames itself while you are standing on it; walk out through the
   // doorway and the camera comes with you, or the corridor would be somewhere
@@ -584,19 +609,22 @@ function frame(now: number) {
   updateTankControls(dt);
 
   updateCursorStyle(snap);
-  // No hurt flash. The real-time game needs one because from behind the
-  // shoulder a bite is easy to miss; here the whole board is on screen, the log
-  // names what hit you, and a red vignette over a turn-based fight just gets in
-  // the way of reading it.
-  drawOverlay(ctx, { snap, uiCursor, groundCursor, toScreen, hurt: 0, barLayout: BAR_LAYOUT, viewWidth });
-  drawTacticsChrome(ctx, snap, viewWidth);
+  drawOverlay(ctx, {
+    snap, uiCursor, groundCursor, toScreen, hurt,
+    showAutoRes: false,
+    actions: TACTICS_ACTIONS,
+    barLayout: BAR_LAYOUT,
+    viewWidth,
+  });
+  const hoveredActionSlot = uiCursor ? squareAtPoint(barOrigin, uiCursor, BAR_LAYOUT) : null;
+  drawTacticsChrome(ctx, snap, viewWidth, hoveredActionSlot);
 
   // ---- the weapon in hand ----
   // Drawn last so nothing covers it: it is the closest thing to the camera
   // there is. Hidden once the encounter is over, when the outcome card owns
   // the screen.
-  const heldAction = ACTIONS[snap.activeSlot];
-  if (heldAction && !isOver(snap.phase)) {
+  const heldAction = TACTICS_ACTIONS[snap.activeSlot];
+  if (stage.firstPerson && (heldAction?.kind === "melee" || heldAction?.kind === "ranged") && !isOver(snap.phase)) {
     // `spent` comes off the live cooldown rather than a timer of the client's
     // own: `interpolateSnapshot` counts `remainingMs` down in real time, so the
     // dagger reappears exactly when the server would let you throw the next one.
@@ -604,7 +632,7 @@ function frame(now: number) {
     drawHeldWeapon(ctx, {
       kind: heldAction.kind,
       sinceSwing: Number.isFinite(swingStartTime) ? now - swingStartTime : null,
-      spent: !!cd && cd.remainingMs > 0 && ACTIONS[cd.slot]?.kind === "ranged",
+      spent: !!cd && cd.remainingMs > 0 && TACTICS_ACTIONS[cd.slot]?.kind === "ranged",
     });
   }
 }

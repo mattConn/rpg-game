@@ -21,6 +21,7 @@ import {
 import type { Point } from "../../../src/shared/movement.js";
 import type { GameSnapshot } from "../../../src/shared/protocol.js";
 import { ACTIONS } from "../../../src/shared/actions.js";
+import type { Action } from "../../../src/shared/actions.js";
 import { DAMAGE_NUMBER_LIFETIME, DAMAGE_NUMBER_SPEED } from "../../../src/shared/combat.js";
 import { corpseLabel } from "../../../src/shared/loot.js";
 import { ACTION_BAR_ROW, ACTION_BAR_DEFAULT_ORIGIN, drawActionBar, type ActionBarLayout } from "../../../src/client/actionbar.js";
@@ -100,6 +101,10 @@ export interface OverlayParams {
   toScreen: ToScreen;
   /** 0..1 fading flash after taking a hit. */
   hurt: number;
+  /** Tactics replaces this line with the name of the hovered action item. */
+  showAutoRes?: boolean;
+  /** Optional front-end-specific contents for the shared five-slot bar. */
+  actions?: readonly (Action | null)[];
   /**
    * How to arrange the action bar. Omitted is the horizontal strip this client
    * has always drawn; the turn-based front end stacks it instead, and passes
@@ -141,7 +146,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, params: OverlayParams
 
   // Auto-resurrect toggle under the stats, with a countdown while one is due —
   // three frozen seconds with no feedback reads as a hang.
-  {
+  if (params.showAutoRes !== false) {
     const rect = autoResRect(ctx);
     ctx.font = AUTO_RES_FONT;
     ctx.textAlign = "left";
@@ -171,7 +176,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, params: OverlayParams
     }
   }
 
-  drawActionBar(ctx, barOrigin, ACTIONS, snap.activeSlot, snap.cooldown, snap.selectedCanAttack, barLayout);
+  drawActionBar(ctx, barOrigin, params.actions ?? ACTIONS, snap.activeSlot, snap.cooldown, snap.selectedCanAttack, barLayout);
   drawGameClock(ctx, snap.gameElapsedMs, viewWidth);
 
   if (params.hurt > 0) drawHurtFlash(ctx, params.hurt, viewWidth);

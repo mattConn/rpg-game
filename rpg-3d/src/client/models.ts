@@ -16,7 +16,7 @@ import * as THREE from "three";
 
 // ------------------------------------------------------------------ palette
 
-const SKIN = 0xd8a373;
+const SKIN = 0x4f86c6;
 const HAIR = 0x3b2a1c;
 /** The tunic the player wears. */
 export const TUNIC = 0x8a5a2b;
@@ -41,6 +41,20 @@ const STONE = 0x6a6a72;
  * in the same scaled units.
  */
 export const WOLF_SCALE = 0.85;
+
+let adventurerTexture: THREE.Texture | null = null;
+
+function adventurerMat(tint: THREE.ColorRepresentation): THREE.MeshLambertMaterial {
+  if (!adventurerTexture) {
+    adventurerTexture = new THREE.TextureLoader().load("/shared-textures/adventurer-brown.png");
+    adventurerTexture.colorSpace = THREE.SRGBColorSpace;
+    adventurerTexture.wrapS = THREE.RepeatWrapping;
+    adventurerTexture.wrapT = THREE.RepeatWrapping;
+    adventurerTexture.magFilter = THREE.LinearFilter;
+    adventurerTexture.minFilter = THREE.LinearMipmapLinearFilter;
+  }
+  return new THREE.MeshLambertMaterial({ map: adventurerTexture, color: tint });
+}
 
 // ------------------------------------------------------------------ helpers
 
@@ -139,8 +153,6 @@ export interface HumanRig {
   arms: THREE.Group[];
   torso: THREE.Object3D;
   head: THREE.Object3D;
-  /** Where the player's randomised colour goes — the tunic stays brown. */
-  cloak: THREE.Mesh;
   sword: THREE.Group;
   dagger: THREE.Group;
 }
@@ -156,58 +168,109 @@ export function buildHuman(tunicColor: THREE.ColorRepresentation = TUNIC): Human
 
   const legs: THREE.Group[] = [];
   for (const z of [0.15, -0.15]) {
-    const hip = at(new THREE.Group(), 0, 0.74, z);
-    hip.add(at(box(0.22, 0.6, 0.24, TROUSERS), 0, -0.3, 0));
-    hip.add(at(box(0.34, 0.16, 0.26, BOOT), 0.05, -0.66, 0));
+    const hip = at(new THREE.Group(), 0, 0.78, z);
+    const thigh = mesh(new THREE.CapsuleGeometry(0.105, 0.28, 4, 10), flatMat(TROUSERS));
+    hip.add(at(thigh, 0, -0.2, 0));
+    const shin = mesh(new THREE.CapsuleGeometry(0.085, 0.25, 4, 10), flatMat(0x403a36));
+    hip.add(at(shin, 0.015, -0.5, 0));
+    const boot = mesh(new THREE.SphereGeometry(0.14, 12, 7), adventurerMat(0x59443a));
+    boot.scale.set(1.55, 0.62, 0.82);
+    hip.add(at(boot, 0.075, -0.69, 0));
+    const cuff = mesh(new THREE.CylinderGeometry(0.115, 0.105, 0.13, 10), adventurerMat(0x4c382f));
+    hip.add(at(cuff, 0.01, -0.57, 0));
     model.add(hip);
     legs.push(hip);
   }
 
-  // Tunic: wider at the hem than the shoulders, which is what reads as cloth.
-  const torso = mesh(new THREE.CylinderGeometry(0.3, 0.42, 0.84, 6), flatMat(tunicColor));
-  torso.scale.set(0.78, 1, 1.06); // thin front-to-back, broad across the shoulders
-  torso.position.set(0, 1.16, 0);
-  torso.rotation.y = Math.PI / 6; // put a flat face forward rather than an edge
+  const torso = mesh(new THREE.SphereGeometry(0.43, 14, 9), adventurerMat(0xa77a55));
+  torso.scale.set(0.6, 0.92, 0.87);
+  torso.position.set(0, 1.3, 0);
   model.add(torso);
 
-  const belt = mesh(new THREE.CylinderGeometry(0.38, 0.38, 0.09, 6), flatMat(BELT));
-  belt.scale.set(0.82, 1, 1.08);
+  const tunicSkirt = mesh(new THREE.CylinderGeometry(0.34, 0.4, 0.48, 12), adventurerMat(0x9a6d4b));
+  tunicSkirt.scale.set(0.68, 1, 0.88);
+  model.add(at(tunicSkirt, 0, 0.94, 0));
+
+  const belt = mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.09, 12), flatMat(BELT));
+  belt.scale.set(0.7, 1, 0.92);
   belt.rotation.y = Math.PI / 6;
   model.add(at(belt, 0, 0.88, 0));
 
-  const collar = mesh(new THREE.CylinderGeometry(0.26, 0.32, 0.12, 6), flatMat(TUNIC_DARK));
-  collar.scale.set(0.8, 1, 1.08);
+  const buckle = box(0.045, 0.11, 0.13, 0xb08b4f);
+  model.add(at(buckle, 0.275, 0.96, 0));
+
+  const collar = mesh(new THREE.CylinderGeometry(0.23, 0.29, 0.13, 12), flatMat(TUNIC_DARK));
+  collar.scale.set(0.72, 1, 0.92);
   collar.rotation.y = Math.PI / 6;
   model.add(at(collar, 0, 1.6, 0));
 
-  // A cloak down the back, and the only part that isn't fixed: it carries the
-  // player's randomised colour, which is what the HUD portrait is ringed in.
-  const cloak = mesh(new THREE.CylinderGeometry(0.32, 0.48, 0.98, 6), flatMat(0x8a5a2b));
-  cloak.scale.set(0.34, 1, 1.06);
-  cloak.rotation.y = Math.PI / 6;
-  model.add(at(cloak, -0.2, 1.1, 0));
-
   const arms: THREE.Group[] = [];
-  for (const z of [0.34, -0.34]) {
-    const shoulder = at(new THREE.Group(), 0, 1.52, z);
-    shoulder.add(at(box(0.17, 0.34, 0.17, tunicColor), 0, -0.17, 0)); // sleeve
-    shoulder.add(at(box(0.14, 0.32, 0.14, SKIN), 0, -0.5, 0)); // forearm
-    shoulder.add(at(box(0.15, 0.13, 0.15, SKIN), 0, -0.71, 0)); // fist
+  for (const z of [0.36, -0.36]) {
+    const shoulder = at(new THREE.Group(), 0, 1.53, z);
+    const sleeve = mesh(new THREE.SphereGeometry(0.15, 12, 7), adventurerMat(0xaa7953));
+    sleeve.scale.set(0.85, 1.15, 0.9);
+    shoulder.add(at(sleeve, 0, -0.12, 0));
+    shoulder.add(at(mesh(new THREE.CapsuleGeometry(0.07, 0.24, 4, 9), flatMat(SKIN)), 0, -0.42, 0));
+    const cuff = mesh(new THREE.CylinderGeometry(0.085, 0.095, 0.13, 10), flatMat(0x5d626a));
+    shoulder.add(at(cuff, 0, -0.57, 0));
+    const gauntlet = mesh(new THREE.SphereGeometry(0.095, 10, 6), flatMat(0x747a83));
+    gauntlet.scale.set(0.92, 1.08, 0.9);
+    shoulder.add(at(gauntlet, 0, -0.68, 0));
+    const knuckles = box(0.055, 0.075, 0.16, 0x8c929b);
+    shoulder.add(at(knuckles, 0.065, -0.69, 0));
     model.add(shoulder);
     arms.push(shoulder);
   }
 
-  const head = mesh(new THREE.IcosahedronGeometry(0.23, 0), flatMat(SKIN));
-  head.scale.set(0.95, 1.12, 0.92);
+  const head = mesh(new THREE.SphereGeometry(0.23, 14, 9), flatMat(SKIN));
+  head.scale.set(0.82, 0.95, 0.82);
   model.add(at(head, 0.02, 1.83, 0));
 
-  const hair = mesh(new THREE.IcosahedronGeometry(0.24, 0), flatMat(HAIR));
-  hair.scale.set(0.95, 0.72, 0.98);
-  head.add(at(hair, -0.04, 0.09, 0));
+  // A blunt great helm: one tall, slightly tapered shell enclosing the whole
+  // head. The heavy rims and sparse eye openings give it the readable
+  // "bucket helm" silhouette without literally resembling modern trashware.
+  const helmet = mesh(new THREE.CylinderGeometry(0.255, 0.275, 0.52, 12), flatMat(0x656b74));
+  helmet.rotation.y = Math.PI / 12;
+  head.add(at(helmet, -0.015, 0.015, 0));
+  const upperRim = mesh(new THREE.TorusGeometry(0.255, 0.025, 6, 12), flatMat(0x858c96));
+  upperRim.rotation.x = Math.PI / 2;
+  head.add(at(upperRim, -0.015, 0.265, 0));
+  const lowerRim = mesh(new THREE.TorusGeometry(0.27, 0.026, 6, 12), flatMat(0x50565f));
+  lowerRim.rotation.x = Math.PI / 2;
+  head.add(at(lowerRim, -0.015, -0.245, 0));
+  // The old crown spike now forms the nasal: a short pointed steel projection
+  // between the eye holes, with the top of the helmet left blunt and practical.
+  const helmetNose = mesh(new THREE.ConeGeometry(0.075, 0.22, 12), flatMat(0x858c96));
+  helmetNose.rotation.z = -Math.PI / 2;
+  helmetNose.scale.set(0.72, 1, 0.72);
+  head.add(at(helmetNose, 0.34, -0.065, 0));
 
-  const eye = () => mesh(new THREE.BoxGeometry(0.03, 0.04, 0.05), new THREE.MeshBasicMaterial({ color: 0x201a16 }));
-  head.add(at(eye(), 0.2, 0.01, 0.09));
-  head.add(at(eye(), 0.2, 0.01, -0.09));
+  // Long blue ears emerge through the helmet sides. Their roots sit inside the
+  // shell so they read as part of the wearer rather than ornaments glued on.
+  for (const side of [1, -1] as const) {
+    const ear = mesh(new THREE.ConeGeometry(0.095, 0.4, 7), flatMat(SKIN));
+    ear.rotation.x = side * Math.PI / 2;
+    ear.scale.set(0.5, 1, 0.72);
+    head.add(at(ear, -0.015, 0.035, side * 0.29));
+  }
+
+  const eyeHoleMaterial = new THREE.MeshBasicMaterial({ color: 0x09090b });
+  for (const side of [1, -1] as const) {
+    const hole = new THREE.Mesh(new THREE.OctahedronGeometry(0.06, 0), eyeHoleMaterial);
+    hole.scale.set(0.32, 0.52, 1.25);
+    hole.rotation.x = -side * 0.62;
+    head.add(at(hole, 0.255, 0.025, side * 0.095));
+  }
+
+  const eyeMaterial = new THREE.MeshBasicMaterial({ color: 0x24120e });
+  const eye = (side: 1 | -1) => {
+    const sternEye = new THREE.Mesh(new THREE.OctahedronGeometry(0.035, 0), eyeMaterial);
+    sternEye.scale.set(0.42, 0.42, 1.15);
+    sternEye.rotation.x = -side * 0.62;
+    return sternEye;
+  };
+  head.add(at(eye(1), 0.266, 0.025, 0.09));
+  head.add(at(eye(-1), 0.266, 0.025, -0.09));
 
   // Both weapons live in the right fist; only the selected one is visible.
   //
@@ -218,7 +281,7 @@ export function buildHuman(tunicColor: THREE.ColorRepresentation = TUNIC): Human
   const rightArm = arms[1]!;
   rightArm.rotation.x = 0.28; // splayed, so the blade passes outside the hip
   const hand = at(new THREE.Group(), 0, -0.74, 0);
-  hand.rotation.z = -Math.PI / 2;
+  hand.rotation.z = Math.PI / 2;
   rightArm.add(hand);
 
   const sword = buildBlade(0.72, 0.09);
@@ -227,7 +290,7 @@ export function buildHuman(tunicColor: THREE.ColorRepresentation = TUNIC): Human
   hand.add(sword);
   hand.add(dagger);
 
-  return { model, legs, arms, torso, head, cloak, sword, dagger };
+  return { model, legs, arms, torso, head, sword, dagger };
 }
 
 // ------------------------------------------------------------------ the wolf
@@ -298,19 +361,19 @@ export function buildWolf(accent: THREE.Color): WolfRig {
   const model = new THREE.Group();
 
   const body = mesh(new THREE.SphereGeometry(0.5, 10, 7), wolfMat(0xaaa4ad));
-  body.scale.set(1.25, 0.62, 0.62);
-  model.add(at(body, -0.05, 0.72, 0));
+  body.scale.set(1.3, 0.54, 0.5);
+  model.add(at(body, -0.05, 0.74, 0));
 
   const chest = mesh(new THREE.SphereGeometry(0.34, 9, 6), wolfMat(0xb9b3bc));
-  chest.scale.set(1, 1.18, 1.08);
-  model.add(at(chest, 0.42, 0.74, 0));
+  chest.scale.set(0.92, 1.08, 0.9);
+  model.add(at(chest, 0.42, 0.76, 0));
 
-  const haunch = mesh(new THREE.SphereGeometry(0.3, 9, 6), wolfMat(0x918b96));
-  haunch.scale.set(1.08, 1.06, 0.92);
-  model.add(at(haunch, -0.48, 0.73, 0));
+  const haunch = mesh(new THREE.SphereGeometry(0.27, 9, 6), wolfMat(0x918b96));
+  haunch.scale.set(1.12, 1.04, 0.86);
+  model.add(at(haunch, -0.49, 0.73, 0));
 
   const belly = mesh(new THREE.SphereGeometry(0.28, 8, 5), wolfMat(WOLF_BELLY));
-  belly.scale.set(1.7, 0.42, 0.8);
+  belly.scale.set(1.75, 0.32, 0.62);
   model.add(at(belly, 0, 0.48, 0));
 
   const neck = mesh(new THREE.CylinderGeometry(0.2, 0.27, 0.4, 9), wolfMat(0xa49da8));

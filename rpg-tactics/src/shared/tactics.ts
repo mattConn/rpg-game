@@ -29,6 +29,13 @@
 import { WORLD_HEIGHT, WORLD_WIDTH, type RoomCoord } from "../../../src/shared/constants.js";
 import type { Point } from "../../../src/shared/movement.js";
 import type { GameSnapshot, InputMessage } from "../../../src/shared/protocol.js";
+import { ACTIONS, type Action } from "../../../src/shared/actions.js";
+
+/** Tactics fills the fifth shared bar slot with its targeted door interaction. */
+export const TACTICS_ACTIONS: readonly (Action | null)[] = [
+  ...ACTIONS.slice(0, 4),
+  { id: "interact", kind: "interact" },
+];
 
 // ------------------------------------------------------------------- board
 
@@ -450,8 +457,11 @@ export function isOver(phase: Phase): boolean {
  * fields they always read; the extra ones ride along untouched.
  */
 export interface TacticsSnapshot extends GameSnapshot {
+  /** Full player heading, independent of the camera's orbit. */
+  playerHeading: Point;
   /** True means open. The two corridor doors are independently operated. */
   doors: DoorStates;
+  targetDoor: DoorId | null;
   phase: Phase;
   /** 1-based, incremented when the player's turn comes back around. */
   round: number;
@@ -530,9 +540,11 @@ export type TacticsInput =
   | { type: "restart" }
   /** Swing the selected weapon at the mark, landing or not. */
   | { type: "attack" }
-  /** Walk one step in a camera-relative direction. dx/dy are a unit vector. */
-  | { type: "move"; dx: number; dy: number }
-  /** Use what is directly ahead; attacks when no nearby door is being faced. */
+  /** Move along dx/dy; reverse movement can explicitly preserve facing. */
+  | { type: "move"; dx: number; dy: number; turn?: boolean }
+  | { type: "face"; dx: number; dy: number }
+  | { type: "targetDoor"; door: DoorId }
+  /** Use the selected action. */
   | { type: "interact"; dx: number; dy: number }
   | { type: "toggleDoor"; door: DoorId; dx: number; dy: number }
   /**

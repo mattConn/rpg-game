@@ -80,11 +80,8 @@ export class PlayerActor {
   private swingAt: number | null = null;
   private fall = 0;
 
-  constructor(color: string) {
+  constructor(_color: string) {
     this.rig = buildHuman();
-    // The tunic is always brown; the player's randomised colour — the one the
-    // HUD portrait is drawn in — goes on the cloak instead.
-    (this.rig.cloak.material as THREE.MeshLambertMaterial).color.copy(parseColor(color));
     this.root.add(this.rig.model);
   }
 
@@ -116,11 +113,14 @@ export class PlayerActor {
     const speed = dt > 0 ? Math.hypot(dx, dy) / dt : 0;
     const moving = speed > MOVING_EPSILON && !snap.dead;
 
-    // Heading: face what you're fighting, else the way you're travelling, else
-    // hold — the same "facing is held when idle" rule the 2D glyph follows.
+    const playerHeading = (snap as GameSnapshot & { playerHeading?: { x: number; y: number } }).playerHeading;
     let wanted = this.yaw;
-    if (facePoint) wanted = yawFor(facePoint.x - x, facePoint.y - y);
+    // Tactics supplies an explicit rotation-driven heading. It takes priority
+    // even while moving so backing up does not spin the model toward its travel
+    // direction. Real-time snapshots omit it and retain turn-to-movement.
+    if (playerHeading) wanted = yawFor(playerHeading.x, playerHeading.y);
     else if (moving) wanted = yawFor(dx, dy);
+    else if (facePoint) wanted = yawFor(facePoint.x - x, facePoint.y - y);
     else wanted = yawFor(snap.player.facing, 0);
     this.yaw += angleDelta(this.yaw, wanted) * (1 - Math.exp(-12 * dt));
     this.root.rotation.y = this.yaw;

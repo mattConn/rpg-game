@@ -287,7 +287,8 @@ function frame(now: number) {
   if (!actors) actors = new Actors(stage.scene, stage.pickables, snap.player.color);
 
   // The blade in the fist follows the action bar, like the 2D glyph did.
-  actors.player.setWeapon(ACTIONS[snap.activeSlot]?.kind ?? "melee");
+  const activeKind = ACTIONS[snap.activeSlot]?.kind;
+  actors.player.setWeapon(activeKind === "ranged" ? "ranged" : "melee");
 
   // Engaged fighters square up to their target — rendering only; nothing about
   // range or facing is a rule in this game.

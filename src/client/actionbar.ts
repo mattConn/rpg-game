@@ -94,6 +94,175 @@ const KEY_FONT = "9px monospace";
 const KEY_COLOR = "#7a7a7a";
 const KEY_INSET = 4;
 
+function drawPotionIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number): void {
+  ctx.save();
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+
+  const neckW = size * 0.18;
+  const neckTop = cy - size * 0.34;
+  const shoulderY = cy - size * 0.08;
+  const bottomY = cy + size * 0.32;
+  const bodyW = size * 0.58;
+
+  const flask = new Path2D();
+  flask.moveTo(cx - neckW / 2, neckTop);
+  flask.lineTo(cx + neckW / 2, neckTop);
+  flask.lineTo(cx + neckW / 2, shoulderY);
+  flask.lineTo(cx + bodyW / 2, bottomY - size * 0.08);
+  flask.lineTo(cx + bodyW * 0.39, bottomY);
+  flask.lineTo(cx - bodyW * 0.39, bottomY);
+  flask.lineTo(cx - bodyW / 2, bottomY - size * 0.08);
+  flask.lineTo(cx - neckW / 2, shoulderY);
+  flask.closePath();
+
+  ctx.save();
+  ctx.clip(flask);
+  ctx.fillStyle = "#42a936";
+  ctx.fillRect(cx - bodyW / 2, cy + size * 0.05, bodyW, size * 0.3);
+  ctx.fillStyle = "rgba(132, 255, 91, 0.38)";
+  ctx.fillRect(cx - bodyW * 0.28, cy + size * 0.08, bodyW * 0.13, size * 0.2);
+  ctx.restore();
+
+  ctx.strokeStyle = "#b7ced0";
+  ctx.lineWidth = Math.max(1.5, size * 0.045);
+  ctx.stroke(flask);
+  ctx.strokeStyle = "#73898c";
+  ctx.beginPath();
+  ctx.moveTo(cx - neckW * 0.72, neckTop);
+  ctx.lineTo(cx + neckW * 0.72, neckTop);
+  ctx.stroke();
+
+  ctx.fillStyle = "#77e85d";
+  const bubbles: Array<readonly [number, number, number]> = [
+    [-0.18, -0.05, 0.055],
+    [0.12, -0.16, 0.04],
+    [0.23, -0.02, 0.03],
+  ];
+  for (const [x, y, radius] of bubbles) {
+    ctx.beginPath();
+    ctx.arc(cx + size * x, cy + size * y, size * radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawScrollIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number): void {
+  ctx.save();
+  ctx.lineJoin = "round";
+  const x = cx - size * 0.27;
+  const y = cy - size * 0.31;
+  const w = size * 0.54;
+  const h = size * 0.62;
+  const rollH = size * 0.13;
+
+  ctx.fillStyle = "#c9ad72";
+  ctx.strokeStyle = "#70512f";
+  ctx.lineWidth = Math.max(1.5, size * 0.04);
+  ctx.fillRect(x, y + rollH * 0.45, w, h - rollH * 0.9);
+  ctx.strokeRect(x, y + rollH * 0.45, w, h - rollH * 0.9);
+
+  // Matching horizontal rolls keep the silhouette square and readable instead
+  // of making the parchment look twisted from one corner to the other.
+  ctx.fillStyle = "#e0c98e";
+  for (const rollY of [y, y + h - rollH]) {
+    const roll = new Path2D();
+    roll.moveTo(x, rollY);
+    roll.lineTo(x + w, rollY);
+    roll.quadraticCurveTo(x + w + size * 0.09, rollY + rollH / 2, x + w, rollY + rollH);
+    roll.lineTo(x, rollY + rollH);
+    roll.quadraticCurveTo(x - size * 0.09, rollY + rollH / 2, x, rollY);
+    roll.closePath();
+    ctx.fill(roll);
+    ctx.stroke(roll);
+  }
+
+  ctx.strokeStyle = "#765b38";
+  ctx.lineWidth = Math.max(1, size * 0.025);
+  for (let row = 0; row < 3; row++) {
+    const lineY = y + size * (0.22 + row * 0.1);
+    ctx.beginPath();
+    ctx.moveTo(x + size * 0.1, lineY);
+    ctx.lineTo(x + size * (row === 2 ? 0.39 : 0.44), lineY);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawHandIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number): void {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(-0.58);
+  ctx.translate(-cx, -cy);
+  ctx.strokeStyle = "#5f4028";
+  ctx.lineWidth = Math.max(1.5, size * 0.04);
+  ctx.lineJoin = "round";
+
+  // Open palm.
+  ctx.fillStyle = "#9ea9ad";
+  const palmX = cx - size * 0.19;
+  const palmY = cy - size * 0.06;
+  ctx.beginPath();
+  ctx.roundRect(palmX, palmY, size * 0.38, size * 0.35, size * 0.09);
+  ctx.fill();
+  ctx.stroke();
+  ctx.strokeStyle = "#d2d9db";
+  ctx.lineWidth = Math.max(1, size * 0.022);
+  for (const plateY of [0.04, 0.15]) {
+    ctx.beginPath();
+    ctx.moveTo(cx - size * 0.13, cy + size * plateY);
+    ctx.lineTo(cx + size * 0.13, cy + size * plateY);
+    ctx.stroke();
+  }
+
+  // Four clearly separated fingers, spread slightly rather than clenched.
+  ctx.lineCap = "round";
+  ctx.strokeStyle = "#9ea9ad";
+  ctx.lineWidth = size * 0.115;
+  for (const [x, top] of [[-0.16, -0.34], [-0.055, -0.43], [0.055, -0.4], [0.16, -0.3]] as const) {
+    ctx.beginPath();
+    ctx.moveTo(cx + size * x, cy + size * 0.02);
+    ctx.lineTo(cx + size * x, cy + size * top);
+    ctx.stroke();
+  }
+  // Dark narrow outlines make the finger gaps survive at icon scale.
+  ctx.strokeStyle = "#5f4028";
+  ctx.lineWidth = Math.max(1, size * 0.025);
+  for (const x of [-0.108, 0, 0.108]) {
+    ctx.beginPath();
+    ctx.moveTo(cx + size * x, cy - size * 0.02);
+    ctx.lineTo(cx + size * x, cy - size * 0.25);
+    ctx.stroke();
+  }
+
+  // Splayed thumb.
+  ctx.strokeStyle = "#9ea9ad";
+  ctx.lineWidth = size * 0.12;
+  ctx.beginPath();
+  ctx.moveTo(cx - size * 0.15, cy + size * 0.08);
+  ctx.lineTo(cx - size * 0.34, cy - size * 0.08);
+  ctx.stroke();
+
+  // Silver gauntlet cuff beneath the wrist.
+  const cuff = new Path2D();
+  cuff.moveTo(cx - size * 0.2, cy + size * 0.23);
+  cuff.lineTo(cx + size * 0.2, cy + size * 0.23);
+  cuff.lineTo(cx + size * 0.25, cy + size * 0.43);
+  cuff.lineTo(cx - size * 0.25, cy + size * 0.43);
+  cuff.closePath();
+  ctx.fillStyle = "#8e999d";
+  ctx.strokeStyle = "#404a4e";
+  ctx.lineWidth = Math.max(1.5, size * 0.04);
+  ctx.fill(cuff);
+  ctx.stroke(cuff);
+  ctx.strokeStyle = "#c8d0d2";
+  ctx.beginPath();
+  ctx.moveTo(cx - size * 0.16, cy + size * 0.28);
+  ctx.lineTo(cx + size * 0.16, cy + size * 0.28);
+  ctx.stroke();
+  ctx.restore();
+}
+
 export function drawActionBar(
   ctx: CanvasRenderingContext2D,
   origin: Point,
@@ -110,7 +279,7 @@ export function drawActionBar(
 
   // The icons are a fraction of the square rather than fixed, so a bigger
   // square carries a bigger sword instead of the same one adrift in space.
-  const swordLength = layout.square * 0.64;
+  const swordLength = layout.square * 0.74;
   const daggerLength = layout.square * 0.45;
 
   for (let i = 0; i < ACTION_SLOTS; i++) {
@@ -128,21 +297,28 @@ export function drawActionBar(
     ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.width - 1, r.height - 1);
 
     const action = actions[i];
-    if (!action) continue;
+    const placeholder = i === 2 ? "potion" : i === 3 ? "spell" : null;
+    if (!action && !placeholder) continue;
 
     // Corner key label, before the blind so a spent slot darkens it too.
     ctx.font = KEY_FONT;
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     ctx.fillStyle = KEY_COLOR;
-    ctx.fillText(`(${i + 1})`, r.x + KEY_INSET, r.y + KEY_INSET);
+    if (action) ctx.fillText(`(${i + 1})`, r.x + KEY_INSET, r.y + KEY_INSET);
 
     const cx = r.x + r.width / 2;
     const cy = r.y + r.height / 2;
-    if (action.kind === "melee") {
-      drawDagger(ctx, cx, cy, daggerAngle(0, -1), swordLength, "#d6dbdf"); // upright sword, blade up
-    } else {
-      drawDagger(ctx, cx, cy, daggerAngle(-1, -1), daggerLength, "#d6dbdf"); // smaller dagger, blade NW
+    if (placeholder === "potion") {
+      drawPotionIcon(ctx, cx, cy, layout.square * 0.78);
+    } else if (placeholder === "spell") {
+      drawScrollIcon(ctx, cx, cy, layout.square * 0.78);
+    } else if (action?.kind === "interact") {
+      drawHandIcon(ctx, cx, cy, layout.square * 0.78);
+    } else if (action?.kind === "melee") {
+      drawDagger(ctx, cx, cy, daggerAngle(0, -1), swordLength, "#d6dbdf", "#543725", true); // upright sword, blade up
+    } else if (action) {
+      drawDagger(ctx, cx, cy, daggerAngle(-1, -1), daggerLength, "#d6dbdf", "#33231d"); // smaller dagger, blade NW
     }
 
     // Cooldown blind. Drawn last so it darkens the icon too: full square at the

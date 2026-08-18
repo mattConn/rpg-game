@@ -7,7 +7,6 @@
  * pacing is different.
  */
 
-import { ACTIONS } from "../../../src/shared/actions.js";
 import {
   DAMAGE_NUMBER_LIFETIME,
   DAMAGE_NUMBER_SPEED,
@@ -54,6 +53,7 @@ import {
   RANGED_DAMAGE,
   SQUARE_PX,
   TILE_PX,
+  TACTICS_ACTIONS,
   canReach,
   cellAtPoint,
   cellCenter,
@@ -240,6 +240,7 @@ export class TacticsGame {
   private phase!: Phase;
 
   private targetId!: string | null;
+  private targetDoor!: DoorId | null;
   private activeSlot = 0;
   private log!: string[];
 
@@ -268,6 +269,8 @@ export class TacticsGame {
 
   /** The direction WASD is pushing, as a unit vector or zero. */
   private moveDir: Point = { x: 0, y: 0 };
+  private moveTurnsPlayer = true;
+  private playerHeading: Point = { x: 1, y: 0 };
   /** Click-to-move destination, cleared on arrival or when WASD overrides. */
   private moveTarget: Point | null = null;
 
@@ -361,6 +364,7 @@ export class TacticsGame {
     this.corpses = [];
     this.phase = "player";
     this.targetId = null;
+    this.targetDoor = null;
     this.thrown = null;
     this.damageNumbers = [];
     this.tombstones = [];
@@ -368,6 +372,8 @@ export class TacticsGame {
     this.doors = { arena: false, far: false };
     this.strikes = [];
     this.moveDir = { x: 0, y: 0 };
+    this.moveTurnsPlayer = true;
+    this.playerHeading = { x: 1, y: 0 };
     this.moveTarget = null;
     this.nextAttackAt = 0;
     this.actingUntil = 0;
@@ -477,7 +483,7 @@ export class TacticsGame {
       const nx = this.moveDir.x / dirLen;
       const ny = this.moveDir.y / dirLen;
       const step = PLAYER_SPEED * dt;
-      this.stepPlayer(nx * step, ny * step);
+      this.stepPlayer(nx * step, ny * step, this.moveTurnsPlayer);
     } else if (this.moveTarget) {
       // Click-to-move: walk toward the target.
       const from = this.playerAt();
@@ -494,13 +500,17 @@ export class TacticsGame {
   }
 
   /** Apply a pixel displacement to the player, clamping to the floor. Returns whether it moved. */
-  private stepPlayer(dx: number, dy: number): boolean {
+  private stepPlayer(dx: number, dy: number, turnToTravel = true): boolean {
     const from = this.playerAt();
     const raw = { x: from.x + dx, y: from.y + dy };
     const target = this.stopAtDoor(from, clampPointToFloor(raw));
     if (distance(from, target) < 0.01) return false;
 
-    this.player.facing = facingToward(from, target, this.player.facing);
+    if (turnToTravel) {
+      const travel = distance(from, target);
+      this.playerHeading = { x: (target.x - from.x) / travel, y: (target.y - from.y) / travel };
+      if (Math.abs(this.playerHeading.x) > 0.001) this.player.facing = this.playerHeading.x >= 0 ? 1 : -1;
+    }
     this.player.pos = { ...target };
     this.player.x = target.x;
     this.player.y = target.y;
@@ -923,7 +933,7 @@ export class TacticsGame {
   // ----------------------------------------------------------- combat
 
   private selectSlot(index: number): void {
-    if (!ACTIONS[index]) return;
+    if (!TACTICS_ACTIONS[index]) return;
     this.activeSlot = index;
   }
 
@@ -935,10 +945,14 @@ export class TacticsGame {
     if (isOver(this.phase)) return;
     if (this.simNow < this.nextAttackAt) return;
 
-    const action = ACTIONS[this.activeSlot];
+    const action = TACTICS_ACTIONS[this.activeSlot];
+    if (action?.kind === "interact") {
+      this.say("Use Interact on a targeted door.");
+      return;
+    }
     const target = this.livingTarget();
     const reach = target ? canReach(this.playerAt(), this.at(target)) : false;
-    if (target) this.player.facing = facingToward(this.playerAt(), this.at(target), this.player.facing);
+    const inFront = target ? this.targetInFront(target) : false;
 
     // **Committing is the decision; connecting is the consequence.** A swing
     // that finds nothing — no mark, or a hound out of reach — still costs
@@ -953,6 +967,12 @@ export class TacticsGame {
     if (!action || !target) {
       this.say("You swing at nothing.");
       this.startCooldown(MELEE_COOLDOWN_MS);
+      return;
+    }
+
+    if (!inFront) {
+      this.say(`The ${target.name.toLowerCase()} is behind you.`);
+      this.startCooldown(action.kind === "melee" ? MELEE_COOLDOWN_MS : RANGED_COOLDOWN_MS);
       return;
     }
 
@@ -1063,14 +1083,25 @@ export class TacticsGame {
         this.waiting = msg.held;
         break;
       case "move":
-        this.setMoveDir(msg.dx, msg.dy);
+        this.setMoveDir(msg.dx, msg.dy, msg.turn !== false);
+        break;
+      case "face":
+        this.setHeading(msg.dx, msg.dy);
         break;
       case "interact": {
-        const door = this.facedDoor({ x: msg.dx, y: msg.dy });
-        if (door) this.toggleDoor(door);
-        else this.attack();
+        if (TACTICS_ACTIONS[this.activeSlot]?.kind !== "interact") {
+          this.attack();
+        } else if (this.targetDoor && this.canInteractWithDoor(this.targetDoor, this.playerHeading)) {
+          this.toggleDoor(this.targetDoor);
+        } else {
+          this.say("Target a nearby door and face it to interact.");
+        }
         break;
       }
+      case "targetDoor":
+        this.targetDoor = this.targetDoor === msg.door ? null : msg.door;
+        if (this.targetDoor) this.targetId = null;
+        break;
       case "toggleDoor":
         if (this.canInteractWithDoor(msg.door, { x: msg.dx, y: msg.dy })) this.toggleDoor(msg.door);
         else this.say("You need to stand in front of the door and face it.");
@@ -1087,8 +1118,18 @@ export class TacticsGame {
   }
 
   /** Set or clear the movement direction from WASD. */
-  private setMoveDir(dx: number, dy: number): void {
+  private setMoveDir(dx: number, dy: number, turnToTravel: boolean): void {
     this.moveDir = { x: dx, y: dy };
+    this.moveTurnsPlayer = turnToTravel;
+  }
+
+  private setHeading(dx: number, dy: number): void {
+    const length = Math.hypot(dx, dy);
+    if (length > 0.001) {
+      this.playerHeading = { x: dx / length, y: dy / length };
+      // Keep the legacy left/right field aligned with deliberate rotation only.
+      if (Math.abs(dx) > 0.001) this.player.facing = dx >= 0 ? 1 : -1;
+    }
   }
 
   private onKey(key: string, code: string, now: number): void {
@@ -1127,6 +1168,7 @@ export class TacticsGame {
     const enemy = this.enemyNear(point);
     if (enemy) {
       this.targetId = this.targetId === enemy.id ? null : enemy.id;
+      this.targetDoor = null;
       return;
     }
 
@@ -1172,13 +1214,31 @@ export class TacticsGame {
   }
 
   private canInteractWithDoor(id: DoorId, facing: Point): boolean {
-    const centre = { x: cellCenter({ col: HALL_MID_COL, row: 0 }).x, y: DOOR_Y[id] };
+    const centre = this.doorInteractionPoint(id);
     const dx = centre.x - this.player.x;
     const dy = centre.y - this.player.y;
     const gap = Math.hypot(dx, dy);
     const facingLength = Math.hypot(facing.x, facing.y);
-    if (gap > DOOR_INTERACT_RANGE || gap < 0.001 || facingLength < 0.001) return false;
+    // An open slab has swung roughly half a doorway away from its closed plane.
+    // Add that travel to the reach so a player on either side of the opening can
+    // still close it while aiming at the wood's actual position.
+    const reach = DOOR_INTERACT_RANGE + (this.doors[id] ? HALL_REGION.cols * TILE_PX / 2 : 0);
+    if (gap > reach || gap < 0.001 || facingLength < 0.001) return false;
     return (dx * facing.x + dy * facing.y) / (gap * facingLength) >= DOOR_FACING_DOT;
+  }
+
+  /** Centre of the wooden slab, including its swing away from the doorway. */
+  private doorInteractionPoint(id: DoorId): Point {
+    const doorwayX = cellCenter({ col: HALL_MID_COL, row: 0 }).x;
+    if (!this.doors[id]) return { x: doorwayX, y: DOOR_Y[id] };
+    const passageWidth = HALL_REGION.cols * TILE_PX;
+    const hingeX = doorwayX - passageWidth / 2;
+    const halfSlab = (passageWidth - 0.12 * 30) / 2;
+    const angle = (id === "arena" ? 1 : -1) * Math.PI * 0.48;
+    return {
+      x: hingeX + Math.cos(angle) * halfSlab,
+      y: DOOR_Y[id] - Math.sin(angle) * halfSlab,
+    };
   }
 
   private facedDoor(facing: Point): DoorId | null {
@@ -1274,11 +1334,16 @@ export class TacticsGame {
   }
 
   private selectedCanAttack(): boolean {
+    const action = TACTICS_ACTIONS[this.activeSlot];
+    if (action?.kind === "interact") {
+      return this.targetDoor !== null && this.canInteractWithDoor(this.targetDoor, this.playerHeading);
+    }
     if (this.simNow < this.nextAttackAt) return false;
     const target = this.livingTarget();
     if (!target) return false;
+    if (!this.targetInFront(target)) return false;
     const reach = canReach(this.playerAt(), this.at(target));
-    return ACTIONS[this.activeSlot]?.kind === "melee" ? reach : !reach;
+    return action?.kind === "melee" ? reach : action?.kind === "ranged" ? !reach : false;
   }
 
   private hint(): string {
@@ -1292,11 +1357,17 @@ export class TacticsGame {
     }
 
     const target = this.livingTarget();
+    if (this.targetDoor) {
+      return this.canInteractWithDoor(this.targetDoor, this.playerHeading)
+        ? "Door ready — 5 for Interact, then Space."
+        : "Move in front of the targeted door and face it.";
+    }
     if (!target) {
       return this.anyAwake()
         ? "Click a hellhound to mark it, or WASD to move."
         : "Nothing has noticed you yet. Mark one and throw, or walk closer.";
     }
+    if (!this.targetInFront(target)) return "Turn to face your marked target before attacking.";
     if (canReach(this.playerAt(), this.at(target))) {
       return "In reach — 1 for the sword, Space to swing.";
     }
@@ -1305,6 +1376,15 @@ export class TacticsGame {
 
   private anyAwake(): boolean {
     return this.enemies.some((e) => e.aggro);
+  }
+
+  /** True throughout the 180-degree hemisphere centred on player heading. */
+  private targetInFront(target: Hound): boolean {
+    const dx = target.x - this.player.x;
+    const dy = target.y - this.player.y;
+    const gap = Math.hypot(dx, dy);
+    if (gap < 0.001) return true;
+    return (dx * this.playerHeading.x + dy * this.playerHeading.y) / gap >= -1e-6;
   }
 
   /**
@@ -1380,7 +1460,9 @@ export class TacticsGame {
         };
 
     return {
+      playerHeading: { ...this.playerHeading },
       doors: { ...this.doors },
+      targetDoor: this.targetDoor,
       player: {
         x: this.player.x,
         y: this.player.y,
