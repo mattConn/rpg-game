@@ -171,8 +171,28 @@ function clampFloat(value: number, lo: number, hi: number): number {
  * Clamp a point to the nearest walkable position, in room pixels. Each region
  * is tried independently and the closest result wins — so a point in the
  * masonry beside the corridor snaps into the hall rather than across the room.
+ *
+ * **A point already standing on floor is returned untouched, and that is what
+ * makes doorways passable.** The fallback below clamps into a box running
+ * centre-to-centre of a region's outermost cells, which stops half a tile short
+ * of where its cells actually end — so between two regions that meet, one whole
+ * cell belonged to neither box and every point in it was snapped back to one
+ * side or the other. That is a wall, and it stood exactly in the doorway.
+ *
+ * The player crossed it only by being fast enough to jump it in a single step
+ * (200px/s, 10px a tick, against the 9px needed); a hellhound at 140px/s moves
+ * 7px and was thrown back to the threshold every tick, for ever. Hounds could
+ * not follow you out of the room at all.
+ *
+ * Asking `cellAtPoint` first removes the seam rather than papering over it,
+ * because a cell *is* the unit of floor — it is the same question `inGrid` and
+ * `clampToGrid` already answer, and those never had the gap. The cost is that
+ * an actor may now stand half a tile nearer a wall than before; against a
+ * 45px-wide model that already overlaps the masonry it is not a visible change.
  */
 export function clampPointToFloor(point: Point): Point {
+  if (cellAtPoint(point)) return { x: point.x, y: point.y };
+
   let best: Point | null = null;
   let bestGap = Infinity;
   for (const region of REGIONS) {
@@ -261,6 +281,24 @@ export const MELEE_RANGE = SQUARE_PX;
  * little wider than its reach, so a hound wakes a moment before it can bite.
  */
 export const AGGRO_RANGE = SQUARE_PX * 1.25;
+
+/**
+ * How close you have to come before the game warns you that you are *about* to
+ * be noticed. Half a square outside the wake range itself.
+ *
+ * Aggro is permanent and there are no second chances at it, which is what makes
+ * a warning worth having: the difference between waking one hellhound and two
+ * is the difference between a fight you can win and one you cannot, and without
+ * this the only way to find the line was to cross it.
+ *
+ * **A full square was tried first and was worse.** The arena is only three
+ * squares across, so a band that wide is lit before the player has moved — the
+ * opening position is 180px from the nearest hound — and a warning that is
+ * already on tells you nothing. Half a square puts the opening board outside
+ * it, so the eye *opening* is the signal rather than the eye existing.
+ */
+export const AGGRO_WARN_RANGE = AGGRO_RANGE + SQUARE_PX / 2;
+
 
 /** Nothing may stand inside anything else. Roughly a body's width. */
 export const MIN_SEPARATION = SQUARE_PX * 0.5;
@@ -417,6 +455,18 @@ export interface TacticsSnapshot extends GameSnapshot {
    */
   aggro: boolean;
   /**
+   * Close enough to a *sleeping* hellhound to be about to wake it — the band
+   * between `AGGRO_RANGE` and `AGGRO_WARN_RANGE`. Goes false the moment the
+   * thing actually wakes, at which point `aggro` takes over saying so.
+   */
+  nearAggro: boolean;
+  /**
+   * Whether the player is holding time open. On the wire rather than tracked by
+   * the client that sent it, so the button's lit state is the server's answer
+   * and cannot drift from the thing actually running the world.
+   */
+  waiting: boolean;
+  /**
    * Every blow the pack landed in the round just resolved, each with a counter
    * that ticks once per blow. The client lunges every one whose seq it has not
    * seen before.
@@ -464,4 +514,10 @@ export type TacticsInput =
   /** Swing the selected weapon at the mark, landing or not. */
   | { type: "attack" }
   /** Walk one step in a camera-relative direction. dx/dy are a unit vector. */
-  | { type: "move"; dx: number; dy: number };
+  | { type: "move"; dx: number; dy: number }
+  /**
+   * Hold time open. Unlike every other action this is a *state*, not a moment:
+   * `held` goes true when the button or `.` goes down and false when it comes
+   * back up, and the world runs for exactly as long as it is true.
+   */
+  | { type: "wait"; held: boolean };

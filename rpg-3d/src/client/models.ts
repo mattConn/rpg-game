@@ -223,6 +223,12 @@ export interface WolfRig {
   body: THREE.Object3D;
   /** Emissive-looking eyes, brightened while the thing is hunting you. */
   eyeMaterial: THREE.MeshBasicMaterial;
+  /**
+   * What those eyes are lit *to*. On the rig rather than taken from the accent
+   * by the caller, so the model owns its own colour and the animation only has
+   * to decide how bright it is.
+   */
+  eyeColor: THREE.Color;
 }
 
 /**
@@ -230,6 +236,21 @@ export interface WolfRig {
  * the eyes and the throat, so it still reads as the orange `♞` it replaces
  * without turning the whole animal orange.
  */
+/** A hellhound's eyes, whatever colour the rest of it is. */
+const WOLF_EYE = 0xd81f1f;
+/** How far the eye slants down toward the snout, in radians. */
+const EYE_TILT = 0.5;
+/**
+ * The head block's own size. Named because the eyes are placed *against* it —
+ * a diamond is a solid, and any part of one reaching past the cheek pokes out
+ * of the side of the head and reads as a second diamond on the wolf's flank.
+ */
+const HEAD_BLOCK = { x: 0.34, y: 0.3, z: 0.3 };
+/** Radius of the eye octahedron before it is scaled into a lozenge. */
+const EYE_RADIUS = 0.06;
+/** Shallow into the face, short in height, long across it. */
+const EYE_SCALE = { x: 0.5, y: 0.62, z: 1.05 };
+
 export function buildWolf(accent: THREE.Color): WolfRig {
   const model = new THREE.Group();
 
@@ -254,7 +275,7 @@ export function buildWolf(accent: THREE.Color): WolfRig {
 
   // Head as its own group: it can then turn toward the player independently.
   const head = at(new THREE.Group(), 0.84, 1.02, 0);
-  head.add(at(box(0.34, 0.3, 0.3, WOLF_FUR), 0, 0, 0));
+  head.add(at(box(HEAD_BLOCK.x, HEAD_BLOCK.y, HEAD_BLOCK.z, WOLF_FUR), 0, 0, 0));
   head.add(at(box(0.3, 0.17, 0.19, WOLF_FUR), 0.26, -0.07, 0)); // snout
   head.add(at(box(0.06, 0.07, 0.1, 0x14110f), 0.43, -0.05, 0)); // nose
 
@@ -266,10 +287,45 @@ export function buildWolf(accent: THREE.Color): WolfRig {
   head.add(at(ear(), -0.06, 0.22, 0.11));
   head.add(at(ear(), -0.06, 0.22, -0.11));
 
-  const eyeMaterial = new THREE.MeshBasicMaterial({ color: accent });
-  const eye = () => new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.04), eyeMaterial);
-  head.add(at(eye(), 0.16, 0.05, 0.11));
-  head.add(at(eye(), 0.16, 0.05, -0.11));
+  /**
+   * **Angry eyes: a red diamond apiece, and nothing else.** No brow — the shape
+   * carries the whole expression now.
+   *
+   * An octahedron, whose points sit on the axes, so the face it turns toward you
+   * is a diamond with its corners at the top, bottom and both ends. Scaled long
+   * across the head and shallow into it: a lozenge rather than a gem, which is
+   * what stops it reading as a jewel stuck on a wolf. Tilted (`EYE_TILT`) so the
+   * inner point drops toward the snout, and head on the pair make a V aimed at
+   * the nose — a diamond has a point to *aim*, which is why it can do alone what
+   * previously took a bar with a brow over it.
+   *
+   * Red rather than the enemy's accent: a hellhound's eyes are its own thing,
+   * and the ember accent still shows at the throat.
+   */
+  const eyeMaterial = new THREE.MeshBasicMaterial({ color: WOLF_EYE });
+
+  /**
+   * How far the diamond's outer point reaches across the head once it has been
+   * scaled and tilted — the tilt is a rotation about X, so it trades some of
+   * that reach for height.
+   */
+  const eyeHalfZ = EYE_RADIUS * EYE_SCALE.z * Math.cos(EYE_TILT);
+  /**
+   * Placed from the cheek inwards rather than at a number picked by eye, so the
+   * outer point always stops short of the side of the head. Set by hand it
+   * overhung by 0.03 and the tip showed *through* the cheek as a separate red
+   * sliver — one diamond on the face and one on the flank, per eye.
+   */
+  const eyeZ = HEAD_BLOCK.z / 2 - eyeHalfZ - 0.008;
+
+  const eye = (side: 1 | -1) => {
+    const diamond = new THREE.Mesh(new THREE.OctahedronGeometry(EYE_RADIUS, 0), eyeMaterial);
+    diamond.scale.set(EYE_SCALE.x, EYE_SCALE.y, EYE_SCALE.z);
+    diamond.rotation.x = -side * EYE_TILT;
+    return diamond;
+  };
+  head.add(at(eye(1), 0.16, 0.05, eyeZ));
+  head.add(at(eye(-1), 0.16, 0.05, -eyeZ));
   model.add(head);
 
   // Ember throat — the one place the hellhound's colour shows on the body.
@@ -299,7 +355,7 @@ export function buildWolf(accent: THREE.Color): WolfRig {
   // reads as unclickable at the ends — and buries the player when it closes.
   model.scale.setScalar(WOLF_SCALE);
 
-  return { model, legs, head, tail, body, eyeMaterial };
+  return { model, legs, head, tail, body, eyeMaterial, eyeColor: new THREE.Color(WOLF_EYE) };
 }
 
 // ------------------------------------------------------------------ scenery

@@ -26,19 +26,17 @@ import { squareAtPoint } from "../../../src/client/actionbar.js";
 import { HUD_HEIGHT } from "../../../src/client/hud.js";
 import { DEFAULT_CURSOR } from "../../../src/client/cursors.js";
 import { SERVER_TICK_MS, renderFraction, smoothInterval } from "../../../src/client/interpolation.js";
-import { fitToViewport } from "../../../src/client/viewport.js";
+import { fillViewport } from "../../../src/client/viewport.js";
 import { Actors, applyCues, entityIdOf } from "../../../rpg-3d/src/client/entities.js";
-import { autoResRect, barOrigin, drawOverlay, hits, hudOrigin, resurrectRect } from "../../../rpg-3d/src/client/overlay.js";
+import { autoResRect, barOrigin, centreShift, drawOverlay, hits, hudOrigin, resurrectRect } from "../../../rpg-3d/src/client/overlay.js";
 import { interpolateSnapshot } from "../../../rpg-3d/src/client/playback.js";
 import { toX, toZ } from "../../../rpg-3d/src/client/world.js";
 import {
-  cellAtPoint,
-  distance,
   isOver,
   type TacticsInput,
   type TacticsSnapshot,
 } from "../shared/tactics.js";
-import { BAR_LAYOUT, attackRect, drawTacticsChrome, hitsButton } from "./chrome.js";
+import { BAR_LAYOUT, drawTacticsChrome } from "./chrome.js";
 import { createStage } from "./stage.js";
 import { drawHeldWeapon } from "./viewmodel.js";
 
@@ -59,16 +57,27 @@ const BAR_TOP_GAP = 46;
 barOrigin.x = hudOrigin.x;
 barOrigin.y = hudOrigin.y + HUD_HEIGHT + BAR_TOP_GAP;
 
+/**
+ * How many room units wide the canvas currently is. The room's *height* is
+ * always `WORLD_HEIGHT`; its width follows the browser, so this is the number
+ * anything centred or right-anchored has to be placed against — and the number
+ * a screen coordinate is converted back through.
+ */
+let viewWidth = WORLD_WIDTH;
+
 function resize() {
-  const fit = fitToViewport(window.innerWidth, window.innerHeight, window.devicePixelRatio || 1);
+  const fit = fillViewport(window.innerWidth, window.innerHeight, window.devicePixelRatio || 1);
+  viewWidth = fit.roomWidth;
 
   uiCanvas.style.width = `${fit.displayWidth}px`;
   uiCanvas.style.height = `${fit.displayHeight}px`;
   uiCanvas.width = fit.pixelWidth;
   uiCanvas.height = fit.pixelHeight;
-  ctx.setTransform(fit.pixelWidth / WORLD_WIDTH, 0, 0, fit.pixelHeight / WORLD_HEIGHT, 0, 0);
+  // Square room units: both axes get the same scale, since roomWidth was
+  // derived from the height and the aspect in the first place.
+  ctx.setTransform(fit.pixelWidth / viewWidth, 0, 0, fit.pixelHeight / WORLD_HEIGHT, 0, 0);
 
-  stage.resize(fit.displayWidth, fit.displayHeight, window.devicePixelRatio || 1);
+  stage.resize(fit.displayWidth, fit.displayHeight, window.devicePixelRatio || 1, viewWidth);
 }
 
 window.addEventListener("resize", resize);
@@ -186,8 +195,11 @@ function updateTankControls(dt: number): void {
   let turn = 0;
   if (heldKeys.has("a") || heldKeys.has("arrowleft")) turn += TURN_SPEED * dt;
   if (heldKeys.has("d") || heldKeys.has("arrowright")) turn -= TURN_SPEED * dt;
-  // Reverse steering while walking backwards, like driving a car in reverse.
-  if (heldKeys.has("s") && !heldKeys.has("w")) turn = -turn;
+  // **A is always left and D is always right**, whichever way you are walking.
+  // Steering used to invert while backing up, on the analogy of reversing a
+  // car — but you are not driving the player, you are *being* them, and a
+  // person walking backwards still turns their own left when they mean left.
+  // The camera is the head here, and a head does not steer like a rear axle.
   if (turn !== 0) {
     // orbit expects screen-pixel deltas; convert radians to the equivalent.
     // stage.orbit applies yaw -= dx * ROTATE_SPEED, so dx = -turn / ROTATE_SPEED.
@@ -199,8 +211,47 @@ function updateTankControls(dt: number): void {
   if (heldKeys.has("w") || heldKeys.has("s")) sendMoveDir();
 }
 
+/**
+ * Half-turn on the spot. Purely a camera move — W and S read `stage.yaw`, so
+ * turning the view is turning the player — but a held W has to be re-sent, or
+ * the server keeps walking them the old way until the key is let go.
+ */
+function flipAbout() {
+  stage.flip();
+  if (heldKeys.has("w") || heldKeys.has("s")) sendMoveDir();
+}
+
+/**
+ * Wait is the one control that is *held* rather than pressed, so it needs a
+ * release for every way a hold can end — key up, mouse up anywhere on the page,
+ * and the window losing focus. Miss the last one and tabbing away leaves the
+ * world running with hellhounds eating you off-screen, which is precisely what
+ * the pause exists to prevent.
+ */
+let waitHeld = false;
+function holdWait(held: boolean) {
+  if (held === waitHeld) return; // idempotent: key auto-repeat must not spam
+  waitHeld = held;
+  send({ type: "wait", held });
+}
+window.addEventListener("blur", () => holdWait(false));
+document.addEventListener("visibilitychange", () => { if (document.hidden) holdWait(false); });
+
 window.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
+
+  if (key === ".") {
+    holdWait(true);
+    event.preventDefault();
+    return;
+  }
+
+  // Firefox opens quick-find on "/", so this has to be swallowed either way.
+  if (key === "/") {
+    if (!event.repeat) flipAbout();
+    event.preventDefault();
+    return;
+  }
 
   if (event.code === "Tab") {
     event.preventDefault();
@@ -242,6 +293,7 @@ window.addEventListener("keydown", (event) => {
 
 window.addEventListener("keyup", (event) => {
   const key = event.key.toLowerCase();
+  if (key === ".") { holdWait(false); return; }
   const mapped = key === "arrowup" ? "w" : key === "arrowdown" ? "s" : key;
   if (heldKeys.has(mapped)) {
     heldKeys.delete(mapped);
@@ -255,7 +307,7 @@ window.addEventListener("keyup", (event) => {
 function toOverlay(event: MouseEvent): Point {
   const bounds = uiCanvas.getBoundingClientRect();
   return {
-    x: (event.clientX - bounds.left) * (WORLD_WIDTH / bounds.width),
+    x: (event.clientX - bounds.left) * (viewWidth / bounds.width),
     y: (event.clientY - bounds.top) * (WORLD_HEIGHT / bounds.height),
   };
 }
@@ -276,7 +328,9 @@ function toNdc(event: MouseEvent): { x: number; y: number } {
  * the square the hellhound is standing on.
  */
 function pickRoomPoint(event: MouseEvent): Point | null {
-  const ndc = toNdc(event);
+  // Locked, there is no cursor, so the middle of the screen is the aim and
+  // every pick is taken there. Nothing marks it — you aim with the view.
+  const ndc = looking ? { x: 0, y: 0 } : toNdc(event);
   const id = entityIdOf(stage.pickAt(ndc.x, ndc.y));
 
   if (id && currSnapshot) {
@@ -311,15 +365,52 @@ uiCanvas.addEventListener("mousedown", (event) => {
 });
 
 window.addEventListener("mouseup", () => {
+  // Released anywhere, not just over the button: dragging off it and letting go
+  // there is still letting go.
+  holdWait(false);
   if (dragButton !== null && dragMoved > DRAG_THRESHOLD) swallowNextClick = true;
   dragButton = null;
+});
+
+/**
+ * **Mouselook, the way a shooter does it.** With the pointer locked the cursor
+ * is gone and raw movement turns the view — no button to hold, and no screen
+ * edge to run out of, which is the whole reason locking is needed rather than
+ * just reading the cursor's position.
+ *
+ * The browser only grants a lock from a user gesture, so it is claimed on a
+ * click into the world. Escape gives it back, and that is the browser's own
+ * binding — it cannot be intercepted — so while locked, Escape releases the
+ * mouse instead of dropping the mark. Tab still cycles the mark, and every
+ * button in the stack has a key, so nothing is unreachable while locked.
+ */
+let looking = false;
+
+document.addEventListener("pointerlockchange", () => {
+  looking = document.pointerLockElement === uiCanvas;
+  // No cursor while locked, so nothing should be drawn as hovered, and the
+  // world cursor sits dead centre — which is what a click will hit.
+  if (looking) {
+    uiCursor = null;
+    groundCursor = stage.groundAt(0, 0);
+  }
 });
 
 /** Cursor in overlay units (UI hit-testing) and on the floor (world reveals). */
 let uiCursor: Point | null = null;
 let groundCursor: Point | null = null;
 
+
 uiCanvas.addEventListener("mousemove", (event) => {
+  if (looking) {
+    // `movementX/Y` is raw pointer travel, unbounded by the window. Converted
+    // to the same NDC deltas a drag sends, so both go through one scale.
+    const bounds = uiCanvas.getBoundingClientRect();
+    stage.look((event.movementX / bounds.width) * 2, -(event.movementY / bounds.height) * 2);
+    groundCursor = stage.groundAt(0, 0);
+    return;
+  }
+
   if (dragButton !== null) {
     const dx = event.clientX - lastDragX;
     const dy = event.clientY - lastDragY;
@@ -328,7 +419,15 @@ uiCanvas.addEventListener("mousemove", (event) => {
     dragMoved += Math.abs(dx) + Math.abs(dy);
     if (dragMoved > DRAG_THRESHOLD) {
       if (dragPanning && !stage.firstPerson) stage.pan(dx, dy);
-      else stage.orbit(dx, dy);
+      // Drag right, look right. Deltas go over as NDC — a fraction of the
+      // half-screen — rather than as pixels, so `stage.look` can price them
+      // against the camera's own frustum and a drag means the same turn at any
+      // window size. The threshold still gates it, so a click with a pixel of
+      // shake in it does not shift the view.
+      else {
+        const bounds = uiCanvas.getBoundingClientRect();
+        stage.look((dx / bounds.width) * 2, -(dy / bounds.height) * 2);
+      }
     }
   }
 
@@ -360,7 +459,15 @@ uiCanvas.addEventListener("click", (event) => {
     return;
   }
 
-  const uiPoint = toOverlay(event);
+  // Locked, the overlay is out of reach — there is no cursor to hit it with, so
+  // a click is always a click into the world. Every button in the stack has a
+  // key, and Escape hands the mouse back if the HUD is wanted.
+  const uiPoint = looking ? null : toOverlay(event);
+  if (uiPoint === null) {
+    const aimed = pickRoomPoint(event);
+    if (aimed) send({ type: "click", x: aimed.x, y: aimed.y });
+    return;
+  }
 
   // The HUD's own buttons first, exactly as in the other two clients — here
   // they restart the encounter rather than revive you mid-fight.
@@ -374,14 +481,6 @@ uiCanvas.addEventListener("click", (event) => {
     return;
   }
 
-  // The Attack button at the foot of the stack, then the squares above it,
-  // which only choose a weapon.
-  if (hitsButton(attackRect(barOrigin), uiPoint)) {
-    send({ type: "attack" });
-    return;
-  }
-
-
   const slot = squareAtPoint(barOrigin, uiPoint, BAR_LAYOUT);
   if (slot !== null) {
     if (ACTIONS[slot]) send({ type: "slot", index: slot });
@@ -389,13 +488,20 @@ uiCanvas.addEventListener("click", (event) => {
   }
 
   if (currSnapshot?.inspect) {
-    const point = lootMenuProxyPoint(uiPoint);
+    // The menu is drawn shifted to sit centred on a wide canvas, so a click on
+    // it has to be shifted back before the server, which knows only the
+    // 1200-unit room its rectangle lives in, is asked about it.
+    const shift = centreShift(viewWidth);
+    const point = lootMenuProxyPoint({ x: uiPoint.x - shift, y: uiPoint.y });
     send({ type: "click", x: point.x, y: point.y });
     return;
   }
 
   const point = pickRoomPoint(event);
   if (point) send({ type: "click", x: point.x, y: point.y });
+  // A click into the world is the gesture that takes the mouse — the browser
+  // will only grant a lock from one, so it cannot simply be claimed on load.
+  if (!looking) uiCanvas.requestPointerLock();
 });
 
 uiCanvas.addEventListener("dblclick", (event) => {
@@ -409,11 +515,10 @@ let appliedCursor = DEFAULT_CURSOR;
 function updateCursorStyle(snap: TacticsSnapshot) {
   let wanted = DEFAULT_CURSOR;
   if (uiCursor) {
-    if (snap.inspect && hitsRect(LOOT_CLOSE_RECT, uiCursor)) wanted = "pointer";
+    if (snap.inspect && hitsRect(LOOT_CLOSE_RECT, { x: uiCursor.x - centreShift(viewWidth), y: uiCursor.y })) wanted = "pointer";
     else if (snap.dead && hits(resurrectRect(ctx), uiCursor)) wanted = "pointer";
     else if (hits(autoResRect(ctx), uiCursor)) wanted = "pointer";
     else if (squareAtPoint(barOrigin, uiCursor, BAR_LAYOUT) !== null) wanted = "pointer";
-    else if (hitsButton(attackRect(barOrigin), uiCursor)) wanted = "pointer";
   }
 
   if (wanted !== appliedCursor) {
@@ -423,20 +528,6 @@ function updateCursorStyle(snap: TacticsSnapshot) {
 }
 
 // ------------------------------------------------------------- board paint
-
-/**
- * Where the cursor is on the floor — no grid snapping. Shows a ring at the
- * exact cursor position; red when an enemy is standing there.
- */
-function hoverDestination(snap: TacticsSnapshot): { at: Point; allowed: boolean } | null {
-  if (!groundCursor || isOver(snap.phase)) return null;
-  const cell = cellAtPoint(groundCursor);
-  if (!cell) return null;
-
-  const at = { ...groundCursor };
-  const occupied = snap.enemies.some((e) => distance(at, { x: e.x, y: e.y }) < snap.meleeRange * 0.5);
-  return { at, allowed: !occupied };
-}
 
 // ----------------------------------------------------------------- game loop
 
@@ -489,8 +580,6 @@ function frame(now: number) {
 
   // Nothing is drawn on the floor around the player: the footfall ring under the
   // cursor is what says whether a click would land, and where.
-  const destination = hoverDestination(snap);
-  stage.setDestination(destination?.at.x ?? null, destination?.at.y ?? null, destination?.allowed ?? false);
 
   // Red under something you are fighting, yellow under a body you have merely
   // selected — the real-time game's ring colours, on a bigger ring.
@@ -515,8 +604,8 @@ function frame(now: number) {
   // shoulder a bite is easy to miss; here the whole board is on screen, the log
   // names what hit you, and a red vignette over a turn-based fight just gets in
   // the way of reading it.
-  drawOverlay(ctx, { snap, uiCursor, groundCursor, toScreen, hurt: 0, barLayout: BAR_LAYOUT });
-  drawTacticsChrome(ctx, snap, barOrigin, uiCursor);
+  drawOverlay(ctx, { snap, uiCursor, groundCursor, toScreen, hurt: 0, barLayout: BAR_LAYOUT, viewWidth });
+  drawTacticsChrome(ctx, snap, viewWidth);
 
   // ---- the weapon in hand ----
   // Drawn last so nothing covers it: it is the closest thing to the camera

@@ -108,7 +108,9 @@ one.
 - `src/client/` — everything that touches the canvas.
   - `main.ts` — the game loop, input handling, and all mutable state. Wires the
     other modules together. This is the only stateful module.
-  - `viewport.ts` — `fitToViewport`: largest 4:3 canvas for the window.
+  - `viewport.ts` — `fitToViewport`: largest 4:3 canvas for the window, used by
+    the 2D and `rpg-3d` clients. `fillViewport` beside it is `rpg-tactics`
+    only — see [the wide canvas](#wide-canvas-rpg-tactics).
   - `tilemap.ts` — the glyph grid, walls, and **collision**.
   - `minimap.ts`, `hud.ts`, `actionbar.ts` — the three draggable overlays.
   - `panel.ts` — shared chrome for those overlays (gold drag handle, backing,
@@ -537,11 +539,13 @@ exactly the points they did when the board was three squares wide.
 | | |
 |---|---|
 | **W** / **S** (or **↑** / **↓**) | walk forward / backward (relative to facing) |
-| **A** / **D** (or **←** / **→**) | turn left / right |
+| **A** / **D** (or **←** / **→**) | turn left / right — never reversed, even backing up |
 | mouse drag | look around |
 | click a hellhound | mark it; click it again to unmark |
-| **1** / **2**, or a bar square | choose sword / dagger. **Costs nothing** |
-| **Space**, or the Attack button | swing the chosen weapon at the mark |
+| **1** / **2**, or a bar square | choose sword / dagger. **Costs nothing** — the weapon squares are the one part of the bar still clickable |
+| **Space** | swing the chosen weapon at the mark |
+| **.** held | let time run for as long as you hold it |
+| **/** | turn a half-circle on the spot. Costs nothing |
 | **Tab** / **Esc** | cycle the mark / drop it |
 | double-click a body | inspect it |
 | **R** | restart the encounter |
@@ -554,11 +558,20 @@ takes three sword blows to kill, so standing and trading with both loses. That
 arithmetic is the reason the door is open — giving ground is the answer to it,
 and the corridor is somewhere to give ground *to*.
 
-**With no grid drawn, the floor has to say what the grid used to** — and it does
-it with **one mark, under the cursor rather than under the player**: a small
-white **footfall ring** at the cell a click would actually land on, which goes
-dark red when that cell is out of `MOVE_RANGE`, has somebody in it, or is not
-floor at all. The snapshot still carries the radius (`moveRange`), so what is
+**Nothing is drawn on the floor under the cursor.** The only ring left on the
+ground is the one under a *marked hellhound* (`setTargetRing`), which sits on a
+thing you chose rather than on wherever the mouse happens to be.
+- A **footfall ring** used to follow the cursor, showing where a click would
+  land and going red over an occupied spot. It is gone. So is the **movement
+  disc** around the player that preceded it, and the amber ring that once marked
+  the way out — the floor has now shed all three.
+- Delaying it was tried first: hidden while the pointer moved, shown once it
+  settled. That is not the same thing as not wanting it, and it was not what was
+  asked for. Removing it took `RING_SETTLE_MS`, `hoverDestination`,
+  `setDestination` and the ring mesh with it.
+- `groundCursor` stays, and still updates on every mousemove: it reveals the
+  names of things you sweep over, which is a label in the air rather than a mark
+  on the floor. The snapshot still carries the radius (`moveRange`), so what is
 allowed and what the ring says are the same number — but it is answered one click
 at a time. A blue **movement disc** around the player showed the whole of it at
 once and was removed: a pool of light following you around the board all game
@@ -579,6 +592,36 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
 `aggro`, `strikes`, `log`, `hint`) ride along untouched. Adding a required field to
 `GameSnapshot` means filling it in here too.
 
+- <a id="wide-canvas-rpg-tactics"></a>**The canvas is as wide as the browser.**
+  The other two front ends letterbox to a hard 4:3, which on any normal monitor
+  is a black bar down either side. This one calls `fillViewport` instead, which
+  **holds the room's height at `WORLD_HEIGHT` and lets its width follow the
+  window**. A wider window is more room, not a stretched one: units stay square,
+  the vertical scale is untouched, and the camera — whose `fov` is *vertical* —
+  simply sees further to the left and right. Shrinking the window still scales
+  everything down, exactly as before.
+  - **The fixed height is what keeps the UI honest.** Every panel is placed and
+    sized in room units, so pinning the height means the HUD is the same size on
+    any window and only the *ground between* the left-hand furniture and the
+    right-hand furniture grows.
+  - **`viewWidth` is the number everything centred or right-anchored must
+    read**, never `WORLD_WIDTH`. It is threaded from `main.ts`'s `resize` into
+    `drawOverlay` (optional, defaulting to `WORLD_WIDTH`, so `rpg-3d` is
+    untouched — the same trick as `barLayout`), into `drawTacticsChrome`, into
+    `stage.resize` for the camera aspect and `project`, and into `toWorld` for
+    converting a click back. Miss one and it lands off-screen on a wide monitor.
+  - **It never goes narrower than 4:3.** A window taller than it is wide would
+    squeeze the room until the status panel and the enemy portrait collided; past
+    that point it letterboxes top and bottom, which still fills the width.
+  - **The inspect menu is the exception, and has to be.** `LOOT_MENU_RECT` is
+    the *server's* rectangle, centred in the fixed 1200-unit room, and both
+    sides hit-test against it — so it cannot just be re-centred. It is drawn
+    translated by `centreShift(viewWidth)` and menu clicks have the same shift
+    taken back off before they go on the wire: centred on screen, while every
+    coordinate crossing the wire stays in the room the server believes in.
+  - Measured: a 2560x1440 window gives a 1600x900 room (640px more canvas than
+    the 4:3 fit), an ultrawide 3440x1440 gives 2150x900 (+1520px), and a
+    900x1400 window pins to 1200x900 and letterboxes.
 - **Positions stay in room pixels.** A square is `TILE_PX = 90` (three 3D units,
   against a 1.9-unit human and a 1.5-unit hellhound — close enough that adjacent
   figures nearly touch, which is what a 3x3 board needs to read as a fight
@@ -717,14 +760,52 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
   every move was exactly one square; now that you can stop anywhere, it would
   make a half-pace adjustment crawl.
 - **Aggro is per-hound, and permanent.** A hellhound wakes when the player comes
-  within a square of it (`isAdjacent`, checked every tick, so it fires whichever
-  side closed the gap) or when a thrown dagger finds it — **only** it; the other
-  one goes on watching. The enemy queue is built from woken hounds alone, so an
-  unprovoked one takes no turn at all and stands exactly where it started.
-  `isAdjacent` is deliberately wider than `canMelee`: something directly above
-  you is close enough to notice you but has to step aside before it can bite.
-  `snapshot.aggro` is only "has anything started"; per-hound state is on
+  within `AGGRO_RANGE` of it (`wakeAdjacent`, checked every tick, so it fires
+  whichever side closed the gap) or when a thrown dagger finds it — **only** it;
+  the other one goes on watching. An unprovoked hound patrols and takes no part.
+  `snapshot.aggro` is only "is anything hunting you"; per-hound state is on
   `enemies[].aggro`.
+  - **Nothing ever clears it.** `wakeAdjacent` is the only thing that writes
+    `aggro` and it only ever writes `true`: there is no leash, no losing your
+    scent, no distance at which one turns back. The only ways a chase ends are
+    killing them or dying.
+  - **A leash was built and taken out again** (`LEASH_RANGE`, `loseInterest`, a
+    re-seated patrol beat on giving up). Worth knowing why it is not missed:
+    once the pack could actually use doorways, the leash had almost nothing left
+    to fire on. Measured on the longest unbroken sprint the map allows — through
+    the arena door and 590px straight down the corridor — the biggest gap a
+    player can open flat out is **251px**, against a leash set at a room's width
+    of 270. The hounds run at 140px/s to the player's 200, so a chase only opens
+    60px of daylight a second, and the map is not long enough to sustain that.
+  - **The hunted eye has three states** (`drawHuntedEye` in `chrome.ts`): gone
+    when nothing has noticed you, **half-lidded** while `snapshot.nearAggro`
+    says you are inside `AGGRO_WARN_RANGE` of a *sleeping* hound, and **open**
+    once `snapshot.aggro` says anything is awake. Open wins over lidded — a
+    hound already on you is the louder fact — and the warning is about sleeping
+    hounds only, so the two are never both true.
+    - **The band is half a square** (`AGGRO_RANGE + SQUARE_PX / 2` = 157.5). A
+      full square was tried first and was worse: the arena is only three squares
+      across and the opening position is 180px from the nearest hound, so a band
+      that wide is lit before the player has moved, and a warning that is already
+      on says nothing. At half a square the board opens dark and the eye
+      *opening* is the signal. Verified live: hidden at 180px, half-lidded at
+      156px, open at 112px, in that order.
+    - The lid is drawn **over** the eye rather than the almond being drawn
+      shorter — a squashed almond reads as a small eye, a full one with its top
+      covered reads as one half closed. Lid and lid-edge are both inside the
+      clip, so they take the almond's curve at the corners; an unclipped rule
+      across the full width juts out past the points. It covers 39% of the eye,
+      which leaves enough red showing to still read as an eye rather than a shut
+      one.
+    - An open almond with a red pupil, shown while anything is hunting you
+      and gone the moment nothing is. Two quadratic curves that meet in points at
+    either corner, so it is an almond and not a squashed circle, with the pupil
+    clipped to the lids rather than sitting on top of them. It sits at the right
+    end of the row under the player's status panel: the only part of that block
+    free in every state, since the enemy portrait takes the space to the right
+    and both Resurrect and Auto-Res hang off the left under the portrait. With
+    aggro permanent it marks the *encounter* rather than tracking a chase: lit
+    from the first bark, out when the last hound dies.
   - **Waking costs no turn** — a hound roused this round moves or bites this
     round. That is an ordering constraint, not a rule: `endPlayerTurn` fixes the
     queue for the round the instant the action is committed, so **anything that
@@ -761,11 +842,46 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
   moving. It stays state rather than an event, so a repeated snapshot can't
   double-play it, and `strikeSeq` deliberately survives a restart — rolling back
   to 1 would replay a bite that never happened.
-  That turn, its lit eyes and its head-down hunting posture are the *whole* tell
-  that a hound has woken — there is deliberately **no marker on the floor for
-  aggro**. A ring under woken hounds was tried and removed: the floor already
-  carries the footfall ring and the target ring, and a third thing competing for
-  it read as clutter rather than as information.
+  That turn, its lit eyes, its head-down hunting posture and its dropped tail are
+  the *whole* tell that a hound has woken — there is deliberately **no marker on
+  the floor for aggro**. A ring under woken hounds was tried and removed: the
+  floor already carries the footfall ring and the target ring, and a third thing
+  competing for it read as clutter rather than as information.
+- **The hellhound scowls, and its tail never wags** (`buildWolf` in
+  `rpg-3d/src/client/models.ts`, animated in `entities.ts` — **shared, so this
+  lands in `rpg-3d` too**).
+  - **Eyes are red** (`WOLF_EYE`), not the enemy's accent, and the rig carries
+    that colour as `eyeColor` so the animation only decides how *bright* it is.
+    They used to be lit from the accent, which made them ember; the accent still
+    shows at the throat, so the hound reads as the orange `♞` it replaces
+    without its eyes having to be orange too.
+  - **Each eye is a red diamond, and there are no eyebrows.** An octahedron,
+    whose points sit on the axes, so the face it turns toward you is a diamond
+    with corners at top, bottom and both ends; scaled long across the head and
+    shallow into it, a lozenge rather than a gem, which is what stops it reading
+    as a jewel stuck on a wolf. Tilted (`EYE_TILT`) so the inner point drops
+    toward the snout, and head on the pair make a V aimed at the nose.
+    - It was briefly a bar with a heavy brow angled over it. The brow went with
+      the shape change: **a diamond has a point to aim**, so it does alone what
+      previously took two pieces.
+    - **Its place across the face is derived from `HEAD_BLOCK`, not chosen by
+      eye**, and that is not fussiness: a diamond is a *solid*, so the first
+      version — placed at a hand-picked z — overhung the cheek by 0.034 and its
+      outer point showed straight through the side of the head. That reads as a
+      second red diamond floating on the wolf's flank, one per eye, and it is
+      only visible from an angle the screenshots happened to catch. `eyeZ` now
+      measures back from the cheek by the diamond's own tilted reach.
+    - Measured on the built rig: the topmost vertex sits at z=0 and the endmost
+      at y=0 — extremes that do not share corners, which is exactly what makes
+      it a diamond and not a box — outer points sit 0.051 above inner ones,
+      mirrored to 1e-6, and the outer tip stops 0.008 short of the cheek while
+      still standing proud of the face. Get the slant's sign backwards and it is
+      a *sad* face, which is why the throwaway probe measured point heights
+      rather than just checking that some rotation existed.
+  - **The tail still drops into the hunt but no longer swings.** It used to
+    sweep side to side whenever the hound was *not* chasing, which is a dog
+    pleased to see you — wrong for the animal, and worst precisely when it
+    should read as dangerous. The drop stays: that is carriage, not greeting.
 - **The door ends nothing.** Stepping through it was once the encounter's second
   ending — `pendingEscape`, an `"escaped"` phase, a free turn on the way out —
   and all of that is gone. Walking onto it is an ordinary walk that hands over
@@ -786,19 +902,54 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
     `chrome.ts` is `ACTION_BAR_COLUMN` (56px squares against the strip's 44),
     and `main.ts` parks `barOrigin` under `hudOrigin + HUD_HEIGHT`, with enough
     gap to clear the Auto-Res toggle hanging below the name plate. That one
-    constant is passed to `drawOverlay`, to `squareAtPoint` for both the click
-    and the cursor, and to `attackRect`. **Nothing is duplicated to do this** —
-    it is the same shared `drawActionBar` handed a different layout.
-    **Attack sits at the foot of the stack**, squared off to the column's own
-    width, so the left edge reads as one object: five weapons, then the thing
-    that swings the one you picked. Its label and key are stacked rather than
-    side by side, because at the column's width they do not fit on one line.
-  - **Wait is gone entirely** — button, `.` binding and the `wait` message. The
-    server had already stopped handling it. Holding still *is* the pause; and
-    now that only acts spend time, **swinging at air is the pass**, which is the
-    job a Wait button would have had. It costs a turn and the pack answers it,
-    which is exactly what waiting should mean — so there is nothing left for a
-    separate button to do.
+    constant is passed to `drawOverlay` and to `squareAtPoint` for both the
+    click and the cursor. **Nothing is duplicated to do this** — it is the same
+    shared `drawActionBar` handed a different layout. The five weapon squares
+    are all that is left of the bar and the one part of it still clickable.
+  - **There are no buttons for Attack, Wait or Flip.** They had one each, under
+    the weapon column, and all three were taken out — the actions are untouched,
+    they simply have no drawn control any more. The hit-tests went with the
+    drawing: leaving the rectangles behind would have left three invisible dead
+    zones swallowing clicks meant for the floor. It also matters less than it
+    would have, since the pointer spends most of its time locked, and while
+    locked the overlay is unreachable anyway.
+  - **Flip (`/`) is a half-turn on the spot, and it costs nothing.** Tank
+    controls turn with A and D, which is a sweep — fine for aiming, slow when
+    something is at your back. This is that hold of D as one press.
+    - **It never reaches the server.** W and S are already camera-relative
+      (`sendMoveDir` reads `stage.yaw`), so turning the view *is* turning the
+      player, and A/D are free for exactly the same reason. Nothing about the
+      board changes, so there is no turn to spend and no message to send.
+    - **It snaps.** `stage.flip` moves `smoothed.yaw` along with `yaw` rather
+      than leaving it to `damp`, which would sweep the view through half a turn
+      of scenery to get there — and damping toward an angle exactly pi away has
+      no preferred direction anyway.
+    - A held W is re-sent after a flip (`flipAbout`), or the server keeps walking
+      you the old way until the key comes up.
+  - **Wait (`.`) is *held* rather than pressed.** The world runs for exactly as
+    long as the key is down and stops the instant it comes up, mid-stride. It is
+    the only control in the game that is a state rather than a moment, which is
+    why it is `{ type: "wait", held }` on the wire and a `waiting` flag on the
+    snapshot rather than an action with a duration.
+    - It was removed once, back when the world ran on its own and a button for
+      passing time meant nothing. It means something again and something
+      different: with only acts spending time there was otherwise no way to let
+      a moment go by without committing to a swing or a step — no way to let a
+      hound close the last stride, or a cooldown drain, and watch.
+    - **Every way a hold can end needs a release**: key up, mouse up anywhere on
+      the page (dragging off the button and letting go there still counts), and
+      `blur`/`visibilitychange`. Miss that last pair and tabbing away leaves the
+      world running with hellhounds eating you off-screen — exactly what the
+      pause exists to prevent.
+    - It counts as input against `AFK_TIMEOUT_MS`, refreshed per tick while
+      held, on the same reasoning that makes `keyup` count: a finger on a key is
+      a player at the keyboard. Without that a hold dies at exactly 15.0s with
+      the player still alive, which is what the throwaway probe for it measured.
+    - Holding is not safe. Beside two hellhounds it costs you about 9 HP a
+      second, and a hold from full is fatal in roughly ten. Measured live: 4.6s
+      of holding took 86 down to 44.
+    - Swinging at air still spends a turn too — that has not changed, and it is
+      still the only *discrete* way to pass one.
   - **The selected weapon is drawn in your hands**, bottom-right, in
     `viewmodel.ts` — the only part of the player's own body that survives first
     person, where the player model is hidden and nothing else on screen says
@@ -854,7 +1005,47 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
 - **The camera is first-person only.** The eye rides the player's interpolated
   position; the player's own model is hidden. WASD uses **tank controls**: W/S
   move forward/backward relative to the camera's facing, A/D turn left/right
-  (with reversed steering while walking backwards). Mouse drag looks around
+  (**A is always left and D is always right**, whichever way you are walking).
+  Steering used to invert while backing up, on the analogy of reversing a car;
+  that came out. You are not driving the player, you are being them, and someone
+  walking backwards still turns their own left when they mean left — the camera
+  here is a head, and a head does not steer like a rear axle. **The mouse looks, with no button
+  held — pointer lock, the way a shooter does it.** Moving the mouse turns the
+  view; drag right and it goes right, mouse down and it tips down.
+  - **Locking is what makes it possible**, not a flourish: read the cursor's
+    *position* and you run out of screen after a quarter turn. `movementX/Y` is
+    raw pointer travel with no window to hit the edge of.
+  - **A click into the world is what claims it** — browsers only grant a lock
+    from a user gesture, so it cannot be taken on load. **Escape gives it back**,
+    and that is the browser's own binding which cannot be intercepted, so while
+    locked Escape releases the mouse rather than dropping the mark. Tab still
+    cycles the mark, and every button in the stack has a key, so nothing is
+    unreachable while locked.
+  - **While locked there is no cursor, so every click is taken dead centre** —
+    `pickRoomPoint` uses NDC (0,0) — and the overlay is skipped entirely.
+    **Nothing marks that spot**: a crosshair was drawn there briefly and taken
+    out again. You aim with the view.
+  - **The angles come from the camera's frustum, not from pixels**, and
+    mouselook and drag go through the same `stage.look` and the same
+    pixels-to-NDC conversion — so one sensitivity governs both and they cannot
+    drift apart. A drag of a quarter of the screen means the same turn whatever
+    the window, where the old rad-per-pixel `ROTATE_SPEED` got twice as
+    sensitive when the window doubled. (It still drives the overhead orbit,
+    which nothing binds.)
+  - **`LOOK_GAIN` is the one dial**, at 4. Scale: 1 is the natural rate, where
+    moving the mouse across the screen turns you exactly one screen — 79deg at
+    this fov and aspect, slower than it sounds. At 4 that becomes 317deg; 640px
+    of travel on a 2560px window turns 90deg.
+  - **Grabbing the world was tried and dropped.** A drag briefly pinned whatever
+    was under the cursor and dragged the room by it, one to one. That is a fine
+    control for a map, the wrong one here, and *inherently* 1:1 — the moment you
+    want it faster the world can no longer stay under the cursor, so a gain and
+    a grab cannot both exist.
+  - Signs match everything else in here: yaw *decreases* to look right, pitch
+    *increases* to look down (`forward.y` is `-sin pitch`), and NDC y points up
+    while a hand moving down means looking down.
+  - Dragging still looks, for when the pointer is not locked.
+  
   (yaw + pitch). V resets the view to face the character's current direction.
   A drag past `DRAG_THRESHOLD` swallows the click that follows, or looking
   around would also order a step.
@@ -923,7 +1114,7 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
     on a paused tick for the same reason, or resuming would replay the whole
     pause as one enormous `dt`.
   - **Aggro is permanent, so combat alone would never let go.** Once a hound has
-    noticed you it is "in combat" for the rest of the encounter, which means the
+    noticed you it is in combat for the rest of the encounter, which means the
     one case an away player actually needs covering — being eaten while not at
     the keyboard — is the one case the rule above never catches. Hence
     `AFK_TIMEOUT_MS` (15s): no input of any kind for that long stops the world
@@ -988,6 +1179,22 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
     corridor exists. `clampToGrid` clamps into *each* region and keeps the
     nearest result, or a point in the masonry beside the hall would snap back to
     the arena a screen away.
+  - **A point already on floor is returned untouched by `clampPointToFloor`, and
+    that one line is what makes a doorway passable.** Its fallback clamps into a
+    box running centre-to-centre of a region's outermost cells, which stops half
+    a tile short of where those cells actually end — so one whole cell between
+    two regions belonged to neither box, and every point in it snapped back to
+    one side or the other. That was an invisible wall standing exactly in the
+    doorway. The player crossed it only by being fast enough to clear it in a
+    single step (200px/s is 10px a tick, against the 9px needed); a hellhound at
+    140px/s moves 7px, was thrown back to the threshold every tick, and **could
+    not follow you out of the room at all** — the pack would mass at the door
+    and stay there. Asking `cellAtPoint` first removes the seam rather than
+    papering over it, because a cell *is* the unit of floor: it is the same
+    question `inGrid` and `clampToGrid` already answer, and neither of those
+    ever had the gap. The cost is that an actor may stand half a tile nearer a
+    wall than before, which against a 45px-wide model that already overlaps the
+    masonry is not visible.
   - **The rules own the corridor's shape; `stage.ts` only dresses it.** The
     doorway's width, the masonry either side of it and the far chamber's place
     in the world are all derived from `HALL_REGION` / `FAR_REGION`, so what you
@@ -1004,6 +1211,13 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
     ceiling occluder and `DOOR_CAM_MARGIN` camera clamp all went with them.
     Don't reintroduce a door without reading this line — the pack's corridor
     navigation (`nextWaypoint`) assumes it can always path between regions.
+  - **The pack follows you through both doorways and down the corridor.** Its
+    route is `nextWaypoint`: from a room, walk to that room's doorway cell, and
+    once inside `TILE_PX` of it aim at the first cell of the hall; in the hall,
+    head for whichever end the player is behind. Verified on the live server —
+    both hounds go arena -> corridor -> far room and arrive 64px off the player.
+    If they ever mass at a threshold again, suspect the floor clamp above rather
+    than the waypoints.
 - Same testing convention again: the rules are pure and the simulation runs
   headless, so drive `TacticsGame` with a throwaway `node:assert` script under
   `tsx` and delete it. Typecheck and build **in `rpg-tactics/`**.

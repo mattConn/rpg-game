@@ -113,6 +113,20 @@ const FP_PITCH_START = 0.12;
 const EYE_HEIGHT = 1.8;
 
 const ROTATE_SPEED = 0.006;
+/**
+ * How far the view turns against how far the cursor moved.
+ *
+ * **1 is the natural scale** — the angle the drag actually subtends, so the
+ * world keeps pace with the hand — and that is slower than it sounds: a drag
+ * clean across the screen turns you only the width of the screen, 79deg at this
+ * fov and aspect. At 4 the same drag comes round about 317deg, near a full turn.
+ *
+ * For scale, the pixels-to-radians constant this replaced (`ROTATE_SPEED`, still
+ * used by the overhead orbit) worked out around 880deg for that drag on a wide
+ * window — and, being priced in pixels rather than in fov, got twice as
+ * sensitive whenever the window doubled. This is the one dial to turn.
+ */
+const LOOK_GAIN = 4;
 const PAN_SPEED = 0.03;
 
 /** How far a drag may push the view off whatever the camera is framing. */
@@ -121,12 +135,20 @@ const PAN_LIMIT = BOARD_W * 0.7;
 export interface Stage {
   readonly scene: THREE.Scene;
   readonly pickables: THREE.Object3D[];
-  resize(displayWidth: number, displayHeight: number, dpr: number): void;
+  /**
+   * `viewWidth` is the room width the 2D overlay is drawing at. The camera's
+   * aspect has to agree with it, or the world and the UI over it disagree about
+   * where the middle of the screen is — and `project` puts damage numbers in
+   * the wrong place.
+   */
+  resize(displayWidth: number, displayHeight: number, dpr: number, viewWidth: number): void;
   zoom(delta: number): void;
   /** Orbit the view. Deltas are in screen pixels. */
   orbit(dx: number, dy: number): void;
   /** Slide the look-at point across the floor. Deltas are in screen pixels. */
   pan(dx: number, dy: number): void;
+  /** Turn the view by a drag, given in NDC deltas. */
+  look(dNdcX: number, dNdcY: number): void;
   /**
    * Where the player is and which way they are facing, so the camera knows what
    * it should be framing — and, in first person, where it is and where it looks.
@@ -138,12 +160,12 @@ export interface Stage {
   /** The camera's horizontal angle, in radians. */
   readonly yaw: number;
   resetView(): void;
+  /** Turn the view a half-circle on the spot. */
+  flip(): void;
   update(dt: number): void;
   groundAt(ndcX: number, ndcY: number): { x: number; y: number } | null;
   pickAt(ndcX: number, ndcY: number): THREE.Object3D | null;
   project(point: THREE.Vector3): { x: number; y: number };
-  /** Where a click would put them, and whether it is allowed. */
-  setDestination(px: number | null, py: number | null, allowed: boolean): void;
   setTargetRing(px: number | null, py: number | null, color: number): void;
   animateScenery(elapsed: number): void;
   render(): void;
@@ -346,6 +368,8 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   const floorTexture = generateFloorTexture();
 
   const camera = new THREE.PerspectiveCamera(50, WORLD_WIDTH / WORLD_HEIGHT, 0.1, 300);
+  /** Room units across the canvas — kept in step with the camera by `resize`. */
+  let roomWidth = WORLD_WIDTH;
 
   // ------------------------------------------------------------------ lights
 
@@ -553,22 +577,6 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   // ------------------------------------------------------------- highlights
 
-  /**
-   * Where the cursor would put you. Small, so it reads as a footfall.
-   *
-   * With no disc around the player, this is the whole of the answer to "where
-   * can I go": it sits on the cell a click would land on, and goes dark red when
-   * that cell is out of this turn's reach or has somebody standing in it.
-   */
-  const destinationGeometry = new THREE.RingGeometry(STRIDE * 0.12, STRIDE * 0.17, 24);
-  destinationGeometry.rotateX(-Math.PI / 2);
-  const destinationMaterial = new THREE.MeshBasicMaterial({
-    color: 0xffffff, transparent: true, opacity: 0.85, depthWrite: false,
-  });
-  const destination = new THREE.Mesh(destinationGeometry, destinationMaterial);
-  destination.visible = false;
-  scene.add(destination);
-
   const targetRingGeometry = new THREE.RingGeometry(STRIDE * 0.31, STRIDE * 0.38, 32);
   targetRingGeometry.rotateX(-Math.PI / 2);
   const targetRingMaterial = new THREE.MeshBasicMaterial({
@@ -677,12 +685,15 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     scene,
     pickables,
 
-    resize(displayWidth, displayHeight, dpr) {
+    resize(displayWidth, displayHeight, dpr, viewWidth) {
       renderer.setPixelRatio(dpr);
       renderer.setSize(displayWidth, displayHeight, false);
       canvas.style.width = `${displayWidth}px`;
       canvas.style.height = `${displayHeight}px`;
-      camera.aspect = WORLD_WIDTH / WORLD_HEIGHT;
+      // The fov is *vertical*, so widening the aspect shows more of the room to
+      // either side rather than stretching what was already there.
+      roomWidth = viewWidth;
+      camera.aspect = viewWidth / WORLD_HEIGHT;
       camera.updateProjectionMatrix();
     },
 
@@ -704,6 +715,31 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       // would be the one control in here fighting the hand holding it.
       const step = dy * ROTATE_SPEED * 0.8;
       pitch = clampPitch(firstPerson ? pitch + step : pitch - step);
+    },
+
+    /**
+     * **Drag right, look right.** A delta control: the view turns *with* the
+     * hand rather than the world being dragged under it, and it turns further
+     * than the cursor travelled — `LOOK_GAIN` is the dial.
+     *
+     * The angles still come from the camera's own frustum rather than a
+     * pixels-to-radians constant: an NDC delta is a fraction of the half-screen,
+     * half the vertical fov is the angle to the top edge, and `aspect` widens
+     * that for the horizontal. So the same drag turns you the same amount at any
+     * window size or shape, which a rad-per-pixel constant cannot manage — it
+     * gets twice as sensitive when the window doubles.
+     *
+     * Signs match everything else here: yaw *decreases* to look right, pitch
+     * *increases* to look down (`forward.y` is `-sin pitch`), and NDC y points
+     * up while a hand dragging down means looking down.
+     */
+    look(dNdcX, dNdcY) {
+      const tanHalfV = Math.tan((camera.fov * Math.PI) / 360);
+      yaw -= Math.atan(dNdcX * tanHalfV * camera.aspect) * LOOK_GAIN;
+      pitch = clampPitch(pitch - Math.atan(dNdcY * tanHalfV) * LOOK_GAIN);
+      smoothed.yaw = yaw;
+      smoothed.pitch = pitch;
+      applyCamera();
     },
 
     toggleFirstPerson() {
@@ -778,6 +814,17 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       applyCamera();
     },
 
+    flip() {
+      // `smoothed.yaw` is moved with it rather than left to `damp`, which would
+      // sweep the view through everything between here and there — half a turn
+      // of scenery, and a needless one: the point of the button is to be facing
+      // the other way *now*. Snapping is also the only unambiguous half-turn;
+      // damping toward an angle exactly pi away has no preferred direction.
+      yaw += Math.PI;
+      smoothed.yaw = yaw;
+      applyCamera();
+    },
+
     update(dt) {
       smoothed.yaw = damp(smoothed.yaw, yaw, 16, dt);
       smoothed.pitch = damp(smoothed.pitch, pitch, 16, dt);
@@ -808,19 +855,11 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       // and would draw its label or its damage number somewhere arbitrary on
       // screen. Overhead nothing the overlay labels is ever behind the camera;
       // in first person your own head is, every time something bites you.
-      if (projected.z > 1) return { x: -WORLD_WIDTH, y: -WORLD_HEIGHT };
+      if (projected.z > 1) return { x: -roomWidth, y: -WORLD_HEIGHT };
       return {
-        x: ((projected.x + 1) / 2) * WORLD_WIDTH,
+        x: ((projected.x + 1) / 2) * roomWidth,
         y: ((1 - projected.y) / 2) * WORLD_HEIGHT,
       };
-    },
-
-    setDestination(px, py, allowed) {
-      destination.visible = px !== null && py !== null;
-      if (px === null || py === null) return;
-      destinationMaterial.color.setHex(allowed ? 0xffffff : 0x8a4040);
-      destinationMaterial.opacity = allowed ? 0.85 : 0.45;
-      destination.position.set(toX(px), 0.13, toZ(py));
     },
 
     setTargetRing(px, py, color) {

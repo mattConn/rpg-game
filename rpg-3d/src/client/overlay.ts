@@ -106,13 +106,22 @@ export interface OverlayParams {
    * the same layout to its own hit-testing so the two can't disagree.
    */
   barLayout?: ActionBarLayout;
+  /**
+   * How many room units wide the canvas is. Omitted is the fixed 4:3 room these
+   * two front ends have always drawn; the turn-based client fills the window
+   * instead, so its width follows the browser and only the *height* is fixed.
+   * Everything anchored to the right edge or centred has to read this rather
+   * than `WORLD_WIDTH`, or it lands off-screen on a wide window.
+   */
+  viewWidth?: number;
 }
 
 export function drawOverlay(ctx: CanvasRenderingContext2D, params: OverlayParams): void {
   const { snap, uiCursor, groundCursor, toScreen } = params;
   const barLayout = params.barLayout ?? ACTION_BAR_ROW;
+  const viewWidth = params.viewWidth ?? WORLD_WIDTH;
 
-  ctx.clearRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+  ctx.clearRect(0, 0, viewWidth, WORLD_HEIGHT);
   ctx.setLineDash([]);
 
   drawRoomLabel(ctx, snap);
@@ -163,13 +172,33 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, params: OverlayParams
   }
 
   drawActionBar(ctx, barOrigin, ACTIONS, snap.activeSlot, snap.cooldown, snap.selectedCanAttack, barLayout);
-  drawGameClock(ctx, snap.gameElapsedMs);
+  drawGameClock(ctx, snap.gameElapsedMs, viewWidth);
 
-  if (params.hurt > 0) drawHurtFlash(ctx, params.hurt);
+  if (params.hurt > 0) drawHurtFlash(ctx, params.hurt, viewWidth);
 
   // Last, so the inspect menu sits over the overlays as well as the room.
-  if (snap.inspect) drawLootMenu(ctx, snap.inspect, uiCursor);
+  //
+  // Shifted, because its rectangle is the *server's* — `LOOT_MENU_RECT` is
+  // centred in the fixed 1200-unit room, and both sides hit-test against it, so
+  // it cannot simply be re-centred on a wider canvas. Drawing it offset and
+  // taking the offset back off the cursor keeps the panel in the middle of the
+  // screen while every coordinate crossing the wire stays in the room the
+  // server believes in.
+  if (snap.inspect) {
+    const shift = centreShift(viewWidth);
+    ctx.save();
+    ctx.translate(shift, 0);
+    drawLootMenu(ctx, snap.inspect, uiCursor ? { x: uiCursor.x - shift, y: uiCursor.y } : null);
+    ctx.restore();
+  }
 }
+
+/**
+ * How far to slide furniture whose geometry is pinned to the fixed 1200-unit
+ * room so it lands centred on a canvas of `viewWidth`. Zero on the two front
+ * ends that still draw a 4:3 room.
+ */
+export const centreShift = (viewWidth: number): number => (viewWidth - WORLD_WIDTH) / 2;
 
 // ------------------------------------------------------------- world labels
 
@@ -338,10 +367,10 @@ function clockParts(gameElapsedMs: number) {
   };
 }
 
-function drawGameClock(ctx: CanvasRenderingContext2D, gameElapsedMs: number): void {
+function drawGameClock(ctx: CanvasRenderingContext2D, gameElapsedMs: number, viewWidth: number): void {
   const { day, hourOfDay, time } = clockParts(gameElapsedMs);
   const margin = 14;
-  const x = WORLD_WIDTH - margin;
+  const x = viewWidth - margin;
   const y = margin;
 
   ctx.font = CLOCK_FONT;
@@ -379,13 +408,13 @@ function drawStamp(ctx: CanvasRenderingContext2D, at: Point, gameElapsedMs: numb
  * A red bloom at the edges when something bites you. In the 2D game a hit was
  * obvious — the whole room was on screen. From behind the shoulder it isn't.
  */
-function drawHurtFlash(ctx: CanvasRenderingContext2D, strength: number): void {
+function drawHurtFlash(ctx: CanvasRenderingContext2D, strength: number, viewWidth: number): void {
   const gradient = ctx.createRadialGradient(
-    WORLD_WIDTH / 2, WORLD_HEIGHT / 2, WORLD_HEIGHT * 0.3,
-    WORLD_WIDTH / 2, WORLD_HEIGHT / 2, WORLD_WIDTH * 0.62,
+    viewWidth / 2, WORLD_HEIGHT / 2, WORLD_HEIGHT * 0.3,
+    viewWidth / 2, WORLD_HEIGHT / 2, viewWidth * 0.62,
   );
   gradient.addColorStop(0, "rgba(180, 20, 20, 0)");
   gradient.addColorStop(1, `rgba(180, 20, 20, ${(strength * 0.55).toFixed(3)})`);
   ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+  ctx.fillRect(0, 0, viewWidth, WORLD_HEIGHT);
 }

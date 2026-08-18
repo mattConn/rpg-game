@@ -249,11 +249,18 @@ class WolfActor {
       leg.rotation.z = damp(leg.rotation.z, target, 18, dt);
     });
 
-    // Hunting posture: head down, tail low, eyes lit. A patrolling hound wags.
+    // Hunting posture: head down, tail low, eyes lit.
+    //
+    // **The tail does not wag.** It used to swing side to side whenever the
+    // hound was not chasing, which is a dog being pleased to see you — wrong
+    // for the animal, and worst exactly when it should read as dangerous. It
+    // still *drops* into the hunt, because that is carriage rather than
+    // greeting, and it is one of the two tells that a hound has woken.
     const hunting = enemy.chasing;
     this.rig.tail.rotation.z = damp(this.rig.tail.rotation.z, hunting ? 0.35 : 0.95, 6, dt);
-    this.rig.tail.rotation.y = hunting ? 0 : Math.sin(elapsed * 7) * 0.3;
-    this.rig.eyeMaterial.color.copy(hunting ? this.accent : darken(this.accent, 0.55));
+    // Lit from the rig's own eye colour, not the accent: the eyes are red on
+    // every hellhound, while the accent is whatever this one happens to be.
+    this.rig.eyeMaterial.color.copy(hunting ? this.rig.eyeColor : darken(this.rig.eyeColor, 0.55));
 
     const lunge = this.lungeAt === null ? null : (now - this.lungeAt) / LUNGE_MS;
     const thrust = lunge !== null && lunge < 1 ? Math.sin(Math.PI * lunge) : 0;

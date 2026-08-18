@@ -29,6 +29,7 @@ import {
 import type { Point } from "../../../src/shared/movement.js";
 import {
   AGGRO_RANGE,
+  AGGRO_WARN_RANGE,
   ARENA_ROOM,
   ARENA_X,
   ATTACK_MS,
@@ -152,11 +153,10 @@ const ENEMY_ATTACK_INTERVAL_MS = 1500;
 const THROW_RECOVER_MS = 220;
 /**
  * No input at all for this long stops the world wherever it stands, *including*
- * mid-chase. The rule below already freezes an idle board, but permanent aggro
- * means a hound that has noticed you is "in combat" for the rest of the
- * encounter — so without this backstop the one case an away player actually
- * needs covering, being eaten while not at the keyboard, is the one case that
- * never froze.
+ * mid-chase. **Aggro is permanent**, so a hound that has noticed you is in
+ * combat for the whole encounter — which means the one case an away player
+ * actually needs covering, being eaten while not at the keyboard, is the one
+ * case nothing else catches.
  */
 const AFK_TIMEOUT_MS = 15_000;
 
@@ -273,6 +273,13 @@ export class TacticsGame {
   /** Whether the player was walking last tick — see the handover in `tick`. */
   private wasMoving = false;
 
+  /**
+   * Whether the player is holding time open with Wait. A *state* rather than an
+   * act: it opens no window and spends no fixed amount, it simply keeps
+   * `shouldRun` true for as long as the button or `.` is down.
+   */
+  private waiting = false;
+
   /** Player attack cooldown. */
   private nextAttackAt = 0;
   private cooldownSlot = 0;
@@ -322,23 +329,25 @@ export class TacticsGame {
 
     this.enemies = HOUND_STARTS.map((cell) => {
       const center = cellCenter(cell);
-      const left = clampPointToFloor({ x: center.x - PATROL_SPAN / 2, y: center.y });
-      const right = clampPointToFloor({ x: center.x + PATROL_SPAN / 2, y: center.y });
-      return {
+      const hound: Hound = {
         id: `hound-${this.nextEnemySeq++}`,
         ...HELLHOUND,
         cell: { ...cell },
         pos: center,
         ...center,
-        facing: -1 as const,
+        facing: -1,
         health: HOUND_MAX_HEALTH,
         maxHealth: HOUND_MAX_HEALTH,
         aggro: false,
         nextAttackAt: 0,
-        patrolLeft: left.x,
-        patrolRight: right.x,
-        patrolDir: -1 as const,
+        patrolLeft: center.x,
+        patrolRight: center.x,
+        patrolDir: -1,
       };
+      // Same seating a hound gets when it gives up on you, so a beat is laid
+      // out one way and not two.
+      this.seatPatrol(hound, center);
+      return hound;
     });
 
     this.corpses = [];
@@ -354,6 +363,7 @@ export class TacticsGame {
     this.nextAttackAt = 0;
     this.actingUntil = 0;
     this.wasMoving = false;
+    this.waiting = false;
     this.deathAt = 0;
     this.killCount = 0;
     this.cooldownStart = null;
@@ -379,6 +389,12 @@ export class TacticsGame {
     // because the tick that notices you have stopped is exactly the tick that
     // would otherwise freeze the world — leaving a hound stranded mid-stride,
     // and quite possibly just short of you, with the fight yet to start.
+    // Holding Wait is a player at the keyboard with a finger down, so it counts
+    // as input against the away-from-keyboard backstop — the same reasoning that
+    // makes `keyup` count. Without this, holding time open for `AFK_TIMEOUT_MS`
+    // would trip the very rule that exists to catch a player who has left.
+    if (this.waiting) this.lastInputAt = realNow;
+
     const moving = this.moveTarget !== null || Math.hypot(this.moveDir.x, this.moveDir.y) > 0.001;
     if (this.wasMoving && !moving) this.act(PACK_TURN_MS);
     this.wasMoving = moving;
@@ -799,12 +815,34 @@ export class TacticsGame {
 
   // --------------------------------------------------------- shared tick helpers
 
+  /**
+   * Wake anything the player has come close enough to notice them — per hound,
+   * so walking up to one leaves the other watching.
+   *
+   * **This is the only thing that ever writes `aggro`, and it only ever writes
+   * `true`.** A hellhound that has noticed you is hunting you for the rest of
+   * the encounter: there is no leash, no losing your scent, and no distance at
+   * which one turns back. Outrunning the pack was built and taken out again —
+   * the only ways a chase ends are killing them or dying.
+   *
+   * Worth knowing before adding anything that assumes a fight can lapse:
+   * `snapshot.aggro` goes false only when the last woken hound is dead, so the
+   * hunted eye stays lit from the first bark to the end of the encounter, and
+   * `AFK_TIMEOUT_MS` is the *only* thing that will stop a world whose player has
+   * walked away mid-chase.
+   */
   private wakeAdjacent(): void {
     const player = this.playerAt();
     for (const enemy of this.enemies) {
       if (enemy.aggro) continue;
       if (withinAggro(this.at(enemy), player)) this.wake(enemy);
     }
+  }
+
+  /** Centre a hound's patrol beat on a point, clamped to the floor it's on. */
+  private seatPatrol(enemy: Hound, at: Point): void {
+    enemy.patrolLeft = clampPointToFloor({ x: at.x - PATROL_SPAN / 2, y: at.y }).x;
+    enemy.patrolRight = clampPointToFloor({ x: at.x + PATROL_SPAN / 2, y: at.y }).x;
   }
 
   private faceThePlayer(): void {
@@ -1007,6 +1045,11 @@ export class TacticsGame {
       case "attack":
         this.attack();
         break;
+      case "wait":
+        // Deliberately does not cancel a walk: both simply keep the world
+        // running, and there is nothing to arbitrate between them.
+        this.waiting = msg.held;
+        break;
       case "move":
         this.setMoveDir(msg.dx, msg.dy);
         break;
@@ -1186,6 +1229,18 @@ export class TacticsGame {
   }
 
   /**
+   * Standing in the band outside something's wake range. Sleeping hounds only:
+   * once one is awake it is `anyAwake`'s business, and a warning about a hound
+   * already eating you would be saying the wrong thing loudly.
+   */
+  private nearlyNoticed(): boolean {
+    const player = this.playerAt();
+    return this.enemies.some(
+      (enemy) => !enemy.aggro && distance(this.at(enemy), player) <= AGGRO_WARN_RANGE,
+    );
+  }
+
+  /**
    * **Whether the world has any reason to run — which is to say, whether
    * anything is being *done*.** Only actions spend time. Standing still spends
    * none, in a fight exactly as much as out of one: the pack holds mid-stride,
@@ -1223,6 +1278,7 @@ export class TacticsGame {
     // exactly what the feature asks of them.
     if (isOver(this.phase)) return this.phase === "dead" && this.autoRestart;
 
+    if (this.waiting) return true;
     if (this.moveTarget !== null) return true;
     if (Math.hypot(this.moveDir.x, this.moveDir.y) > 0.001) return true;
 
@@ -1322,6 +1378,8 @@ export class TacticsGame {
       moveFrom: this.playerAt(),
       meleeRange: MELEE_RANGE,
       aggro: this.anyAwake(),
+      nearAggro: this.nearlyNoticed(),
+      waiting: this.waiting,
       strikes: this.strikes.map((s) => ({ ...s })),
       log: this.log.slice(-LOG_LINES),
       hint: this.paused

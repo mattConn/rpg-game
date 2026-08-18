@@ -20,9 +20,11 @@
       }
 
       /*
-       * Two stacked canvases sharing one 4:3 letterbox, exactly as in the
-       * real-time 3D client: WebGL underneath, and the 2D UI drawing in
-       * 1200x900 room units on top.
+       * Two stacked canvases, WebGL underneath and the 2D UI on top. Unlike the
+       * real-time 3D client these are *not* pinned to 4:3 — the room is a fixed
+       * 900 units tall and as many wide as the window allows, so the canvas
+       * fills the browser's width. The flex centring above is what letterboxes
+       * the leftover height on a window narrower than 4:3.
        */
       #stage {
         position: relative;
