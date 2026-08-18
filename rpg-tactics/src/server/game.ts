@@ -35,6 +35,9 @@ import {
   ATTACK_MS,
   AUTO_RESTART_DELAY_MS,
   BOARD_REGION,
+  DOOR_CLEARANCE_PX,
+  DOOR_Y,
+  type DoorId,
   FAR_REGION,
   HALL_REGION,
   HOUND_DAMAGE,
@@ -164,6 +167,9 @@ const AFK_TIMEOUT_MS = 15_000;
 const PATROL_SPEED = 50;
 /** Width of the horizontal patrol beat, in room pixels (~1.5 squares). */
 const PATROL_SPAN = SQUARE_PX * 1.5;
+/** Close enough, centred enough, and faced closely enough to operate a door. */
+const DOOR_INTERACT_RANGE = TILE_PX * 3;
+const DOOR_FACING_DOT = Math.cos(Math.PI / 3);
 
 // Corridor waypoints for cross-region navigation.
 const HALL_MID_COL = HALL_REGION.col + Math.floor(HALL_REGION.cols / 2);
@@ -241,6 +247,8 @@ export class TacticsGame {
   private damageNumbers!: DamageNumber[];
   private tombstones!: Array<{ x: number; y: number; gameElapsedMs: number }>;
   private inspectingId!: string | null;
+  /** True means open. Both doors begin shut on a fresh encounter. */
+  private doors!: Record<DoorId, boolean>;
 
   private strikes!: Array<{ enemyId: string; seq: number }>;
   private strikeSeq = 0;
@@ -357,6 +365,7 @@ export class TacticsGame {
     this.damageNumbers = [];
     this.tombstones = [];
     this.inspectingId = null;
+    this.doors = { arena: false, far: false };
     this.strikes = [];
     this.moveDir = { x: 0, y: 0 };
     this.moveTarget = null;
@@ -488,7 +497,7 @@ export class TacticsGame {
   private stepPlayer(dx: number, dy: number): boolean {
     const from = this.playerAt();
     const raw = { x: from.x + dx, y: from.y + dy };
-    const target = clampPointToFloor(raw);
+    const target = this.stopAtDoor(from, clampPointToFloor(raw));
     if (distance(from, target) < 0.01) return false;
 
     this.player.facing = facingToward(from, target, this.player.facing);
@@ -589,7 +598,10 @@ export class TacticsGame {
    * of bookkeeping twice with the rule in neither.
    */
   private place(enemy: Hound, raw: Point): Point {
-    const wanted = clampPointToFloor(raw);
+    // Hounds are much longer than the player's eye clearance. Keep their
+    // centre a full body radius from a closed slab so the muzzle and lunge rig
+    // cannot visually pass through while the simulation remains outside.
+    const wanted = this.stopAtDoor(this.at(enemy), clampPointToFloor(raw), MIN_SEPARATION);
     let target = wanted;
 
     if (this.crowds(enemy, wanted)) {
@@ -1053,6 +1065,16 @@ export class TacticsGame {
       case "move":
         this.setMoveDir(msg.dx, msg.dy);
         break;
+      case "interact": {
+        const door = this.facedDoor({ x: msg.dx, y: msg.dy });
+        if (door) this.toggleDoor(door);
+        else this.attack();
+        break;
+      }
+      case "toggleDoor":
+        if (this.canInteractWithDoor(msg.door, { x: msg.dx, y: msg.dy })) this.toggleDoor(msg.door);
+        else this.say("You need to stand in front of the door and face it.");
+        break;
       case "resurrect":
         this.restart(now);
         break;
@@ -1117,6 +1139,63 @@ export class TacticsGame {
 
     const corpse = this.corpseNear(point);
     if (corpse) this.targetId = corpse.id;
+  }
+
+  /** Stop a moving actor on its current side of each closed door plane. */
+  private stopAtDoor(from: Point, target: Point, clearance = DOOR_CLEARANCE_PX): Point {
+    for (const id of ["arena", "far"] as const) {
+      if (this.doors[id]) continue;
+      const y = DOOR_Y[id];
+      // Clamp on entry to the clearance band, not merely when the actor's
+      // centre crosses the door plane. The old crossing-only test let the eye
+      // get almost flush with the wood; at an oblique angle the camera's near
+      // plane then cut through it even though its origin remained outside.
+      if (from.y < y && target.y > y - clearance) {
+        return { x: target.x, y: y - clearance };
+      }
+      if (from.y > y && target.y < y + clearance) {
+        return { x: target.x, y: y + clearance };
+      }
+    }
+    return target;
+  }
+
+  /** A closing slab cannot materialise through an actor already in its swing. */
+  private doorwayClear(id: DoorId): boolean {
+    const y = DOOR_Y[id];
+    // The interaction stance is one camera-clearance away from the slab and is
+    // safe to close from. Only a player actually inside the thin door plane
+    // blocks it; using the full movement clearance here made Space open the
+    // door but refuse to close it again from the exact same valid position.
+    if (Math.abs(this.player.y - y) < DOOR_CLEARANCE_PX * 0.4) return false;
+    return this.enemies.every((enemy) => Math.abs(enemy.y - y) >= MIN_SEPARATION);
+  }
+
+  private canInteractWithDoor(id: DoorId, facing: Point): boolean {
+    const centre = { x: cellCenter({ col: HALL_MID_COL, row: 0 }).x, y: DOOR_Y[id] };
+    const dx = centre.x - this.player.x;
+    const dy = centre.y - this.player.y;
+    const gap = Math.hypot(dx, dy);
+    const facingLength = Math.hypot(facing.x, facing.y);
+    if (gap > DOOR_INTERACT_RANGE || gap < 0.001 || facingLength < 0.001) return false;
+    return (dx * facing.x + dy * facing.y) / (gap * facingLength) >= DOOR_FACING_DOT;
+  }
+
+  private facedDoor(facing: Point): DoorId | null {
+    for (const id of ["arena", "far"] as const) {
+      if (this.canInteractWithDoor(id, facing)) return id;
+    }
+    return null;
+  }
+
+  private toggleDoor(id: DoorId): void {
+    if (this.doors[id] && !this.doorwayClear(id)) {
+      this.say("Something is blocking the door.");
+      return;
+    }
+    this.doors[id] = !this.doors[id];
+    this.moveTarget = null;
+    this.say(`The ${id === "arena" ? "near" : "far"} door ${this.doors[id] ? "opens" : "closes"}.`);
   }
 
   private enemyNear(point: Point): Hound | null {
@@ -1301,6 +1380,7 @@ export class TacticsGame {
         };
 
     return {
+      doors: { ...this.doors },
       player: {
         x: this.player.x,
         y: this.player.y,

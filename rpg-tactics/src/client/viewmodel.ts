@@ -75,23 +75,62 @@ const REST_ALPHA = 0.85;
  * caller owns the rotation.
  */
 function drawBlade(ctx: CanvasRenderingContext2D, length: number, width: number, alpha: number): void {
+  const dagger = length < WORLD_HEIGHT * 0.5;
+  const gripLength = dagger ? 42 : 62;
+  const guardWidth = width * (dagger ? 3.2 : 4.8);
+
+  const bladeGradient = ctx.createLinearGradient(-width / 2, 0, width / 2, 0);
+  bladeGradient.addColorStop(0, `rgba(102, 110, 123, ${alpha})`);
+  bladeGradient.addColorStop(0.42, `rgba(226, 232, 239, ${alpha})`);
+  bladeGradient.addColorStop(0.58, `rgba(171, 181, 194, ${alpha})`);
+  bladeGradient.addColorStop(1, `rgba(76, 83, 96, ${alpha})`);
+
   ctx.beginPath();
   ctx.moveTo(-width * 0.5, 0);             // hilt left
-  ctx.lineTo(-width * 0.4, -length * 0.9); // taper left
+  ctx.lineTo(-width * 0.48, -length * 0.72);
+  ctx.lineTo(-width * 0.34, -length * 0.92);
   ctx.lineTo(0, -length);                  // tip
-  ctx.lineTo(width * 0.4, -length * 0.9);  // taper right
+  ctx.lineTo(width * 0.34, -length * 0.92);
+  ctx.lineTo(width * 0.48, -length * 0.72);
   ctx.lineTo(width * 0.5, 0);              // hilt right
   ctx.closePath();
-
-  ctx.fillStyle = `rgba(220, 225, 230, ${alpha})`;
+  ctx.fillStyle = bladeGradient;
   ctx.fill();
-
-  ctx.beginPath();
-  ctx.moveTo(0, -length * 0.05);
-  ctx.lineTo(0, -length);
-  ctx.strokeStyle = `rgba(255, 255, 255, ${alpha * 0.6})`;
-  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = `rgba(238, 224, 188, ${alpha * 0.8})`;
+  ctx.lineWidth = 1.6;
   ctx.stroke();
+
+  // A dark central fuller gives the broad blade depth without modern gloss.
+  ctx.beginPath();
+  ctx.moveTo(0, -length * 0.06);
+  ctx.lineTo(0, -length * 0.84);
+  ctx.strokeStyle = `rgba(52, 58, 70, ${alpha * 0.7})`;
+  ctx.lineWidth = Math.max(2, width * 0.16);
+  ctx.stroke();
+
+  // Guard, wrapped grip and pommel travel with the blade in every pose.
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(-guardWidth / 2, 3);
+  ctx.lineTo(guardWidth / 2, 3);
+  ctx.strokeStyle = `rgba(111, 88, 50, ${alpha})`;
+  ctx.lineWidth = dagger ? 7 : 9;
+  ctx.stroke();
+
+  ctx.fillStyle = `rgba(55, 35, 25, ${alpha})`;
+  ctx.fillRect(-width * 0.34, 8, width * 0.68, gripLength);
+  ctx.strokeStyle = `rgba(151, 103, 54, ${alpha * 0.85})`;
+  ctx.lineWidth = 2;
+  for (let y = 12; y < gripLength + 7; y += 8) {
+    ctx.beginPath();
+    ctx.moveTo(-width * 0.32, y);
+    ctx.lineTo(width * 0.32, y + 5);
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.arc(0, gripLength + 13, dagger ? 7 : 9, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(99, 77, 45, ${alpha})`;
+  ctx.fill();
 }
 
 /**
@@ -134,8 +173,21 @@ export interface HeldWeapon {
 export function drawHeldWeapon(ctx: CanvasRenderingContext2D, held: HeldWeapon): void {
   if (held.sinceSwing !== null && held.sinceSwing < SWING_DURATION) {
     const t = held.sinceSwing / SWING_DURATION;
+    const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    // Two faint preceding poses sell speed without turning the sword into a
+    // modern glowing trail.
+    for (const lag of [0.08, 0.04]) {
+      const ghost = Math.max(0, eased - lag);
+      poseBlade(ctx, {
+        angleDeg: SWING_START_DEG + SWING_ARC_DEG * ghost,
+        length: SWORD_LENGTH,
+        width: SWORD_WIDTH,
+        alpha: 0.1,
+        mirrored: false,
+      });
+    }
     poseBlade(ctx, {
-      angleDeg: SWING_START_DEG + SWING_ARC_DEG * t,
+      angleDeg: SWING_START_DEG + SWING_ARC_DEG * eased,
       length: SWORD_LENGTH,
       width: SWORD_WIDTH,
       // No fade: the swing exits through the bottom of the screen under its own

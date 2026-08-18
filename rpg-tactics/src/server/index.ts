@@ -23,10 +23,16 @@ const PORT = Number(process.env.PORT ?? 3300);
 const HOST = process.env.HOST ?? "0.0.0.0";
 
 const publicDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "public");
+const sharedTextureDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "public", "textures");
 
 const fastify = Fastify({ logger: true });
 
 await fastify.register(fastifyStatic, { root: publicDir });
+await fastify.register(fastifyStatic, {
+  root: sharedTextureDir,
+  prefix: "/shared-textures/",
+  decorateReply: false,
+});
 
 const game = new TacticsGame();
 

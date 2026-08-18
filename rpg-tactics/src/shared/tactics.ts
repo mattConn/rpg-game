@@ -122,6 +122,21 @@ export const FAR_REGION: Region = {
 
 export const REGIONS: readonly Region[] = [BOARD_REGION, HALL_REGION, FAR_REGION];
 
+export type DoorId = "arena" | "far";
+export type DoorStates = Record<DoorId, boolean>;
+
+/** Chamber dressing expressed in simulation pixels so doors and collision agree. */
+export const CHAMBER_MARGIN_PX = TILE_PX * 1.5;
+export const WALL_THICKNESS_PX = TILE_PX * 0.7;
+export const DOOR_Y: Record<DoorId, number> = {
+  arena: ARENA_Y + (BOARD_REGION.row + BOARD_REGION.rows) * TILE_PX
+    + CHAMBER_MARGIN_PX + WALL_THICKNESS_PX / 2,
+  far: ARENA_Y + FAR_REGION.row * TILE_PX
+    - CHAMBER_MARGIN_PX - WALL_THICKNESS_PX / 2,
+};
+/** Keep an actor's centre far enough back that its body/camera cannot enter the slab. */
+export const DOOR_CLEARANCE_PX = TILE_PX * 0.75;
+
 /** A region's middle, in room pixels — where the client frames and lights it. */
 export function regionCentre(region: Region): Point {
   return {
@@ -435,6 +450,8 @@ export function isOver(phase: Phase): boolean {
  * fields they always read; the extra ones ride along untouched.
  */
 export interface TacticsSnapshot extends GameSnapshot {
+  /** True means open. The two corridor doors are independently operated. */
+  doors: DoorStates;
   phase: Phase;
   /** 1-based, incremented when the player's turn comes back around. */
   round: number;
@@ -515,6 +532,9 @@ export type TacticsInput =
   | { type: "attack" }
   /** Walk one step in a camera-relative direction. dx/dy are a unit vector. */
   | { type: "move"; dx: number; dy: number }
+  /** Use what is directly ahead; attacks when no nearby door is being faced. */
+  | { type: "interact"; dx: number; dy: number }
+  | { type: "toggleDoor"; door: DoorId; dx: number; dy: number }
   /**
    * Hold time open. Unlike every other action this is a *state*, not a moment:
    * `held` goes true when the button or `.` goes down and false when it comes

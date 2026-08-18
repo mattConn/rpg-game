@@ -26,10 +26,16 @@ import {
   ARENA_X,
   ARENA_Y,
   BOARD_REGION,
+  CHAMBER_MARGIN_PX,
+  DOOR_CLEARANCE_PX,
+  DOOR_Y,
+  type DoorId,
+  type DoorStates,
   FAR_REGION,
   HALL_REGION,
   SQUARE_PX,
   TILE_PX,
+  WALL_THICKNESS_PX,
   cellAtPoint,
   inRegion,
   regionCentre,
@@ -49,10 +55,10 @@ const BOARD_CX = BOARD_X0 + BOARD_W / 2;
 const BOARD_CZ = BOARD_Z0 + BOARD_D / 2;
 
 /** Bare floor between the flagstones and the masonry. */
-const MARGIN = 1.5;
+const MARGIN = toX(CHAMBER_MARGIN_PX);
 
 const WALL_H = 2.8;
-const WALL_T = 0.7;
+const WALL_T = toX(WALL_THICKNESS_PX);
 
 /** A chamber: the board plus its margin of bare floor. 12x12 units. */
 const CHAMBER_W = BOARD_W + MARGIN * 2;
@@ -167,6 +173,8 @@ export interface Stage {
   pickAt(ndcX: number, ndcY: number): THREE.Object3D | null;
   project(point: THREE.Vector3): { x: number; y: number };
   setTargetRing(px: number | null, py: number | null, color: number): void;
+  doorAt(ndcX: number, ndcY: number): DoorId | null;
+  setDoors(doors: DoorStates): void;
   animateScenery(elapsed: number): void;
   render(): void;
 }
@@ -364,8 +372,17 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
    */
   scene.fog = new THREE.Fog(0x111111, BOARD_W * 0.4, BOARD_W * 1.4);
 
-  const wallTexture = generateWallTexture();
-  const floorTexture = generateFloorTexture();
+  const loadStoneTexture = (path: string) => {
+    const texture = new THREE.TextureLoader().load(path);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    return texture;
+  };
+
+  const wallTexture = loadStoneTexture("/textures/dungeon-wall-stone.png");
+  const floorTexture = loadStoneTexture("/textures/dungeon-floor-stone.png");
 
   const camera = new THREE.PerspectiveCamera(50, WORLD_WIDTH / WORLD_HEIGHT, 0.1, 300);
   /** Room units across the canvas — kept in step with the camera by `resize`. */
@@ -546,6 +563,50 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   buildChamber(BOARD_CZ, "south");
   buildChamber(FAR_CZ, "north");
 
+  // --------------------------------------------------------------- doors
+
+  const doors = new Map<DoorId, THREE.Group>();
+  let doorStates: DoorStates = { arena: false, far: false };
+  const doorPickables: THREE.Object3D[] = [];
+  const woodTexture = new THREE.TextureLoader().load("/textures/door-oak.png");
+  woodTexture.colorSpace = THREE.SRGBColorSpace;
+  woodTexture.wrapS = THREE.RepeatWrapping;
+  woodTexture.wrapT = THREE.RepeatWrapping;
+  // The source grain runs sideways; doors read as stronger, older boards when
+  // the grain climbs vertically from sill to lintel.
+  woodTexture.center.set(0.5, 0.5);
+  woodTexture.rotation = Math.PI / 2;
+  woodTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  const wood = new THREE.MeshLambertMaterial({ map: woodTexture, color: 0xb89070 });
+  const iron = new THREE.MeshLambertMaterial({ color: 0x252329, flatShading: true });
+
+  const addDoor = (id: DoorId, z: number, opensToward: 1 | -1) => {
+    const pivot = new THREE.Group();
+    pivot.position.set(archLeft, 0, z);
+    pivot.userData.openAngle = opensToward * Math.PI * 0.48;
+
+    const slab = new THREE.Mesh(new THREE.BoxGeometry(PASSAGE_W - 0.12, WALL_H - 0.18, 0.16), wood);
+    slab.position.set((PASSAGE_W - 0.12) / 2, (WALL_H - 0.18) / 2, 0);
+    slab.castShadow = true;
+    slab.receiveShadow = true;
+    slab.userData.doorId = id;
+    pivot.add(slab);
+
+    for (const y of [0.5, WALL_H - 0.65]) {
+      const strap = new THREE.Mesh(new THREE.BoxGeometry(PASSAGE_W - 0.2, 0.1, 0.2), iron);
+      strap.position.set((PASSAGE_W - 0.12) / 2, y, 0);
+      strap.userData.doorId = id;
+      pivot.add(strap);
+      doorPickables.push(strap);
+    }
+    doorPickables.push(slab);
+    doors.set(id, pivot);
+    scene.add(pivot);
+  };
+
+  addDoor("arena", BOARD_CZ + CHAMBER_D / 2 + WALL_T / 2, 1);
+  addDoor("far", FAR_CZ - CHAMBER_D / 2 - WALL_T / 2, -1);
+
   // ------------------------------------------------------------ the hallway
 
   // Between the two doorways: floor and two long walls a passage-width apart.
@@ -563,13 +624,13 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   // --------------------------------------------------------------- the arch
 
-  // A lamp in the doorway, and nothing in the way of it.
+  // A lamp in the doorway, throwing warm light over the wooden door.
   //
   // Both of the marks that used to be here are gone with the escape rule they
   // belonged to: the amber ring on the floor said "stand here and the encounter
   // ends", and the warm plane hanging in the opening was the light of somewhere
-  // else. The doorway is a door now — you walk through it — and a glowing
-  // curtain across a thing you can walk through reads as a barrier.
+  // else. The old glowing curtain is still gone: the wooden slab now makes the
+  // opening's state visible without pretending light itself is a barrier.
   const southZ = BOARD_CZ + CHAMBER_D / 2 + WALL_T / 2;
   const archLight = new THREE.PointLight(0xffb45a, 5, BOARD_W, 2);
   archLight.position.set(ARCH_CENTRE, 1.6, southZ - 0.6);
@@ -577,14 +638,27 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   // ------------------------------------------------------------- highlights
 
-  const targetRingGeometry = new THREE.RingGeometry(STRIDE * 0.31, STRIDE * 0.38, 32);
+  const targetRingGeometry = new THREE.RingGeometry(STRIDE * 0.34, STRIDE * 0.365, 40);
   targetRingGeometry.rotateX(-Math.PI / 2);
   const targetRingMaterial = new THREE.MeshBasicMaterial({
-    color: 0xffd633, transparent: true, opacity: 0.9, depthWrite: false,
+    color: 0xffd633, transparent: true, opacity: 1, depthWrite: false,
   });
   const targetRing = new THREE.Mesh(targetRingGeometry, targetRingMaterial);
   targetRing.visible = false;
   scene.add(targetRing);
+
+  const targetGlowGeometry = new THREE.RingGeometry(STRIDE * 0.315, STRIDE * 0.39, 40);
+  targetGlowGeometry.rotateX(-Math.PI / 2);
+  const targetGlowMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffd633,
+    transparent: true,
+    opacity: 0.2,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const targetGlow = new THREE.Mesh(targetGlowGeometry, targetGlowMaterial);
+  targetGlow.visible = false;
+  scene.add(targetGlow);
 
 
   // ------------------------------------------------------------------ camera
@@ -664,6 +738,18 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
         Math.sin(smoothed.pitch) * smoothed.distance,
         camZ,
       );
+      // A closed doorway is part of its wall for the camera too. Keep the
+      // orbit rig on the player's side; otherwise a low orbit can put the eye
+      // through the slab and render the room from behind it. The clearance is
+      // larger than the camera near plane, so the door cannot be clipped away.
+      const clearance = toZ(DOOR_CLEARANCE_PX);
+      for (const id of ["arena", "far"] as const) {
+        if (doorStates[id]) continue;
+        const doorZ = toZ(DOOR_Y[id]);
+        camera.position.z = eye.z < doorZ
+          ? Math.min(camera.position.z, doorZ - clearance)
+          : Math.max(camera.position.z, doorZ + clearance);
+      }
       camera.lookAt(smoothed.x, 0.9, lookZ);
     }
     // Kept fresh here rather than left to the renderer: picking and the
@@ -849,6 +935,21 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       return hits.length > 0 ? hits[0]!.object : null;
     },
 
+    doorAt(ndcX, ndcY) {
+      ndc.set(ndcX, ndcY);
+      raycaster.setFromCamera(ndc, camera);
+      const hit = raycaster.intersectObjects(doorPickables, false)[0]?.object;
+      return (hit?.userData.doorId as DoorId | undefined) ?? null;
+    },
+
+    setDoors(states) {
+      doorStates = { ...states };
+      for (const [id, door] of doors) {
+        door.rotation.y = states[id] ? door.userData.openAngle as number : 0;
+      }
+      applyCamera();
+    },
+
     project(point) {
       const projected = point.clone().project(camera);
       // A point behind the camera comes back through the projection mirrored,
@@ -865,11 +966,15 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     setTargetRing(px, py, color) {
       if (px === null || py === null) {
         targetRing.visible = false;
+        targetGlow.visible = false;
         return;
       }
       targetRing.visible = true;
+      targetGlow.visible = true;
       targetRingMaterial.color.setHex(color);
+      targetGlowMaterial.color.setHex(color);
       targetRing.position.set(toX(px), 0.14, toZ(py));
+      targetGlow.position.set(toX(px), 0.135, toZ(py));
     },
 
     animateScenery(elapsed) {

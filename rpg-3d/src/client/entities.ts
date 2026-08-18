@@ -175,9 +175,13 @@ export class PlayerActor {
  * caller folds the final angle back into range.
  */
 function swingAngle(t: number): number {
-  if (t < 0.32) return lerp(0, -2.5, t / 0.32); // up and back over the shoulder
-  if (t < 0.6) return lerp(-2.5, -4.9, (t - 0.32) / 0.28); // over the top, chopping down
-  return lerp(-4.9, -Math.PI * 2, (t - 0.6) / 0.4); // follow through to hanging
+  if (t < 0.32) return lerp(0, -2.5, ease(t / 0.32)); // up and back over the shoulder
+  if (t < 0.6) return lerp(-2.5, -4.9, ease((t - 0.32) / 0.28)); // over the top, chopping down
+  return lerp(-4.9, -Math.PI * 2, ease((t - 0.6) / 0.4)); // follow through to hanging
+}
+
+function ease(t: number): number {
+  return t * t * (3 - 2 * t);
 }
 
 function lerp(a: number, b: number, t: number): number {
@@ -272,6 +276,10 @@ class WolfActor {
     this.rig.model.position.y = (moving ? Math.abs(Math.sin(this.gait)) * 0.05 * amp : 0) - this.hurt * 0.06;
     this.rig.model.rotation.z = thrust * -0.18 + this.hurt * 0.16;
     this.rig.head.rotation.z = damp(this.rig.head.rotation.z, hunting ? -0.18 : 0, 6, dt) - thrust * 0.3;
+    // A watchful animal keeps its mouth nearly shut. Once it hunts, the jaw
+    // parts into a quiet snarl; the attack lunge drives a much wider snap.
+    const jawOpen = -(hunting ? 0.22 : 0.035) - thrust * 0.5;
+    this.rig.jaw.rotation.z = damp(this.rig.jaw.rotation.z, jawOpen, 14, dt);
   }
 
   dispose(): void {
@@ -404,7 +412,10 @@ export class Actors {
       // Tumbling about Z, which is across the blade — spinning about its own
       // long axis would just look like a drill.
       const blade = root.children[0];
-      if (blade) blade.rotation.z = elapsed * 16;
+      if (blade) {
+        blade.rotation.z = elapsed * 16;
+        blade.rotation.x = Math.sin(elapsed * 8) * 0.22;
+      }
     });
   }
 

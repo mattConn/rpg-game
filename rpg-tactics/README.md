@@ -22,7 +22,7 @@ three can run at once.
 ```
 
 **The door is a door, not a way to win.** It used to end the encounter the
-moment you stood on it; now it opens onto a corridor, and the corridor onto a
+moment you stood on it; now right-clicking opens it onto a corridor, and the corridor onto a
 second chamber the size of this one, and all of it is ground you can walk on.
 The pack comes through after you.
 
@@ -94,13 +94,15 @@ at it, and the hound standing on your shoulder is much harder to ignore.
 | click anywhere on the floor | walk there, however far it is |
 | click a hellhound | mark it — click it again to drop the mark |
 | **1** / **2** or click a slot | choose the sword / the dagger. Costs nothing |
-| **Space** or **Attack** | swing the chosen weapon at the mark |
+| **Space** | open/close a faced nearby door, otherwise swing at the mark |
+| **Attack** | swing the chosen weapon at the mark |
 | **.** or **Wait** | hold your ground |
 | **Tab** | cycle the mark |
 | double-click a body | inspect it |
 | **R** | restart the encounter |
 | **drag** | orbit the camera |
 | **right-drag** / shift-drag | pan |
+| **right-click a door** | open or close it while standing in front and facing it |
 | **wheel** | zoom |
 | **F** | first person — look out of your own eyes. **F** again to come back |
 | **V** | reset the view (and drop out of first person) |

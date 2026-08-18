@@ -190,6 +190,10 @@ function sendMoveDir(): void {
   send({ type: "move", dx, dy });
 }
 
+function facingDirection(): Point {
+  return { x: -Math.sin(stage.yaw), y: -Math.cos(stage.yaw) };
+}
+
 /** Apply held-key turning each frame. Called from the game loop. */
 function updateTankControls(dt: number): void {
   let turn = 0;
@@ -279,10 +283,19 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
-  // 1-5 choose a weapon, space swings it, r restarts, escape drops the mark.
+  // Space uses a faced door when there is one, otherwise it swings the weapon.
+  if (key === " ") {
+    if (!event.repeat) {
+      const facing = facingDirection();
+      send({ type: "interact", dx: facing.x, dy: facing.y });
+    }
+    event.preventDefault();
+    return;
+  }
+
+  // 1-5 choose a weapon, r restarts, escape drops the mark.
   if (
     (key.length === 1 && key >= "1" && key <= "5") ||
-    key === " " ||
     key === "r" ||
     key === "escape"
   ) {
@@ -328,9 +341,7 @@ function toNdc(event: MouseEvent): { x: number; y: number } {
  * the square the hellhound is standing on.
  */
 function pickRoomPoint(event: MouseEvent): Point | null {
-  // Locked, there is no cursor, so the middle of the screen is the aim and
-  // every pick is taken there. Nothing marks it — you aim with the view.
-  const ndc = looking ? { x: 0, y: 0 } : toNdc(event);
+  const ndc = toNdc(event);
   const id = entityIdOf(stage.pickAt(ndc.x, ndc.y));
 
   if (id && currSnapshot) {
@@ -354,6 +365,7 @@ let dragMoved = 0;
 let lastDragX = 0;
 let lastDragY = 0;
 let swallowNextClick = false;
+let rightDragWasMove = false;
 
 uiCanvas.addEventListener("mousedown", (event) => {
   dragButton = event.button;
@@ -361,39 +373,20 @@ uiCanvas.addEventListener("mousedown", (event) => {
   dragMoved = 0;
   lastDragX = event.clientX;
   lastDragY = event.clientY;
+  if (event.button === 2) rightDragWasMove = false;
   if (dragPanning) event.preventDefault();
 });
 
-window.addEventListener("mouseup", () => {
+window.addEventListener("mouseup", (event) => {
   // Released anywhere, not just over the button: dragging off it and letting go
   // there is still letting go.
   holdWait(false);
-  if (dragButton !== null && dragMoved > DRAG_THRESHOLD) swallowNextClick = true;
+  // Only the primary button produces the ordinary click event we need to
+  // swallow. Leaving this armed after a right-drag would eat the next real
+  // world click instead.
+  if (dragButton === 0 && dragMoved > DRAG_THRESHOLD) swallowNextClick = true;
+  if (event.button === 2) rightDragWasMove = dragMoved > DRAG_THRESHOLD;
   dragButton = null;
-});
-
-/**
- * **Mouselook, the way a shooter does it.** With the pointer locked the cursor
- * is gone and raw movement turns the view — no button to hold, and no screen
- * edge to run out of, which is the whole reason locking is needed rather than
- * just reading the cursor's position.
- *
- * The browser only grants a lock from a user gesture, so it is claimed on a
- * click into the world. Escape gives it back, and that is the browser's own
- * binding — it cannot be intercepted — so while locked, Escape releases the
- * mouse instead of dropping the mark. Tab still cycles the mark, and every
- * button in the stack has a key, so nothing is unreachable while locked.
- */
-let looking = false;
-
-document.addEventListener("pointerlockchange", () => {
-  looking = document.pointerLockElement === uiCanvas;
-  // No cursor while locked, so nothing should be drawn as hovered, and the
-  // world cursor sits dead centre — which is what a click will hit.
-  if (looking) {
-    uiCursor = null;
-    groundCursor = stage.groundAt(0, 0);
-  }
 });
 
 /** Cursor in overlay units (UI hit-testing) and on the floor (world reveals). */
@@ -402,15 +395,6 @@ let groundCursor: Point | null = null;
 
 
 uiCanvas.addEventListener("mousemove", (event) => {
-  if (looking) {
-    // `movementX/Y` is raw pointer travel, unbounded by the window. Converted
-    // to the same NDC deltas a drag sends, so both go through one scale.
-    const bounds = uiCanvas.getBoundingClientRect();
-    stage.look((event.movementX / bounds.width) * 2, -(event.movementY / bounds.height) * 2);
-    groundCursor = stage.groundAt(0, 0);
-    return;
-  }
-
   if (dragButton !== null) {
     const dx = event.clientX - lastDragX;
     const dy = event.clientY - lastDragY;
@@ -449,6 +433,16 @@ uiCanvas.addEventListener("wheel", (event) => {
 // Right-drag pans, so the browser menu must never appear on the canvas.
 uiCanvas.addEventListener("contextmenu", (event) => {
   event.preventDefault();
+  if (rightDragWasMove) {
+    rightDragWasMove = false;
+    return;
+  }
+  const ndc = toNdc(event);
+  const door = stage.doorAt(ndc.x, ndc.y);
+  if (door) {
+    const facing = facingDirection();
+    send({ type: "toggleDoor", door, dx: facing.x, dy: facing.y });
+  }
 });
 
 // ----------------------------------------------------------------- clicking
@@ -459,15 +453,7 @@ uiCanvas.addEventListener("click", (event) => {
     return;
   }
 
-  // Locked, the overlay is out of reach — there is no cursor to hit it with, so
-  // a click is always a click into the world. Every button in the stack has a
-  // key, and Escape hands the mouse back if the HUD is wanted.
-  const uiPoint = looking ? null : toOverlay(event);
-  if (uiPoint === null) {
-    const aimed = pickRoomPoint(event);
-    if (aimed) send({ type: "click", x: aimed.x, y: aimed.y });
-    return;
-  }
+  const uiPoint = toOverlay(event);
 
   // The HUD's own buttons first, exactly as in the other two clients — here
   // they restart the encounter rather than revive you mid-fight.
@@ -499,9 +485,6 @@ uiCanvas.addEventListener("click", (event) => {
 
   const point = pickRoomPoint(event);
   if (point) send({ type: "click", x: point.x, y: point.y });
-  // A click into the world is the gesture that takes the mouse — the browser
-  // will only grant a lock from one, so it cannot simply be claimed on load.
-  if (!looking) uiCanvas.requestPointerLock();
 });
 
 uiCanvas.addEventListener("dblclick", (event) => {
@@ -587,6 +570,7 @@ function frame(now: number) {
     ? snap.enemies.find((e) => e.id === snap.targetId) ?? snap.corpses.find((c) => c.id === snap.targetId)
     : undefined;
   stage.setTargetRing(targeted?.x ?? null, targeted?.y ?? null, marked ? 0xe23b3b : 0xffd633);
+  stage.setDoors(snap.doors);
 
   // The board frames itself while you are standing on it; walk out through the
   // doorway and the camera comes with you, or the corridor would be somewhere

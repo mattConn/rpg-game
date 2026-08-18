@@ -99,13 +99,32 @@ export function tintObject(root: THREE.Object3D, mix: THREE.Color, amount: numbe
 function buildBlade(length: number, width: number): THREE.Group {
   const group = new THREE.Group();
 
-  const blade = box(width, length, width * 0.35, STEEL);
-  blade.position.y = -length / 2 - 0.1;
+  const shape = new THREE.Shape();
+  shape.moveTo(-width / 2, -0.1);
+  shape.lineTo(-width * 0.48, -length * 0.73 - 0.1);
+  shape.lineTo(-width * 0.32, -length * 0.92 - 0.1);
+  shape.lineTo(0, -length - 0.1);
+  shape.lineTo(width * 0.32, -length * 0.92 - 0.1);
+  shape.lineTo(width * 0.48, -length * 0.73 - 0.1);
+  shape.lineTo(width / 2, -0.1);
+  shape.closePath();
+  const bladeGeometry = new THREE.ExtrudeGeometry(shape, {
+    depth: width * 0.28,
+    bevelEnabled: true,
+    bevelSize: width * 0.08,
+    bevelThickness: width * 0.06,
+    bevelSegments: 1,
+  });
+  bladeGeometry.translate(0, 0, -width * 0.14);
+  const blade = mesh(bladeGeometry, flatMat(STEEL));
   group.add(blade);
 
-  group.add(at(box(width * 0.5, 0.05, width * 3.4, STEEL_DARK), 0, -0.08, 0));
-  group.add(at(box(0.055, 0.2, 0.055, WOOD), 0, 0.03, 0));
-  group.add(at(mesh(new THREE.IcosahedronGeometry(0.045, 0), flatMat(STEEL_DARK)), 0, 0.14, 0));
+  const fuller = box(width * 0.16, length * 0.72, width * 0.32, STEEL_DARK);
+  group.add(at(fuller, 0, -length * 0.43, 0));
+  group.add(at(box(width * 0.42, 0.055, width * 4.2, 0x765b32), 0, -0.075, 0));
+  const grip = mesh(new THREE.CylinderGeometry(0.04, 0.045, 0.22, 8), flatMat(WOOD));
+  group.add(at(grip, 0, 0.055, 0));
+  group.add(at(mesh(new THREE.SphereGeometry(0.055, 7, 5), flatMat(0x765b32)), 0, 0.18, 0));
 
   return group;
 }
@@ -219,6 +238,8 @@ export interface WolfRig {
   /** Front-left, front-right, back-left, back-right. */
   legs: THREE.Group[];
   head: THREE.Object3D;
+  /** Hinged at the back of the muzzle; opens while hunting and snaps on a lunge. */
+  jaw: THREE.Group;
   tail: THREE.Group;
   body: THREE.Object3D;
   /** Emissive-looking eyes, brightened while the thing is hunting you. */
@@ -237,9 +258,9 @@ export interface WolfRig {
  * without turning the whole animal orange.
  */
 /** A hellhound's eyes, whatever colour the rest of it is. */
-const WOLF_EYE = 0xd81f1f;
+const WOLF_EYE = 0xff2018;
 /** How far the eye slants down toward the snout, in radians. */
-const EYE_TILT = 0.5;
+const EYE_TILT = 0.72;
 /**
  * The head block's own size. Named because the eyes are placed *against* it —
  * a diamond is a solid, and any part of one reaching past the cheek pokes out
@@ -249,38 +270,82 @@ const HEAD_BLOCK = { x: 0.34, y: 0.3, z: 0.3 };
 /** Radius of the eye octahedron before it is scaled into a lozenge. */
 const EYE_RADIUS = 0.06;
 /** Shallow into the face, short in height, long across it. */
-const EYE_SCALE = { x: 0.5, y: 0.62, z: 1.05 };
+const EYE_SCALE = { x: 0.38, y: 0.3, z: 1.22 };
+
+let wolfFurTexture: THREE.Texture | null = null;
+
+/** Shared 256px painted fur: bilinear filtering is part of the N64-era look. */
+function wolfMat(tint: THREE.ColorRepresentation): THREE.MeshLambertMaterial {
+  if (!wolfFurTexture) {
+    wolfFurTexture = new THREE.TextureLoader().load("/shared-textures/hellhound-fur.png");
+    wolfFurTexture.colorSpace = THREE.SRGBColorSpace;
+    wolfFurTexture.wrapS = THREE.RepeatWrapping;
+    wolfFurTexture.wrapT = THREE.RepeatWrapping;
+    wolfFurTexture.magFilter = THREE.LinearFilter;
+    wolfFurTexture.minFilter = THREE.LinearMipmapLinearFilter;
+  }
+  // A faint cool lift keeps the painted charcoal readable in the tactics
+  // dungeon without bleaching its black guard hairs to gray.
+  return new THREE.MeshLambertMaterial({
+    map: wolfFurTexture,
+    color: tint,
+    emissive: 0x17151a,
+    emissiveIntensity: 0.45,
+  });
+}
 
 export function buildWolf(accent: THREE.Color): WolfRig {
   const model = new THREE.Group();
 
-  const body = mesh(new THREE.CylinderGeometry(0.3, 0.27, 1.15, 6), flatMat(WOLF_FUR));
-  body.rotation.z = Math.PI / 2; // lay the barrel along X
-  body.scale.set(1, 1, 0.92);
+  const body = mesh(new THREE.SphereGeometry(0.5, 10, 7), wolfMat(0xaaa4ad));
+  body.scale.set(1.25, 0.62, 0.62);
   model.add(at(body, -0.05, 0.72, 0));
 
-  const chest = mesh(new THREE.IcosahedronGeometry(0.33, 0), flatMat(WOLF_FUR));
-  chest.scale.set(0.95, 1, 1.02);
+  const chest = mesh(new THREE.SphereGeometry(0.34, 9, 6), wolfMat(0xb9b3bc));
+  chest.scale.set(1, 1.18, 1.08);
   model.add(at(chest, 0.42, 0.74, 0));
 
-  const haunch = mesh(new THREE.IcosahedronGeometry(0.35, 0), flatMat(WOLF_FUR_DARK));
-  haunch.scale.set(0.95, 1.02, 1);
-  model.add(at(haunch, -0.5, 0.76, 0));
+  const haunch = mesh(new THREE.SphereGeometry(0.3, 9, 6), wolfMat(0x918b96));
+  haunch.scale.set(1.08, 1.06, 0.92);
+  model.add(at(haunch, -0.48, 0.73, 0));
 
-  model.add(at(box(0.66, 0.16, 0.36, WOLF_BELLY), 0, 0.46, 0)); // pale underside
+  const belly = mesh(new THREE.SphereGeometry(0.28, 8, 5), wolfMat(WOLF_BELLY));
+  belly.scale.set(1.7, 0.42, 0.8);
+  model.add(at(belly, 0, 0.48, 0));
 
-  const neck = mesh(new THREE.CylinderGeometry(0.19, 0.24, 0.36, 6), flatMat(WOLF_FUR));
+  const neck = mesh(new THREE.CylinderGeometry(0.2, 0.27, 0.4, 9), wolfMat(0xa49da8));
   neck.rotation.z = -0.75;
   model.add(at(neck, 0.66, 0.94, 0));
 
   // Head as its own group: it can then turn toward the player independently.
   const head = at(new THREE.Group(), 0.84, 1.02, 0);
-  head.add(at(box(HEAD_BLOCK.x, HEAD_BLOCK.y, HEAD_BLOCK.z, WOLF_FUR), 0, 0, 0));
-  head.add(at(box(0.3, 0.17, 0.19, WOLF_FUR), 0.26, -0.07, 0)); // snout
-  head.add(at(box(0.06, 0.07, 0.1, 0x14110f), 0.43, -0.05, 0)); // nose
+  const skull = mesh(new THREE.SphereGeometry(0.22, 9, 6), wolfMat(0xaaa4ad));
+  skull.scale.set(1.05, 0.9, 0.9);
+  head.add(skull);
+  // Broader cheeks taper into a long muzzle. Layering the forms keeps the
+  // silhouette canine instead of making the head read as one rectangular mask.
+  const cheek = mesh(new THREE.SphereGeometry(0.2, 8, 5), wolfMat(0x827b88));
+  cheek.scale.set(1.15, 0.75, 1);
+  head.add(at(cheek, 0.08, -0.04, 0));
+  // With the cylinder laid along +X, its second radius is the nose end. A
+  // strong taper gives the hound a proper wedge-shaped wolf muzzle.
+  const muzzle = mesh(new THREE.CylinderGeometry(0.145, 0.062, 0.39, 8), wolfMat(0xa39ca7));
+  muzzle.rotation.z = Math.PI / 2;
+  head.add(at(muzzle, 0.29, -0.08, 0));
+  const nose = mesh(new THREE.SphereGeometry(0.055, 8, 5), flatMat(0x120e0d));
+  nose.scale.set(0.68, 0.62, 0.9);
+  head.add(at(nose, 0.505, -0.06, 0));
+
+  const jaw = at(new THREE.Group(), 0.08, -0.12, 0);
+  const jawBone = mesh(new THREE.CylinderGeometry(0.09, 0.043, 0.37, 7), wolfMat(0x716b76));
+  jawBone.rotation.z = Math.PI / 2;
+  jaw.add(at(jawBone, 0.18, -0.035, 0));
+  const mouth = flatMat(0x1a0909);
+  jaw.add(at(mesh(new THREE.BoxGeometry(0.27, 0.018, 0.145), mouth), 0.19, 0.012, 0));
+  head.add(jaw);
 
   const ear = () => {
-    const cone = mesh(new THREE.ConeGeometry(0.09, 0.22, 4), flatMat(WOLF_FUR_DARK));
+    const cone = mesh(new THREE.ConeGeometry(0.095, 0.24, 7), wolfMat(0x77717d));
     cone.rotation.z = -0.16;
     return cone;
   };
@@ -326,6 +391,25 @@ export function buildWolf(accent: THREE.Color): WolfRig {
   };
   head.add(at(eye(1), 0.16, 0.05, eyeZ));
   head.add(at(eye(-1), 0.16, 0.05, -eyeZ));
+  const haloMaterial = new THREE.MeshBasicMaterial({
+    color: WOLF_EYE,
+    transparent: true,
+    opacity: 0.28,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const halo = (side: 1 | -1) => {
+    const glow = new THREE.Mesh(new THREE.OctahedronGeometry(EYE_RADIUS, 0), haloMaterial);
+    glow.scale.set(EYE_SCALE.x * 1.5, EYE_SCALE.y * 1.8, EYE_SCALE.z * 1.45);
+    glow.rotation.x = -side * EYE_TILT;
+    return glow;
+  };
+  head.add(at(halo(1), 0.158, 0.05, eyeZ));
+  head.add(at(halo(-1), 0.158, 0.05, -eyeZ));
+  // A tiny local light gives the eyes a soft bleed onto the muzzle instead of
+  // the hard neon glare a large emissive orb would create.
+  const eyeGlow = new THREE.PointLight(WOLF_EYE, 0.7, 1.35, 2);
+  head.add(at(eyeGlow, 0.2, 0.045, 0));
   model.add(head);
 
   // Ember throat — the one place the hellhound's colour shows on the body.
@@ -338,15 +422,22 @@ export function buildWolf(accent: THREE.Color): WolfRig {
   const legs: THREE.Group[] = [];
   for (const [x, z] of [[0.44, 0.19], [0.44, -0.19], [-0.46, 0.2], [-0.46, -0.2]] as const) {
     const joint = at(new THREE.Group(), x, 0.62, z);
-    joint.add(at(box(0.14, 0.5, 0.15, WOLF_FUR_DARK), 0, -0.25, 0));
-    joint.add(at(box(0.17, 0.12, 0.17, WOLF_FUR_DARK), 0.02, -0.56, 0)); // paw, on the floor
+    const upper = mesh(new THREE.CylinderGeometry(0.075, 0.095, 0.3, 7), wolfMat(0x77717d));
+    joint.add(at(upper, 0, -0.16, 0));
+    const lower = mesh(new THREE.CylinderGeometry(0.055, 0.07, 0.27, 7), wolfMat(0x68626d));
+    lower.rotation.z = x > 0 ? -0.1 : 0.12;
+    joint.add(at(lower, x > 0 ? 0.018 : -0.018, -0.43, 0));
+    const paw = mesh(new THREE.SphereGeometry(0.075, 7, 4), wolfMat(0x77717d));
+    paw.scale.set(1.55, 0.48, 0.82);
+    joint.add(at(paw, 0.055, -0.585, 0));
     model.add(joint);
     legs.push(joint);
   }
 
   const tail = at(new THREE.Group(), -0.78, 0.84, 0);
-  const tailMesh = mesh(new THREE.CylinderGeometry(0.09, 0.045, 0.5, 5), flatMat(WOLF_FUR_DARK));
-  tail.add(at(tailMesh, 0, 0.25, 0));
+  const tailMesh = mesh(new THREE.CylinderGeometry(0.065, 0.11, 0.55, 8), wolfMat(0x716b76));
+  tailMesh.rotation.z = -0.18;
+  tail.add(at(tailMesh, -0.045, 0.26, 0));
   tail.rotation.z = 0.95; // back and up
   model.add(tail);
 
@@ -355,7 +446,7 @@ export function buildWolf(accent: THREE.Color): WolfRig {
   // reads as unclickable at the ends — and buries the player when it closes.
   model.scale.setScalar(WOLF_SCALE);
 
-  return { model, legs, head, tail, body, eyeMaterial, eyeColor: new THREE.Color(WOLF_EYE) };
+  return { model, legs, head, jaw, tail, body, eyeMaterial, eyeColor: new THREE.Color(WOLF_EYE) };
 }
 
 // ------------------------------------------------------------------ scenery
@@ -363,9 +454,28 @@ export function buildWolf(accent: THREE.Color): WolfRig {
 /** A thrown dagger, built along +X so it can be pointed straight down its velocity. */
 export function buildDagger(): THREE.Group {
   const group = new THREE.Group();
-  group.add(at(box(0.34, 0.05, 0.05, STEEL), 0.1, 0, 0));
-  group.add(at(box(0.04, 0.16, 0.04, STEEL_DARK), -0.08, 0, 0));
-  group.add(at(box(0.14, 0.055, 0.055, WOOD), -0.16, 0, 0));
+  const shape = new THREE.Shape();
+  shape.moveTo(-0.04, -0.055);
+  shape.lineTo(0.28, -0.05);
+  shape.lineTo(0.43, 0);
+  shape.lineTo(0.28, 0.05);
+  shape.lineTo(-0.04, 0.055);
+  shape.closePath();
+  const geometry = new THREE.ExtrudeGeometry(shape, {
+    depth: 0.025,
+    bevelEnabled: true,
+    bevelSize: 0.008,
+    bevelThickness: 0.006,
+    bevelSegments: 1,
+  });
+  geometry.translate(0, 0, -0.0125);
+  group.add(mesh(geometry, flatMat(STEEL)));
+  group.add(at(box(0.25, 0.012, 0.03, STEEL_DARK), 0.1, 0, 0)); // fuller
+  group.add(at(box(0.045, 0.2, 0.045, 0x765b32), -0.065, 0, 0));
+  const grip = mesh(new THREE.CylinderGeometry(0.035, 0.04, 0.18, 8), flatMat(WOOD));
+  grip.rotation.z = Math.PI / 2;
+  group.add(at(grip, -0.17, 0, 0));
+  group.add(at(mesh(new THREE.SphereGeometry(0.045, 7, 5), flatMat(0x765b32)), -0.275, 0, 0));
   return group;
 }
 
