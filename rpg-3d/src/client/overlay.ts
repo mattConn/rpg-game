@@ -105,6 +105,10 @@ export interface OverlayParams {
   showAutoRes?: boolean;
   /** Optional front-end-specific contents for the shared five-slot bar. */
   actions?: readonly (Action | null)[];
+  viableActions?: readonly boolean[];
+  /** Allow front ends to suppress ambient edge labels without replacing the HUD. */
+  showRoomLabel?: boolean;
+  showGameClock?: boolean;
   /**
    * How to arrange the action bar. Omitted is the horizontal strip this client
    * has always drawn; the turn-based front end stacks it instead, and passes
@@ -129,7 +133,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, params: OverlayParams
   ctx.clearRect(0, 0, viewWidth, WORLD_HEIGHT);
   ctx.setLineDash([]);
 
-  drawRoomLabel(ctx, snap);
+  if (params.showRoomLabel !== false) drawRoomLabel(ctx, snap);
   drawWorldLabels(ctx, snap, groundCursor, toScreen);
   drawDamageNumbers(ctx, snap, toScreen);
 
@@ -176,8 +180,11 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, params: OverlayParams
     }
   }
 
-  drawActionBar(ctx, barOrigin, params.actions ?? ACTIONS, snap.activeSlot, snap.cooldown, snap.selectedCanAttack, barLayout);
-  drawGameClock(ctx, snap.gameElapsedMs, viewWidth);
+  drawActionBar(
+    ctx, barOrigin, params.actions ?? ACTIONS, snap.activeSlot,
+    snap.cooldown, snap.selectedCanAttack, barLayout, params.viableActions,
+  );
+  if (params.showGameClock !== false) drawGameClock(ctx, snap.gameElapsedMs, viewWidth);
 
   if (params.hurt > 0) drawHurtFlash(ctx, params.hurt, viewWidth);
 

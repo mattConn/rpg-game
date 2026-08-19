@@ -13,6 +13,8 @@
  */
 
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 
 // ------------------------------------------------------------------ palette
 
@@ -40,7 +42,7 @@ const STONE = 0x6a6a72;
  * repositioning its parts — a corpse rolling onto its side, say — has to work
  * in the same scaled units.
  */
-export const WOLF_SCALE = 0.85;
+export const WOLF_SCALE = 1.4;
 
 let adventurerTexture: THREE.Texture | null = null;
 
@@ -141,6 +143,110 @@ function buildBlade(length: number, width: number): THREE.Group {
   group.add(at(mesh(new THREE.SphereGeometry(0.055, 7, 5), flatMat(0x765b32)), 0, 0.18, 0));
 
   return group;
+}
+
+let importedSwordScene: Promise<THREE.Group> | null = null;
+
+/** Replace the player's fallback blade with the credited medieval sword asset. */
+function installImportedSword(sword: THREE.Group): void {
+  importedSwordScene ??= new Promise((resolve, reject) => {
+    new GLTFLoader().load("/shared-models/sword/scene.gltf", (gltf) => resolve(gltf.scene), undefined, reject);
+  });
+  importedSwordScene.then((source) => {
+    sword.traverse((node) => {
+      if (node instanceof THREE.Mesh) node.visible = false;
+    });
+    const visual = source.clone(true);
+    visual.scale.setScalar(0.5);
+    // The asset runs from blade tip at -X to pommel at +X. The mouth mount is
+    // itself quarter-turned, so rotating the sword into its local Y axis puts
+    // the blade horizontally across the jaws after the parent transform.
+    visual.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2);
+    visual.quaternion.premultiply(
+      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2),
+    );
+    // Its grip is around source X=0.7. Cancel that offset at half scale, then
+    // tuck the complete weapon slightly back into the mouth.
+    visual.position.set(-0.32, -0.28, 0.04);
+    visual.traverse((node) => {
+      if (node instanceof THREE.Mesh) {
+        node.castShadow = true;
+        node.receiveShadow = true;
+      }
+    });
+    sword.add(visual);
+  }).catch((error: unknown) => console.warn("Could not load imported sword model", error));
+}
+
+let importedDaggerScene: Promise<THREE.Group> | null = null;
+
+/** Install the steel dagger with its grip at the owning group's origin. */
+function installImportedDagger(dagger: THREE.Group, usage: "mouth" | "thrown"): void {
+  importedDaggerScene ??= new Promise((resolve, reject) => {
+    new GLTFLoader().load("/shared-models/dagger/scene.gltf", (gltf) => resolve(gltf.scene), undefined, reject);
+  });
+  importedDaggerScene.then((source) => {
+    dagger.traverse((node) => {
+      if (node instanceof THREE.Mesh) node.visible = false;
+    });
+    const visual = source.clone(true);
+    // FBX export units leave this asset roughly 1,300 units long. At 0.00035 it
+    // becomes a compact dagger, with the grip around +Z after
+    // the glTF root transforms have been applied.
+    visual.scale.setScalar(0.00035);
+    if (usage === "mouth") {
+      visual.rotation.x = -Math.PI / 2;
+      visual.position.set(-0.32, -0.09, 0.08);
+    } else {
+      visual.rotation.y = -Math.PI / 2;
+      visual.position.x = 0.158;
+    }
+    visual.traverse((node) => {
+      if (node instanceof THREE.Mesh) {
+        node.castShadow = true;
+        node.receiveShadow = true;
+      }
+    });
+    dagger.add(visual);
+  }).catch((error: unknown) => console.warn("Could not load imported dagger model", error));
+}
+
+let importedCrownScene: Promise<THREE.Group> | null = null;
+
+/** Fit the credited crown between the player wolf's ears and make it gold. */
+function installImportedCrown(head: THREE.Object3D): void {
+  importedCrownScene ??= new Promise((resolve, reject) => {
+    new GLTFLoader().load("/shared-models/crown/scene.gltf", (gltf) => resolve(gltf.scene), undefined, reject);
+  });
+  importedCrownScene.then((source) => {
+    const crown = source.clone(true);
+    crown.traverse((node) => {
+      if (!(node instanceof THREE.Mesh)) return;
+      node.castShadow = true;
+      node.receiveShadow = true;
+      const materials = Array.isArray(node.material) ? node.material : [node.material];
+      const gold = materials.map(() => new THREE.MeshStandardMaterial({
+        color: 0xd6a928,
+        metalness: 0.88,
+        roughness: 0.26,
+      }));
+      node.material = Array.isArray(node.material) ? gold : gold[0]!;
+    });
+
+    // The source's pivot is several metres away from the crown. Re-centre from
+    // rendered bounds and normalize its width before mounting it on the skull.
+    crown.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(crown);
+    const centre = bounds.getCenter(new THREE.Vector3());
+    const size = bounds.getSize(new THREE.Vector3());
+    crown.position.sub(centre);
+    const mount = new THREE.Group();
+    mount.scale.setScalar(0.46 / Math.max(size.x, size.z));
+    mount.position.set(-0.05, 0.06, 0);
+    mount.rotation.x = 0.12;
+    mount.add(crown);
+    head.add(mount);
+  }).catch((error: unknown) => console.warn("Could not load imported crown model", error));
 }
 
 // ------------------------------------------------------------------ the human
@@ -305,6 +411,8 @@ export interface WolfRig {
   jaw: THREE.Group;
   tail: THREE.Group;
   body: THREE.Object3D;
+  neck: THREE.Object3D;
+  ears: THREE.Object3D[];
   /** Emissive-looking eyes, brightened while the thing is hunting you. */
   eyeMaterial: THREE.MeshBasicMaterial;
   /**
@@ -357,7 +465,59 @@ function wolfMat(tint: THREE.ColorRepresentation): THREE.MeshLambertMaterial {
   });
 }
 
-export function buildWolf(accent: THREE.Color): WolfRig {
+type WolfVariant = "hellhound" | "player";
+
+let importedWolfScene: Promise<THREE.Group> | null = null;
+
+function loadImportedWolf(): Promise<THREE.Group> {
+  importedWolfScene ??= new Promise((resolve, reject) => {
+    new GLTFLoader().load("/shared-models/wolf/scene.gltf", (gltf) => resolve(gltf.scene), undefined, reject);
+  });
+  return importedWolfScene;
+}
+
+function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
+  loadImportedWolf().then((source) => {
+    const visual = cloneSkeleton(source);
+    visual.scale.setScalar(0.26);
+    visual.position.x = 0.35;
+    visual.traverse((node) => {
+      if (!(node instanceof THREE.Mesh)) return;
+      node.castShadow = true;
+      node.receiveShadow = true;
+      const materials = Array.isArray(node.material) ? node.material : [node.material];
+      const replacements = materials.map((sourceMaterial) => {
+        const material = sourceMaterial.clone();
+        const name = material.name.toLowerCase();
+        if (material instanceof THREE.MeshStandardMaterial) {
+          if (name.includes("eye")) {
+            const eye = variant === "player" ? 0xffe13b : WOLF_EYE;
+            material.color.setHex(eye);
+            material.emissive.setHex(eye);
+            material.emissiveIntensity = variant === "player" ? 1.6 : 1.25;
+            material.map = null;
+          } else if (!name.includes("mouth")) {
+            material.color.setHex(variant === "player" ? 0xf4f3ed : 0x5b515f);
+            if (variant === "player" && playerWolfTexture) material.map = playerWolfTexture;
+            material.roughness = 0.92;
+          }
+        }
+        return material;
+      });
+      node.material = Array.isArray(node.material) ? replacements : replacements[0]!;
+    });
+    if (variant === "player") {
+      const jaw = visual.getObjectByName("Jaw_9");
+      if (jaw) jaw.rotateX(-0.3);
+    }
+    rig.model.traverse((node) => {
+      if (node.userData["legacyWolf"] && node instanceof THREE.Mesh) node.visible = false;
+    });
+    rig.model.add(visual);
+  }).catch((error: unknown) => console.warn("Could not load imported wolf model", error));
+}
+
+export function buildWolf(accent: THREE.Color, variant: WolfVariant = "hellhound"): WolfRig {
   const model = new THREE.Group();
 
   const body = mesh(new THREE.SphereGeometry(0.5, 10, 7), wolfMat(0xaaa4ad));
@@ -412,8 +572,8 @@ export function buildWolf(accent: THREE.Color): WolfRig {
     cone.rotation.z = -0.16;
     return cone;
   };
-  head.add(at(ear(), -0.06, 0.22, 0.11));
-  head.add(at(ear(), -0.06, 0.22, -0.11));
+  const ears = [at(ear(), -0.06, 0.22, 0.11), at(ear(), -0.06, 0.22, -0.11)];
+  head.add(...ears);
 
   /**
    * **Angry eyes: a red diamond apiece, and nothing else.** No brow — the shape
@@ -484,15 +644,20 @@ export function buildWolf(accent: THREE.Color): WolfRig {
 
   const legs: THREE.Group[] = [];
   for (const [x, z] of [[0.44, 0.19], [0.44, -0.19], [-0.46, 0.2], [-0.46, -0.2]] as const) {
+    const hind = x < 0;
     const joint = at(new THREE.Group(), x, 0.62, z);
-    const upper = mesh(new THREE.CylinderGeometry(0.075, 0.095, 0.3, 7), wolfMat(0x77717d));
-    joint.add(at(upper, 0, -0.16, 0));
-    const lower = mesh(new THREE.CylinderGeometry(0.055, 0.07, 0.27, 7), wolfMat(0x68626d));
-    lower.rotation.z = x > 0 ? -0.1 : 0.12;
-    joint.add(at(lower, x > 0 ? 0.018 : -0.018, -0.43, 0));
-    const paw = mesh(new THREE.SphereGeometry(0.075, 7, 4), wolfMat(0x77717d));
-    paw.scale.set(1.55, 0.48, 0.82);
-    joint.add(at(paw, 0.055, -0.585, 0));
+    const angle = hind ? -0.26 : 0.18;
+    const length = 0.52;
+    const leg = mesh(
+      new THREE.CylinderGeometry(0.055, 0.085, length, 7),
+      wolfMat(hind ? 0x716b76 : 0x77717d),
+    );
+    leg.rotation.z = angle;
+    joint.add(at(leg, Math.sin(angle) * length * 0.5, -length * 0.5, 0));
+
+    const paw = mesh(new THREE.SphereGeometry(0.065, 7, 4), wolfMat(0x77717d));
+    paw.scale.set(1.45, 0.45, 0.86);
+    joint.add(at(paw, Math.sin(angle) * length + 0.035, -0.56, 0));
     model.add(joint);
     legs.push(joint);
   }
@@ -509,7 +674,86 @@ export function buildWolf(accent: THREE.Color): WolfRig {
   // reads as unclickable at the ends — and buries the player when it closes.
   model.scale.setScalar(WOLF_SCALE);
 
-  return { model, legs, head, jaw, tail, body, eyeMaterial, eyeColor: new THREE.Color(WOLF_EYE) };
+  const rig: WolfRig = {
+    model, legs, head, jaw, tail, body, neck, ears,
+    eyeMaterial,
+    eyeColor: new THREE.Color(WOLF_EYE),
+  };
+  model.traverse((node) => {
+    if (node instanceof THREE.Mesh) node.userData["legacyWolf"] = true;
+  });
+  installImportedWolf(rig, variant);
+  return rig;
+}
+
+export interface PlayerWolfRig extends WolfRig {
+  sword: THREE.Group;
+  dagger: THREE.Group;
+}
+
+let playerWolfTexture: THREE.Texture | null = null;
+
+/** White, yellow-eyed player wolf with a blade clenched sideways by its hilt. */
+export function buildPlayerWolf(): PlayerWolfRig {
+  // Keep the hellhound's throat accent neutral on the player; its only colored
+  // light should come from the eye meshes themselves.
+  const rig = buildWolf(new THREE.Color(0xf1f0e9), "player");
+  const eyeYellow = new THREE.Color(0xffe13b);
+  if (!playerWolfTexture) {
+    playerWolfTexture = new THREE.TextureLoader().load("/shared-textures/player-wolf-white-fur.png");
+    playerWolfTexture.colorSpace = THREE.SRGBColorSpace;
+    playerWolfTexture.wrapS = THREE.RepeatWrapping;
+    playerWolfTexture.wrapT = THREE.RepeatWrapping;
+    playerWolfTexture.magFilter = THREE.LinearFilter;
+    playerWolfTexture.minFilter = THREE.LinearMipmapLinearFilter;
+  }
+
+  rig.model.traverse((node) => {
+    if (!(node instanceof THREE.Mesh)) return;
+    const material = node.material;
+    if (material instanceof THREE.MeshLambertMaterial && material.map) {
+      const whiteFur = material.clone();
+      whiteFur.map = playerWolfTexture;
+      whiteFur.color.setHex(0xf1f0e9);
+      whiteFur.emissive.setHex(0x24272c);
+      whiteFur.emissiveIntensity = 0.2;
+      node.material = whiteFur;
+    }
+  });
+
+  rig.eyeMaterial.color.copy(eyeYellow);
+  rig.eyeColor.copy(eyeYellow);
+  rig.head.traverse((node) => {
+    // The point light washed across the muzzle and made the nose appear to
+    // glow. The emissive diamonds and their tight halos provide enough light.
+    if (node instanceof THREE.PointLight) node.visible = false;
+    if (node instanceof THREE.Mesh && node.material instanceof THREE.MeshBasicMaterial &&
+        node.material.color.getHex() === WOLF_EYE) node.material.color.copy(eyeYellow);
+  });
+  // The stock hellhound neck is deliberately heavy. Narrow it on the player
+  // and pull it slightly into the shoulders so it reads as a continuous neck
+  // instead of a bulky collar around the head.
+  rig.neck.scale.set(0.7, 0.92, 0.7);
+  rig.neck.position.x -= 0.035;
+  rig.neck.position.y -= 0.025;
+  for (const ear of rig.ears) {
+    // Keep the longer player silhouette without turning the ears into broad
+    // cones. The local Y axis is the cone's length; X/Z control thickness.
+    ear.scale.set(0.68, 1.42, 0.68);
+    ear.rotation.z = 0.5;
+  }
+
+  const weaponMount = at(new THREE.Group(), 0.43, -0.13, 0);
+  weaponMount.rotation.x = Math.PI / 2;
+  rig.head.add(weaponMount);
+  const sword = buildBlade(0.72, 0.09);
+  const dagger = buildBlade(0.4, 0.07);
+  dagger.visible = false;
+  weaponMount.add(sword, dagger);
+  installImportedSword(sword);
+  installImportedDagger(dagger, "mouth");
+  installImportedCrown(rig.head);
+  return { ...rig, sword, dagger };
 }
 
 // ------------------------------------------------------------------ scenery
@@ -539,6 +783,7 @@ export function buildDagger(): THREE.Group {
   grip.rotation.z = Math.PI / 2;
   group.add(at(grip, -0.17, 0, 0));
   group.add(at(mesh(new THREE.SphereGeometry(0.045, 7, 5), flatMat(0x765b32)), -0.275, 0, 0));
+  installImportedDagger(group, "thrown");
   return group;
 }
 

@@ -831,7 +831,9 @@ export class TacticsGame {
     offset = Math.max(-APPROACH_HALF_ANGLE, Math.min(APPROACH_HALF_ANGLE, offset));
 
     const theta = axis + offset;
-    const reach = MELEE_RANGE * 0.7;
+    // Stop near the outside of the enlarged reach circle. The old 70% target
+    // put the now-larger wolf meshes inside one another before either attacked.
+    const reach = MELEE_RANGE * 0.82;
     return { x: player.x + Math.cos(theta) * reach, y: player.y + Math.sin(theta) * reach };
   }
 
@@ -1074,6 +1076,18 @@ export class TacticsGame {
       case "slot":
         this.selectSlot(msg.index);
         break;
+      case "useSlot": {
+        const action = TACTICS_ACTIONS[msg.index];
+        if (action?.kind === "interact") {
+          this.interactWithTargetDoor();
+        } else if (action?.kind === "melee" || action?.kind === "ranged") {
+          const selected = this.activeSlot;
+          this.activeSlot = msg.index;
+          this.attack();
+          this.activeSlot = selected;
+        }
+        break;
+      }
       case "attack":
         this.attack();
         break;
@@ -1091,10 +1105,8 @@ export class TacticsGame {
       case "interact": {
         if (TACTICS_ACTIONS[this.activeSlot]?.kind !== "interact") {
           this.attack();
-        } else if (this.targetDoor && this.canInteractWithDoor(this.targetDoor, this.playerHeading)) {
-          this.toggleDoor(this.targetDoor);
         } else {
-          this.say("Target a nearby door and face it to interact.");
+          this.interactWithTargetDoor();
         }
         break;
       }
@@ -1175,6 +1187,7 @@ export class TacticsGame {
     // Click-to-move: walk to the clicked point (no grid snapping).
     const cell = cellAtPoint(point);
     if (cell && inGrid(cell)) {
+      this.targetDoor = null;
       this.moveTarget = { ...point };
       return;
     }
@@ -1258,6 +1271,14 @@ export class TacticsGame {
     this.say(`The ${id === "arena" ? "near" : "far"} door ${this.doors[id] ? "opens" : "closes"}.`);
   }
 
+  private interactWithTargetDoor(): void {
+    if (this.targetDoor && this.canInteractWithDoor(this.targetDoor, this.playerHeading)) {
+      this.toggleDoor(this.targetDoor);
+    } else {
+      this.say("Target a nearby door and face it to interact.");
+    }
+  }
+
   private enemyNear(point: Point): Hound | null {
     let best: Hound | null = null;
     let bestGap = MIN_SEPARATION;
@@ -1334,7 +1355,11 @@ export class TacticsGame {
   }
 
   private selectedCanAttack(): boolean {
-    const action = TACTICS_ACTIONS[this.activeSlot];
+    return this.actionViable(this.activeSlot);
+  }
+
+  private actionViable(index: number): boolean {
+    const action = TACTICS_ACTIONS[index];
     if (action?.kind === "interact") {
       return this.targetDoor !== null && this.canInteractWithDoor(this.targetDoor, this.playerHeading);
     }
@@ -1516,6 +1541,7 @@ export class TacticsGame {
       activeSlot: this.activeSlot,
       cooldown,
       selectedCanAttack: this.selectedCanAttack(),
+      viableActions: TACTICS_ACTIONS.map((_, index) => this.actionViable(index)),
       moveTarget: this.moveTarget ? { ...this.moveTarget } : null,
       pathCells: [],
       gameElapsedMs: this.gameElapsedMs,

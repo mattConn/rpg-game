@@ -295,14 +295,18 @@ export const HOUND_STARTS: readonly Cell[] = [squareCentre(2, 0), squareCentre(2
  */
 export const MOVE_RANGE = SQUARE_PX;
 
-/** How close a blade or a bite has to be. */
-export const MELEE_RANGE = SQUARE_PX;
+/**
+ * How close a blade or bite has to be. The rendered wolves are deliberately
+ * larger than one original board square now, so combat needs to resolve before
+ * their visible bodies overlap.
+ */
+export const MELEE_RANGE = SQUARE_PX * 1.5;
 
 /**
  * How close you have to come before a hellhound notices you — deliberately a
  * little wider than its reach, so a hound wakes a moment before it can bite.
  */
-export const AGGRO_RANGE = SQUARE_PX * 1.25;
+export const AGGRO_RANGE = MELEE_RANGE * 1.2;
 
 /**
  * How close you have to come before the game warns you that you are *about* to
@@ -462,6 +466,8 @@ export interface TacticsSnapshot extends GameSnapshot {
   /** True means open. The two corridor doors are independently operated. */
   doors: DoorStates;
   targetDoor: DoorId | null;
+  /** One server-authoritative usability flag for each action-bar slot. */
+  viableActions: boolean[];
   phase: Phase;
   /** 1-based, incremented when the player's turn comes back around. */
   round: number;
@@ -540,6 +546,8 @@ export type TacticsInput =
   | { type: "restart" }
   /** Swing the selected weapon at the mark, landing or not. */
   | { type: "attack" }
+  /** Activate a bar slot immediately without changing keyboard selection. */
+  | { type: "useSlot"; index: number }
   /** Move along dx/dy; reverse movement can explicitly preserve facing. */
   | { type: "move"; dx: number; dy: number; turn?: boolean }
   | { type: "face"; dx: number; dy: number }

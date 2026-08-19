@@ -24,6 +24,7 @@ const HOST = process.env.HOST ?? "0.0.0.0";
 
 const publicDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "public");
 const sharedTextureDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "public", "textures");
+const sharedModelDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "public", "models");
 
 const fastify = Fastify({ logger: true });
 
@@ -31,6 +32,11 @@ await fastify.register(fastifyStatic, { root: publicDir });
 await fastify.register(fastifyStatic, {
   root: sharedTextureDir,
   prefix: "/shared-textures/",
+  decorateReply: false,
+});
+await fastify.register(fastifyStatic, {
+  root: sharedModelDir,
+  prefix: "/shared-models/",
   decorateReply: false,
 });
 

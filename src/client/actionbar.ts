@@ -26,6 +26,13 @@ export interface ActionBarLayout {
   /** Edge of one square, in room units. The icons are sized from this. */
   readonly square: number;
   readonly gap: number;
+  readonly draggable?: boolean;
+}
+
+const HANDLE_SIZE = 18;
+
+export function actionBarHandleRect(origin: Point) {
+  return { x: origin.x - HANDLE_SIZE / 2, y: origin.y - HANDLE_SIZE / 2, width: HANDLE_SIZE, height: HANDLE_SIZE };
 }
 
 /** The original: a horizontal strip of 44px squares. */
@@ -272,6 +279,7 @@ export function drawActionBar(
   /** Whether the selected attack is in range of a live target right now. */
   canAttack = false,
   layout: ActionBarLayout = ACTION_BAR_ROW,
+  viableSlots?: readonly boolean[],
 ): void {
   ctx.setLineDash([]);
   const size = actionBarSize(layout);
@@ -292,8 +300,9 @@ export function drawActionBar(
     // gold when it's in range of a live target, white when it isn't. The rest
     // stay dim.
     const active = i === activeIndex;
-    ctx.strokeStyle = active ? (canAttack ? "#ffd633" : "#ffffff") : "#444444";
-    ctx.lineWidth = active ? 2 : 1;
+    const viable = viableSlots?.[i] ?? (active && canAttack);
+    ctx.strokeStyle = viable ? "#ffd633" : active ? "#ffffff" : "#444444";
+    ctx.lineWidth = viable || active ? 2 : 1;
     ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.width - 1, r.height - 1);
 
     const action = actions[i];
@@ -346,4 +355,18 @@ export function drawActionBar(
     }
   }
 
+  if (layout.draggable) {
+    const handle = actionBarHandleRect(origin);
+    ctx.fillStyle = "#242424";
+    ctx.fillRect(handle.x, handle.y, handle.width, handle.height);
+    ctx.strokeStyle = "#777777";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(handle.x + 0.5, handle.y + 0.5, handle.width - 1, handle.height - 1);
+    ctx.fillStyle = "#a6a6a6";
+    for (const offset of [5, 9, 13]) {
+      ctx.beginPath();
+      ctx.arc(handle.x + offset, handle.y + offset, 1.25, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
 }

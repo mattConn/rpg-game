@@ -21,13 +21,12 @@ import * as THREE from "three";
 import { WORLD_HEIGHT, WORLD_WIDTH } from "../../../src/shared/constants.js";
 import { LOOT_CLOSE_RECT, hitsRect, lootMenuProxyPoint } from "../../../src/shared/loot.js";
 import type { Point } from "../../../src/shared/movement.js";
-import { squareAtPoint } from "../../../src/client/actionbar.js";
-import { HUD_HEIGHT } from "../../../src/client/hud.js";
+import { actionBarHandleRect, actionBarSize, squareAtPoint } from "../../../src/client/actionbar.js";
 import { DEFAULT_CURSOR } from "../../../src/client/cursors.js";
 import { SERVER_TICK_MS, renderFraction, smoothInterval } from "../../../src/client/interpolation.js";
 import { fillViewport } from "../../../src/client/viewport.js";
 import { Actors, applyCues, entityIdOf } from "../../../rpg-3d/src/client/entities.js";
-import { barOrigin, centreShift, drawOverlay, hits, hudOrigin, resurrectRect } from "../../../rpg-3d/src/client/overlay.js";
+import { barOrigin, centreShift, drawOverlay, hits, resurrectRect } from "../../../rpg-3d/src/client/overlay.js";
 import { interpolateSnapshot } from "../../../rpg-3d/src/client/playback.js";
 import { toX, toZ } from "../../../rpg-3d/src/client/world.js";
 import {
@@ -49,21 +48,13 @@ const ctx = uiCanvas.getContext("2d")!;
 const stage = createStage(sceneCanvas);
 
 /**
- * The bar is stacked down the left, under the player's status panel. Far enough
- * below it to clear the Auto-Res toggle that hangs beneath the name plate, which
- * the HUD's own height does not account for.
- */
-const BAR_TOP_GAP = 46;
-barOrigin.x = hudOrigin.x;
-barOrigin.y = hudOrigin.y + HUD_HEIGHT + BAR_TOP_GAP;
-
-/**
  * How many room units wide the canvas currently is. The room's *height* is
  * always `WORLD_HEIGHT`; its width follows the browser, so this is the number
  * anything centred or right-anchored has to be placed against — and the number
  * a screen coordinate is converted back through.
  */
 let viewWidth = WORLD_WIDTH;
+let barPositioned = false;
 
 function resize() {
   const fit = fillViewport(window.innerWidth, window.innerHeight, window.devicePixelRatio || 1);
@@ -76,6 +67,16 @@ function resize() {
   // Square room units: both axes get the same scale, since roomWidth was
   // derived from the height and the aspect in the first place.
   ctx.setTransform(fit.pixelWidth / viewWidth, 0, 0, fit.pixelHeight / WORLD_HEIGHT, 0, 0);
+
+  const barSize = actionBarSize(BAR_LAYOUT);
+  if (!barPositioned) {
+    barOrigin.x = (viewWidth - barSize.width) / 2;
+    barOrigin.y = (WORLD_HEIGHT - barSize.height) / 2 - 105;
+    barPositioned = true;
+  } else {
+    barOrigin.x = Math.max(9, Math.min(viewWidth - barSize.width, barOrigin.x));
+    barOrigin.y = Math.max(9, Math.min(WORLD_HEIGHT - barSize.height, barOrigin.y));
+  }
 
   stage.resize(fit.displayWidth, fit.displayHeight, window.devicePixelRatio || 1, viewWidth);
 }
@@ -375,8 +376,17 @@ let lastDragX = 0;
 let lastDragY = 0;
 let swallowNextClick = false;
 let rightDragWasMove = false;
+let barDragging = false;
 
 uiCanvas.addEventListener("mousedown", (event) => {
+  if (event.button === 0 && hits(actionBarHandleRect(barOrigin), toOverlay(event))) {
+    barDragging = true;
+    dragMoved = 0;
+    lastDragX = event.clientX;
+    lastDragY = event.clientY;
+    event.preventDefault();
+    return;
+  }
   dragButton = event.button;
   dragPanning = event.button === 2 || event.button === 1 || event.shiftKey;
   dragMoved = 0;
@@ -390,6 +400,11 @@ window.addEventListener("mouseup", (event) => {
   // Released anywhere, not just over the button: dragging off it and letting go
   // there is still letting go.
   holdWait(false);
+  if (barDragging) {
+    barDragging = false;
+    swallowNextClick = true;
+    return;
+  }
   // Only the primary button produces the ordinary click event we need to
   // swallow. Leaving this armed after a right-drag would eat the next real
   // world click instead.
@@ -407,7 +422,17 @@ const PLAYER_CURSOR_ID = "__player";
 
 
 uiCanvas.addEventListener("mousemove", (event) => {
-  if (dragButton !== null) {
+  if (barDragging) {
+    const bounds = uiCanvas.getBoundingClientRect();
+    const dx = (event.clientX - lastDragX) * (viewWidth / bounds.width);
+    const dy = (event.clientY - lastDragY) * (WORLD_HEIGHT / bounds.height);
+    lastDragX = event.clientX;
+    lastDragY = event.clientY;
+    dragMoved += Math.abs(dx) + Math.abs(dy);
+    const size = actionBarSize(BAR_LAYOUT);
+    barOrigin.x = Math.max(9, Math.min(viewWidth - size.width, barOrigin.x + dx));
+    barOrigin.y = Math.max(9, Math.min(WORLD_HEIGHT - size.height, barOrigin.y + dy));
+  } else if (dragButton !== null) {
     const dx = event.clientX - lastDragX;
     const dy = event.clientY - lastDragY;
     lastDragX = event.clientX;
@@ -465,6 +490,8 @@ uiCanvas.addEventListener("click", (event) => {
   const uiPoint = toOverlay(event);
   const ndc = toNdc(event);
 
+  if (hits(actionBarHandleRect(barOrigin), uiPoint)) return;
+
   // The HUD's own buttons first, exactly as in the other two clients — here
   // they restart the encounter rather than revive you mid-fight.
   if (currSnapshot?.dead && hits(resurrectRect(ctx), uiPoint)) {
@@ -474,7 +501,7 @@ uiCanvas.addEventListener("click", (event) => {
 
   const slot = squareAtPoint(barOrigin, uiPoint, BAR_LAYOUT);
   if (slot !== null) {
-    if (TACTICS_ACTIONS[slot]) send({ type: "slot", index: slot });
+    if (TACTICS_ACTIONS[slot]) send({ type: "useSlot", index: slot });
     return;
   }
 
@@ -508,8 +535,10 @@ let appliedCursor = DEFAULT_CURSOR;
 
 function updateCursorStyle(snap: TacticsSnapshot) {
   let wanted = DEFAULT_CURSOR;
-  if (uiCursor) {
-    if (snap.inspect && hitsRect(LOOT_CLOSE_RECT, { x: uiCursor.x - centreShift(viewWidth), y: uiCursor.y })) wanted = "pointer";
+  if (barDragging) wanted = "grabbing";
+  else if (uiCursor) {
+    if (hits(actionBarHandleRect(barOrigin), uiCursor)) wanted = "grab";
+    else if (snap.inspect && hitsRect(LOOT_CLOSE_RECT, { x: uiCursor.x - centreShift(viewWidth), y: uiCursor.y })) wanted = "pointer";
     else if (snap.dead && hits(resurrectRect(ctx), uiCursor)) wanted = "pointer";
     else if (squareAtPoint(barOrigin, uiCursor, BAR_LAYOUT) !== null) wanted = "pointer";
   }
@@ -550,13 +579,15 @@ function frame(now: number) {
     : currSnapshot;
 
   if (!actors) {
-    actors = new Actors(stage.scene, stage.pickables, snap.player.color);
+    actors = new Actors(stage.scene, stage.pickables, snap.player.color, true);
     actors.player.root.userData["entityId"] = PLAYER_CURSOR_ID;
     stage.pickables.push(actors.player.root);
   }
 
-  const activeKind = TACTICS_ACTIONS[snap.activeSlot]?.kind;
-  actors.player.setWeapon(activeKind === "ranged" ? "ranged" : "melee");
+  const actingKind = snap.cooldown && snap.cooldown.remainingMs > 0
+    ? TACTICS_ACTIONS[snap.cooldown.slot]?.kind
+    : TACTICS_ACTIONS[snap.activeSlot]?.kind;
+  actors.player.setWeapon(actingKind === "ranged" ? "ranged" : "melee");
 
   // Both sides square up to what they are fighting. On a board where reach is a
   // rule, "who is looking at whom" is worth reading at a glance.
@@ -612,12 +643,14 @@ function frame(now: number) {
   drawOverlay(ctx, {
     snap, uiCursor, groundCursor, toScreen, hurt,
     showAutoRes: false,
+    showRoomLabel: false,
+    showGameClock: false,
     actions: TACTICS_ACTIONS,
+    viableActions: snap.viableActions,
     barLayout: BAR_LAYOUT,
     viewWidth,
   });
-  const hoveredActionSlot = uiCursor ? squareAtPoint(barOrigin, uiCursor, BAR_LAYOUT) : null;
-  drawTacticsChrome(ctx, snap, viewWidth, hoveredActionSlot);
+  drawTacticsChrome(ctx, snap, viewWidth);
 
   // ---- the weapon in hand ----
   // Drawn last so nothing covers it: it is the closest thing to the camera

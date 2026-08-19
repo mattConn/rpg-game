@@ -13,16 +13,19 @@
 
 import * as THREE from "three";
 
+import { ACTIONS, type AttackKind } from "../../../src/shared/actions.js";
 import type { GameSnapshot } from "../../../src/shared/protocol.js";
 import {
   buildDagger,
   buildHuman,
+  buildPlayerWolf,
   buildTombstone,
   buildWolf,
   disposeObject,
   WOLF_SCALE,
   tintObject,
   type HumanRig,
+  type PlayerWolfRig,
   type WolfRig,
 } from "./models.js";
 import { angleDelta, damp, darken, normalizeAngle, parseColor, toX, toZ, yawFor } from "./world.js";
@@ -86,7 +89,7 @@ export class PlayerActor {
   }
 
   /** Start the swing animation for the weapon that just fired. */
-  swing(now: number): void {
+  swing(now: number, _kind: AttackKind = "melee"): void {
     this.swingAt = now;
   }
 
@@ -162,6 +165,73 @@ export class PlayerActor {
   }
 }
 
+class PlayerWolfActor {
+  readonly root = new THREE.Group();
+  private readonly rig: PlayerWolfRig;
+  private yaw = 0;
+  private gait = 0;
+  private lastX: number | null = null;
+  private lastY: number | null = null;
+  private attackAt: number | null = null;
+  private attackKind: AttackKind = "melee";
+  private fall = 0;
+
+  constructor() {
+    this.rig = buildPlayerWolf();
+    this.root.add(this.rig.model);
+  }
+
+  swing(now: number, kind: AttackKind = "melee"): void {
+    this.attackAt = now;
+    this.attackKind = kind;
+  }
+
+  setWeapon(kind: AttackKind): void {
+    this.rig.sword.visible = kind === "melee";
+    this.rig.dagger.visible = kind === "ranged";
+  }
+
+  update(snap: GameSnapshot, _facePoint: { x: number; y: number } | null, dt: number, now: number, elapsed: number): void {
+    const { x, y } = snap.player;
+    this.root.position.set(toX(x), 0, toZ(y));
+    const dx = this.lastX === null ? 0 : x - this.lastX;
+    const dy = this.lastY === null ? 0 : y - this.lastY;
+    this.lastX = x;
+    this.lastY = y;
+    const speed = dt > 0 ? Math.hypot(dx, dy) / dt : 0;
+    const moving = speed > MOVING_EPSILON && !snap.dead;
+    const heading = (snap as GameSnapshot & { playerHeading?: { x: number; y: number } }).playerHeading;
+    const wanted = heading ? yawFor(heading.x, heading.y) : moving ? yawFor(dx, dy) : yawFor(snap.player.facing, 0);
+    this.yaw += angleDelta(this.yaw, wanted) * (1 - Math.exp(-12 * dt));
+
+    const attack = this.attackAt === null ? null : (now - this.attackAt) / SWING_MS;
+    const activeAttack = attack !== null && attack < 1;
+    const easedAttack = activeAttack ? ease(Math.max(0, attack)) : 0;
+    const spin = activeAttack
+      ? this.attackKind === "melee"
+        ? easedAttack * -Math.PI * 2
+        // Dagger sweep: snap 45° left, travel through a 90° rightward arc,
+        // then return to the ordinary facing as soon as the attack ends.
+        : Math.PI / 4 - easedAttack * Math.PI / 2
+      : 0;
+    this.root.rotation.y = this.yaw + spin;
+
+    const amp = Math.min(1, speed / WOLF_FULL_SPEED);
+    if (moving) this.gait += dt * (5 + amp * 11);
+    this.rig.legs.forEach((leg, i) => {
+      const target = moving ? Math.sin(this.gait + LEG_PHASE[i]!) * 0.7 * amp : 0;
+      leg.rotation.z = damp(leg.rotation.z, target, 18, dt);
+    });
+
+    const daggerLunge = activeAttack && this.attackKind === "ranged" ? Math.sin(easedAttack * Math.PI) * 0.42 : 0;
+    this.fall = damp(this.fall, snap.dead ? 1 : 0, 1000 / FALL_MS, dt);
+    this.rig.model.rotation.z = -this.fall * (Math.PI / 2);
+    this.rig.model.position.x = daggerLunge;
+    this.rig.model.position.y = this.fall * 0.3 + (moving ? 0 : Math.sin(elapsed * 1.8) * 0.012);
+    if (!activeAttack) this.attackAt = null;
+  }
+}
+
 /**
  * An **overhand** swing, used by the sword and the dagger alike: the arm cocks
  * back over the shoulder, sweeps over the top, and drives down in front, ending
@@ -192,7 +262,8 @@ function lerp(a: number, b: number, t: number): number {
 
 /** Diagonal pairs move together, which is what makes a quadruped read as one. */
 const LEG_PHASE = [0, Math.PI, Math.PI, 0];
-
+/** Enemy wolves stand just above the player without overwhelming the board. */
+const HELLHOUND_SCALE = 1.3;
 class WolfActor {
   readonly root = new THREE.Group();
   readonly rig: WolfRig;
@@ -208,6 +279,7 @@ class WolfActor {
     this.accent = parseColor(color);
     this.rig = buildWolf(this.accent);
     this.root.add(this.rig.model);
+    this.root.scale.setScalar(HELLHOUND_SCALE);
     this.root.userData["entityId"] = id;
   }
 
@@ -296,6 +368,7 @@ class CorpseActor {
   constructor(id: string, corpse: GameSnapshot["corpses"][number]) {
     this.rig = buildWolf(darken(parseColor(corpse.color), 0.6));
     this.root.add(this.rig.model);
+    this.root.scale.setScalar(HELLHOUND_SCALE);
     this.root.userData["entityId"] = id;
     this.root.position.set(toX(corpse.x), 0, toZ(corpse.y));
     this.root.rotation.y = yawFor(corpse.facing, 0);
@@ -320,7 +393,7 @@ class CorpseActor {
 
 /** Everything the snapshot owns, kept in step with it. */
 export class Actors {
-  readonly player: PlayerActor;
+  readonly player: PlayerActor | PlayerWolfActor;
   private readonly enemies = new Map<string, WolfActor>();
   private readonly corpses = new Map<string, CorpseActor>();
   private readonly projectiles: THREE.Group[] = [];
@@ -331,8 +404,9 @@ export class Actors {
     /** Enemy and corpse roots are pushed here so one raycast picks them all. */
     private readonly pickables: THREE.Object3D[],
     playerColor: string,
+    wolfPlayer = false,
   ) {
-    this.player = new PlayerActor(playerColor);
+    this.player = wolfPlayer ? new PlayerWolfActor() : new PlayerActor(playerColor);
     scene.add(this.player.root);
   }
 
@@ -488,7 +562,8 @@ export function applyCues<T extends GameSnapshot>(
   const before = previous.cooldown;
   const after = snap.cooldown;
   if (after && (!before || before.slot !== after.slot || after.remainingMs > before.remainingMs + 1)) {
-    actors.player.swing(now);
+    const kind = ACTIONS[after.slot]?.kind;
+    actors.player.swing(now, kind === "ranged" ? "ranged" : "melee");
   }
 
   const healthBefore = new Map(previous.enemies.map((e) => [e.id, e.health]));
