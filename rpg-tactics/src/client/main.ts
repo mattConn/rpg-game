@@ -1,5 +1,5 @@
 /**
- * Render-only WebSocket client for the turn-based game. It sends input and
+ * Render-only WebSocket client for the real-time tactical game. It sends input and
  * draws the `TacticsSnapshot` it gets back; no rule is decided here.
  *
  * Almost none of this is new work. `Actors`, `applyCues`, `interpolateSnapshot`
@@ -70,7 +70,7 @@ function resize() {
 
   const barSize = actionBarSize(BAR_LAYOUT);
   if (!barPositioned) {
-    barOrigin.x = (viewWidth - barSize.width) / 2;
+    barOrigin.x = Math.max(9, Math.min(viewWidth - barSize.width, (viewWidth - barSize.width) / 2 + 140));
     barOrigin.y = (WORLD_HEIGHT - barSize.height) / 2 - 105;
     barPositioned = true;
   } else {
@@ -113,11 +113,9 @@ function connectWebSocket() {
     try {
       const snap = JSON.parse(event.data as string) as TacticsSnapshot;
       const now = performance.now();
-      // Once movement is released, carry its final turn back into the local
-      // tank-control heading so the next W/A/D input begins from what the model
-      // is visibly facing. Do not rewrite it while W/S is held or reverse input
-      // would repeatedly invert its own direction.
-      if (!heldKeys.has("w") && !heldKeys.has("s")) {
+      // Keep local interaction facing aligned with the authoritative model
+      // whenever direct movement is not actively choosing a new direction.
+      if (heldKeys.size === 0) {
         playerYaw = Math.atan2(-snap.playerHeading.x, -snap.playerHeading.y);
       }
       if (currSnapshot && actors && applyCues(actors, currSnapshot, snap, now, struckBy)) {
@@ -178,52 +176,24 @@ function send(msg: TacticsInput) {
 
 // ---------------------------------------------------------------- keyboard
 
-/**
- * Tank controls independent of the orbit camera. A/D turn the character;
- * W/S move along that heading. Mouse drag only moves the camera.
- */
-
-/** Yaw turn speed in radians per second. */
-const TURN_SPEED = 5.8;
+/** Direct movement oriented to the camera's current horizontal heading. */
 
 const heldKeys = new Set<string>();
 let playerYaw = -Math.PI / 2;
 
 function sendMoveDir(): void {
-  const fwdX = -Math.sin(playerYaw);
-  const fwdY = -Math.cos(playerYaw);
+  const across = Number(heldKeys.has("d")) - Number(heldKeys.has("a"));
+  const forward = Number(heldKeys.has("w")) - Number(heldKeys.has("s"));
+  const cameraYaw = stage.yaw;
+  const dx = Math.cos(cameraYaw) * across - Math.sin(cameraYaw) * forward;
+  const dy = -Math.sin(cameraYaw) * across - Math.cos(cameraYaw) * forward;
 
-  let dx = 0;
-  let dy = 0;
-  if (heldKeys.has("w")) { dx += fwdX; dy += fwdY; }
-  if (heldKeys.has("s")) { dx -= fwdX; dy -= fwdY; }
-
-  send({ type: "move", dx, dy, turn: heldKeys.has("w") });
+  if (dx !== 0 || dy !== 0) playerYaw = Math.atan2(-dx, -dy);
+  send({ type: "move", dx, dy, turn: true });
 }
 
 function facingDirection(): Point {
   return { x: -Math.sin(playerYaw), y: -Math.cos(playerYaw) };
-}
-
-/** Apply held-key turning each frame. Called from the game loop. */
-function updateTankControls(dt: number): void {
-  let turn = 0;
-  if (heldKeys.has("a") || heldKeys.has("arrowleft")) turn += TURN_SPEED * dt;
-  if (heldKeys.has("d") || heldKeys.has("arrowright")) turn -= TURN_SPEED * dt;
-  // **A is always left and D is always right**, whichever way you are walking.
-  // Steering used to invert while backing up, on the analogy of reversing a
-  // car — but you are not driving the player, you are *being* them, and a
-  // person walking backwards still turns their own left when they mean left.
-  // The camera is the head here, and a head does not steer like a rear axle.
-  if (turn !== 0) {
-    playerYaw += turn;
-    const facing = facingDirection();
-    send({ type: "face", dx: facing.x, dy: facing.y });
-  }
-
-  // Re-send movement direction whenever keys are held, since the yaw may have
-  // changed from turning.
-  if (heldKeys.has("w") || heldKeys.has("s")) sendMoveDir();
 }
 
 /**
@@ -233,6 +203,7 @@ function updateTankControls(dt: number): void {
  */
 function flipAbout() {
   stage.flip();
+  if (heldKeys.size > 0) sendMoveDir();
 }
 
 /**
@@ -275,19 +246,23 @@ window.addEventListener("keydown", (event) => {
 
   if (key === "v") {
     stage.resetView();
+    if (heldKeys.size > 0) sendMoveDir();
     event.preventDefault();
     return;
   }
 
-  // Tank movement and turning keys.
+  // Direct movement keys.
   if (key === "w" || key === "a" || key === "s" || key === "d" ||
       key === "arrowleft" || key === "arrowright" ||
       key === "arrowup" || key === "arrowdown") {
-    // Map arrow up/down to forward/back.
-    const mapped = key === "arrowup" ? "w" : key === "arrowdown" ? "s" : key;
+    const mapped = key === "arrowup" ? "w"
+      : key === "arrowdown" ? "s"
+      : key === "arrowleft" ? "a"
+      : key === "arrowright" ? "d"
+      : key;
     if (!heldKeys.has(mapped)) {
       heldKeys.add(mapped);
-      if (mapped === "w" || mapped === "s") sendMoveDir();
+      sendMoveDir();
     }
     event.preventDefault();
     return;
@@ -317,10 +292,14 @@ window.addEventListener("keydown", (event) => {
 window.addEventListener("keyup", (event) => {
   const key = event.key.toLowerCase();
   if (key === ".") { holdWait(false); return; }
-  const mapped = key === "arrowup" ? "w" : key === "arrowdown" ? "s" : key;
+  const mapped = key === "arrowup" ? "w"
+    : key === "arrowdown" ? "s"
+    : key === "arrowleft" ? "a"
+    : key === "arrowright" ? "d"
+    : key;
   if (heldKeys.has(mapped)) {
     heldKeys.delete(mapped);
-    if (mapped === "w" || mapped === "s") sendMoveDir();
+    sendMoveDir();
   }
 });
 
@@ -440,14 +419,10 @@ uiCanvas.addEventListener("mousemove", (event) => {
     dragMoved += Math.abs(dx) + Math.abs(dy);
     if (dragMoved > DRAG_THRESHOLD) {
       if (dragPanning && !stage.firstPerson) stage.pan(dx, dy);
-      // Drag right, look right. Deltas go over as NDC — a fraction of the
-      // half-screen — rather than as pixels, so `stage.look` can price them
-      // against the camera's own frustum and a drag means the same turn at any
-      // window size. The threshold still gates it, so a click with a pixel of
-      // shake in it does not shift the view.
       else {
         const bounds = uiCanvas.getBoundingClientRect();
         stage.look((dx / bounds.width) * 2, -(dy / bounds.height) * 2);
+        if (heldKeys.size > 0) sendMoveDir();
       }
     }
   }
@@ -635,9 +610,6 @@ function frame(now: number) {
   stage.update(dt);
   stage.animateScenery(elapsed);
   stage.render();
-
-  // Tank controls: apply turning and keep movement direction in sync.
-  updateTankControls(dt);
 
   updateCursorStyle(snap);
   drawOverlay(ctx, {

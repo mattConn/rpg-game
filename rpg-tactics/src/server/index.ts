@@ -1,5 +1,5 @@
 /**
- * Server for the turn-based front end.
+ * Server for the real-time tactical front end.
  *
  * The same thin wrapper the other two front ends use — static files, a
  * WebSocket, and a 20 Hz broadcast — around a different simulation. The
@@ -82,7 +82,7 @@ setInterval(() => {
 
 try {
   await fastify.listen({ port: PORT, host: HOST });
-  fastify.log.info(`Turn-based game available at http://localhost:${PORT}`);
+  fastify.log.info(`Real-time tactical game available at http://localhost:${PORT}`);
 } catch (error) {
   fastify.log.error(error);
   process.exit(1);

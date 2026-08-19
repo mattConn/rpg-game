@@ -27,7 +27,7 @@ import {
   ARENA_Y,
   BOARD_REGION,
   CHAMBER_MARGIN_PX,
-  DOOR_Y,
+  DOORWAY_WIDTH_PX,
   type DoorId,
   type DoorStates,
   FAR_REGION,
@@ -52,16 +52,21 @@ const STRIDE = toX(SQUARE_PX);
 
 const BOARD_CX = BOARD_X0 + BOARD_W / 2;
 const BOARD_CZ = BOARD_Z0 + BOARD_D / 2;
+const FAR_W = toX(FAR_REGION.cols * TILE_PX);
+const FAR_D = toZ(FAR_REGION.rows * TILE_PX);
+const FAR_CX = toX(regionCentre(FAR_REGION).x);
 
 /** Bare floor between the flagstones and the masonry. */
 const MARGIN = toX(CHAMBER_MARGIN_PX);
 
-const WALL_H = 2.8;
+const WALL_H = 5.6;
 const WALL_T = toX(WALL_THICKNESS_PX);
 
 /** A chamber: the board plus its margin of bare floor. 12x12 units. */
-const CHAMBER_W = BOARD_W + MARGIN * 2;
-const CHAMBER_D = BOARD_D + MARGIN * 2;
+const START_CHAMBER_W = BOARD_W + MARGIN * 2;
+const START_CHAMBER_D = BOARD_D + MARGIN * 2;
+const FAR_CHAMBER_W = FAR_W + MARGIN * 2;
+const FAR_CHAMBER_D = FAR_D + MARGIN * 2;
 
 /**
  * **The corridor is walkable ground now, so the rules own its shape and this
@@ -75,14 +80,16 @@ const CHAMBER_D = BOARD_D + MARGIN * 2;
  * a corridor read as one — shrink the height with the width and it reads as a
  * crawlspace, widen it and it reads as a third room.
  */
-const PASSAGE_W = toX(HALL_REGION.cols * TILE_PX);
+const HALL_W = toX(HALL_REGION.cols * TILE_PX);
+const DOOR_W = toX(DOORWAY_WIDTH_PX);
 const ARCH_CENTRE = toX(regionCentre(HALL_REGION).x);
 
 /** The far chamber sits on its own region, a corridor's length to the south. */
 const FAR_CZ = toZ(regionCentre(FAR_REGION).y);
 
 /** What is left for the hall itself once both chambers' walls are accounted for. */
-const HALL_LEN = FAR_CZ - BOARD_CZ - CHAMBER_D - WALL_T * 2;
+const HALL_LEN = FAR_CZ - BOARD_CZ
+  - START_CHAMBER_D / 2 - FAR_CHAMBER_D / 2 - WALL_T * 2;
 
 /**
  * Framing is expressed as multiples of the board's width rather than in units,
@@ -92,7 +99,7 @@ const HALL_LEN = FAR_CZ - BOARD_CZ - CHAMBER_D - WALL_T * 2;
  */
 const CAMERA_MIN_DISTANCE = BOARD_W * 0.42;
 const CAMERA_MAX_DISTANCE = BOARD_W * 1.15;
-const CAMERA_START_DISTANCE = CAMERA_MAX_DISTANCE;
+const CAMERA_START_DISTANCE = CAMERA_MIN_DISTANCE;
 
 /**
  * Full vertical orbit: almost level with the floor at one end and almost
@@ -100,7 +107,7 @@ const CAMERA_START_DISTANCE = CAMERA_MAX_DISTANCE;
  */
 const PITCH_MIN = 0.03;
 const PITCH_MAX = Math.PI / 2 - 0.01;
-const PITCH_START = 0.82;
+const PITCH_START = 0.16;
 
 /**
  * First person needs its own bounds, because the number means something else
@@ -366,13 +373,12 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
    * framing above, so resizing the squares carries the murk with it rather than
    * leaving it stranded at a fixed distance.
    *
-   * Pulled in from 0.6/2.0: the far plane now sits just past the width of a
-   * chamber, so the wall across the room is already half-eaten and the corridor
-   * runs into black rather than showing you the room at the end of it. The near
-   * plane matters as much as the far one — start it too far out and the fog
-   * reads as a wall of haze hanging at a fixed distance instead of as air.
+   * The broad range keeps nearby rooms crisp and lets visible corridors recede
+   * gradually into darkness instead of being swallowed just beyond one wall.
+   * The near plane matters as much as the far one — start it too far out and
+   * the fog reads as a wall of haze hanging at a fixed distance instead of air.
    */
-  scene.fog = new THREE.Fog(0x111111, BOARD_W * 0.75, BOARD_W * 2.35);
+  scene.fog = new THREE.Fog(0x111111, BOARD_W * 0.95, BOARD_W * 3.2);
 
   const loadStoneTexture = (path: string) => {
     const texture = new THREE.TextureLoader().load(path);
@@ -445,20 +451,23 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   // in from outside sees a dungeon continuing into the dark rather than a hole.
   // It has to cover both rooms and the hall between them, so it is sized from
   // the whole complex rather than from the board.
-  const apronW = CHAMBER_W * 3;
-  const apronD = (FAR_CZ - BOARD_CZ) + CHAMBER_D * 3;
+  const westmost = Math.min(BOARD_CX - START_CHAMBER_W / 2, FAR_CX - FAR_CHAMBER_W / 2);
+  const eastmost = Math.max(BOARD_CX + START_CHAMBER_W / 2, FAR_CX + FAR_CHAMBER_W / 2);
+  const apronW = (eastmost - westmost) * 3;
+  const apronD = (FAR_CZ - BOARD_CZ) + START_CHAMBER_D + FAR_CHAMBER_D;
   const apronTex = floorTexture.clone();
   apronTex.repeat.set(apronW / TEXTURE_SCALE, apronD / TEXTURE_SCALE);
   const apron = new THREE.Mesh(
     new THREE.PlaneGeometry(apronW, apronD).rotateX(-Math.PI / 2),
     new THREE.MeshLambertMaterial({ map: apronTex, color: 0x606068, flatShading: true }),
   );
-  apron.position.set(BOARD_CX, -0.06, (BOARD_CZ + FAR_CZ) / 2);
+  apron.position.set((westmost + eastmost) / 2, -0.06, (BOARD_CZ + FAR_CZ) / 2);
   scene.add(apron);
 
   // -------------------------------------------------------------------- walls
 
   const capMaterial = new THREE.MeshLambertMaterial({ color: 0x4c4c58, flatShading: true });
+  const wallOccluders: THREE.Mesh[] = [];
   const addWall = (w: number, d: number, x: number, z: number, height = WALL_H) => {
     const tex = wallTexture.clone();
     tex.repeat.set(Math.max(w, d) / TEXTURE_SCALE, height / TEXTURE_SCALE);
@@ -468,20 +477,21 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     wall.castShadow = true;
     wall.receiveShadow = true;
     scene.add(wall);
+    wall.updateMatrixWorld();
+    wallOccluders.push(wall);
     const cap = new THREE.Mesh(new THREE.BoxGeometry(w + 0.18, 0.2, d + 0.18), capMaterial);
     cap.position.set(x, height + 0.1, z);
     cap.castShadow = true;
     scene.add(cap);
   };
 
-  const west = BOARD_X0 - MARGIN;
-  const east = BOARD_X0 + BOARD_W + MARGIN;
-
-  const archLeft = ARCH_CENTRE - PASSAGE_W / 2;
-  const archRight = ARCH_CENTRE + PASSAGE_W / 2;
+  const archLeft = ARCH_CENTRE - DOOR_W / 2;
+  const archRight = ARCH_CENTRE + DOOR_W / 2;
+  const hallLeft = ARCH_CENTRE - HALL_W / 2;
+  const hallRight = ARCH_CENTRE + HALL_W / 2;
 
   /** An east-west wall built in two stretches, with the passage's gap in it. */
-  const addPiercedWall = (z: number) => {
+  const addPiercedWall = (z: number, west: number, east: number) => {
     const westSpan = archLeft - (west - WALL_T);
     addWall(westSpan, WALL_T, west - WALL_T + westSpan / 2, z);
     const eastSpan = east + WALL_T - archRight;
@@ -500,10 +510,10 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       scene.add(post);
     }
     const lintelTex = wallTexture.clone();
-    lintelTex.repeat.set((PASSAGE_W + 0.5) / TEXTURE_SCALE, Math.max(0.4, WALL_T + 0.4) / TEXTURE_SCALE);
+    lintelTex.repeat.set((DOOR_W + 0.5) / TEXTURE_SCALE, Math.max(0.4, WALL_T + 0.4) / TEXTURE_SCALE);
     const lintelMat = new THREE.MeshLambertMaterial({ map: lintelTex, flatShading: true });
     const lintel = new THREE.Mesh(
-      new THREE.BoxGeometry(PASSAGE_W + 0.5, 0.4, WALL_T + 0.4),
+      new THREE.BoxGeometry(DOOR_W + 0.5, 0.4, WALL_T + 0.4),
       lintelMat,
     );
     lintel.position.set(ARCH_CENTRE, WALL_H + 0.3, z);
@@ -535,127 +545,64 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
    * what "identical" means here. There is one room, built twice, so anything
    * done to the arena is done to what you see through the arch by construction.
    */
-  const buildChamber = (cz: number, doorway: "north" | "south") => {
-    const floor = stoneFloor(CHAMBER_W, CHAMBER_D);
-    floor.position.set(BOARD_CX, 0, cz);
+  const buildChamber = (
+    cx: number,
+    cz: number,
+    width: number,
+    depth: number,
+    doorway: "north" | "south",
+  ) => {
+    const floor = stoneFloor(width, depth);
+    floor.position.set(cx, 0, cz);
     scene.add(floor);
 
-    const north = cz - CHAMBER_D / 2;
-    const south = cz + CHAMBER_D / 2;
+    const west = cx - width / 2;
+    const east = cx + width / 2;
+    const north = cz - depth / 2;
+    const south = cz + depth / 2;
 
-    addWall(WALL_T, CHAMBER_D + WALL_T * 2, west - WALL_T / 2, cz);
-    addWall(WALL_T, CHAMBER_D + WALL_T * 2, east + WALL_T / 2, cz);
+    addWall(WALL_T, depth + WALL_T * 2, west - WALL_T / 2, cz);
+    addWall(WALL_T, depth + WALL_T * 2, east + WALL_T / 2, cz);
 
     // The pierced wall is the one the hallway leaves by; the other is solid.
     const northZ = north - WALL_T / 2;
     const southZ = south + WALL_T / 2;
     if (doorway === "south") {
-      addWall(CHAMBER_W + WALL_T * 2, WALL_T, BOARD_CX, northZ);
-      addPiercedWall(southZ);
+      addWall(width + WALL_T * 2, WALL_T, cx, northZ);
+      addPiercedWall(southZ, west, east);
       addDoorFrame(southZ);
     } else {
-      addPiercedWall(northZ);
+      addPiercedWall(northZ, west, east);
       addDoorFrame(northZ);
-      addWall(CHAMBER_W + WALL_T * 2, WALL_T, BOARD_CX, southZ);
+      addWall(width + WALL_T * 2, WALL_T, cx, southZ);
     }
   };
 
-  buildChamber(BOARD_CZ, "south");
-  buildChamber(FAR_CZ, "north");
+  buildChamber(BOARD_CX, BOARD_CZ, START_CHAMBER_W, START_CHAMBER_D, "south");
+  buildChamber(FAR_CX, FAR_CZ, FAR_CHAMBER_W, FAR_CHAMBER_D, "north");
 
   // --------------------------------------------------------------- doors
 
   const doors = new Map<DoorId, THREE.Group>();
   const doorSlabs = new Map<DoorId, THREE.Mesh>();
-  let doorStates: DoorStates = { arena: false, far: false };
-  let playerSceneZ = BOARD_CZ;
-  const clipNorth = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
-  const clipSouth = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
-  const updateDoorClipping = () => {
-    const arenaZ = toZ(DOOR_Y.arena);
-    const farZ = toZ(DOOR_Y.far);
-    const edge = 0.11;
-    const planes: THREE.Plane[] = [];
-
-    if (playerSceneZ < arenaZ) {
-      const boundary = doorStates.arena ? (!doorStates.far ? farZ : null) : arenaZ;
-      if (boundary !== null) {
-        clipNorth.constant = boundary + edge;
-        planes.push(clipNorth);
-      }
-    } else if (playerSceneZ > farZ) {
-      const boundary = doorStates.far ? (!doorStates.arena ? arenaZ : null) : farZ;
-      if (boundary !== null) {
-        clipSouth.constant = -(boundary - edge);
-        planes.push(clipSouth);
-      }
-    } else {
-      if (!doorStates.arena) {
-        clipSouth.constant = -(arenaZ - edge);
-        planes.push(clipSouth);
-      }
-      if (!doorStates.far) {
-        clipNorth.constant = farZ + edge;
-        planes.push(clipNorth);
-      }
-    }
-    renderer.clippingPlanes = planes;
-  };
   const doorPickables: THREE.Object3D[] = [];
-  const woodTexture = new THREE.TextureLoader().load("/textures/door-oak.png");
-  woodTexture.colorSpace = THREE.SRGBColorSpace;
-  woodTexture.wrapS = THREE.RepeatWrapping;
-  woodTexture.wrapT = THREE.RepeatWrapping;
-  // The source grain runs sideways; doors read as stronger, older boards when
-  // the grain climbs vertically from sill to lintel.
-  woodTexture.center.set(0.5, 0.5);
-  woodTexture.rotation = Math.PI / 2;
-  woodTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  const wood = new THREE.MeshLambertMaterial({ map: woodTexture, color: 0xb89070 });
-  const iron = new THREE.MeshLambertMaterial({ color: 0x252329, flatShading: true });
-
-  const addDoor = (id: DoorId, z: number, opensToward: 1 | -1) => {
-    const pivot = new THREE.Group();
-    pivot.position.set(archLeft, 0, z);
-    pivot.userData.openAngle = opensToward * Math.PI * 0.48;
-
-    const slab = new THREE.Mesh(new THREE.BoxGeometry(PASSAGE_W - 0.12, WALL_H - 0.18, 0.16), wood);
-    slab.position.set((PASSAGE_W - 0.12) / 2, (WALL_H - 0.18) / 2, 0);
-    slab.castShadow = true;
-    slab.receiveShadow = true;
-    slab.userData.doorId = id;
-    pivot.add(slab);
-
-    for (const y of [0.5, WALL_H - 0.65]) {
-      const strap = new THREE.Mesh(new THREE.BoxGeometry(PASSAGE_W - 0.2, 0.1, 0.2), iron);
-      strap.position.set((PASSAGE_W - 0.12) / 2, y, 0);
-      strap.userData.doorId = id;
-      pivot.add(strap);
-      doorPickables.push(strap);
-    }
-    doorPickables.push(slab);
-    doors.set(id, pivot);
-    doorSlabs.set(id, slab);
-    scene.add(pivot);
-  };
-
-  addDoor("arena", BOARD_CZ + CHAMBER_D / 2 + WALL_T / 2, 1);
-  addDoor("far", FAR_CZ - CHAMBER_D / 2 - WALL_T / 2, -1);
+  // Doorways are bare arches. Keeping these collections empty preserves the
+  // stage API while making them impossible to hover, target, or operate.
 
   // ------------------------------------------------------------ the hallway
 
   // Between the two doorways: floor and two long walls a passage-width apart.
   // Nothing else — it is a distance to be crossed, and the room at the end of it
   // should be the thing you look at.
-  const hallZ0 = BOARD_CZ + CHAMBER_D / 2 + WALL_T;
+  const hallZ0 = BOARD_CZ + START_CHAMBER_D / 2 + WALL_T;
   const hallCZ = hallZ0 + HALL_LEN / 2;
 
-  const hallFloor = stoneFloor(PASSAGE_W + WALL_T * 2, HALL_LEN);
+  const hallFloor = stoneFloor(HALL_W + WALL_T * 2, HALL_LEN);
   hallFloor.position.set(ARCH_CENTRE, 0, hallCZ);
   scene.add(hallFloor);
 
-  addWall(WALL_T, HALL_LEN, archLeft - WALL_T / 2, hallCZ);
-  addWall(WALL_T, HALL_LEN, archRight + WALL_T / 2, hallCZ);
+  addWall(WALL_T, HALL_LEN, hallLeft - WALL_T / 2, hallCZ);
+  addWall(WALL_T, HALL_LEN, hallRight + WALL_T / 2, hallCZ);
 
   // --------------------------------------------------------------- the arch
 
@@ -667,7 +614,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   // ends", and the warm plane hanging in the opening was the light of somewhere
   // else. The old glowing curtain is still gone: the wooden slab now makes the
   // opening's state visible without pretending light itself is a barrier.
-  const southZ = BOARD_CZ + CHAMBER_D / 2 + WALL_T / 2;
+  const southZ = BOARD_CZ + START_CHAMBER_D / 2 + WALL_T / 2;
   const torchX = archLeft - 0.75;
   const torchZ = southZ - WALL_T * 0.72;
 
@@ -780,8 +727,8 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   // ------------------------------------------------------------------ camera
 
-  // Start in a high overhead orbit behind the visible player.
-  let yaw = -Math.PI / 2; // facing east, matching the player's initial facing
+  // Start north of the player, looking across the chamber toward its door.
+  let yaw = Math.PI;
   let pitch = PITCH_START;
   let distance = CAMERA_START_DISTANCE;
 
@@ -822,7 +769,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
    */
   let firstPerson = false;
   let overheadPitch = PITCH_START;
-  let overheadYaw = -Math.PI / 2;
+  let overheadYaw = Math.PI;
 
   /** The player's head, in scene units — where the eyes are when they are ours. */
   const eye = new THREE.Vector3(BOARD_CX, EYE_HEIGHT, BOARD_CZ);
@@ -830,6 +777,10 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   /** Which way the player's model is facing: +1 east, -1 west. */
   let playerFacing: 1 | -1 = 1;
   const doorWorldPosition = new THREE.Vector3();
+  const desiredCameraPosition = new THREE.Vector3();
+  const cameraSightline = new THREE.Vector3();
+  const cameraLookTarget = new THREE.Vector3();
+  const cameraWallRay = new THREE.Raycaster();
 
   const clampPitch = (value: number) =>
     firstPerson ? clamp(value, FP_PITCH_MIN, FP_PITCH_MAX) : clamp(value, PITCH_MIN, PITCH_MAX);
@@ -853,11 +804,26 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       const lookX = smoothed.x;
       const lookZ = smoothed.z;
 
-      camera.position.set(
+      desiredCameraPosition.set(
         smoothed.x + armX * horizontal,
         Math.sin(smoothed.pitch) * smoothed.distance,
         smoothed.z + armZ * horizontal,
       );
+      cameraLookTarget.set(lookX, 0.9, lookZ);
+      cameraSightline.copy(desiredCameraPosition).sub(cameraLookTarget);
+      const desiredDistance = cameraSightline.length();
+      cameraSightline.normalize();
+      cameraWallRay.set(cameraLookTarget, cameraSightline);
+      cameraWallRay.far = desiredDistance;
+      const obstruction = cameraWallRay.intersectObjects(wallOccluders, false)[0];
+      if (obstruction) {
+        // A hard correction is intentional: once masonry crosses the sightline,
+        // never spend a few soft-follow frames looking through solid stone.
+        const clearDistance = Math.max(0.7, obstruction.distance - 0.28);
+        camera.position.copy(cameraLookTarget).addScaledVector(cameraSightline, clearDistance);
+      } else {
+        camera.position.copy(desiredCameraPosition);
+      }
       camera.lookAt(lookX, 0.9, lookZ);
     }
     // Kept fresh here rather than left to the renderer: picking and the
@@ -989,8 +955,6 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       // point in the scene that has to be exactly where the player is, and a
       // damped head lags a half-step behind its own body on every walk.
       eye.set(toX(px), EYE_HEIGHT, toZ(py));
-      playerSceneZ = toZ(py);
-      updateDoorClipping();
 
       // Follow the player at every third-person zoom, including the new
       // pulled-back default. Damping keeps the wide view from jolting after
@@ -1001,7 +965,9 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
     resetView() {
       pitch = firstPerson ? FP_PITCH_START : PITCH_START;
-      yaw = playerFacing === 1 ? -Math.PI / 2 : Math.PI / 2;
+      yaw = firstPerson
+        ? (playerFacing === 1 ? -Math.PI / 2 : Math.PI / 2)
+        : Math.PI;
       // `update` eases to both targets; resetting the view must not cut there.
     },
 
@@ -1043,11 +1009,9 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     },
 
     setDoors(states) {
-      doorStates = { ...states };
       for (const [id, door] of doors) {
         door.rotation.y = states[id] ? door.userData.openAngle as number : 0;
       }
-      updateDoorClipping();
       applyCamera();
     },
 
@@ -1094,13 +1058,18 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     },
 
     setDoorTargetRing(door) {
+      const slab = doorSlabs.get(door);
+      if (!slab) {
+        targetRing.visible = false;
+        targetGlow.visible = false;
+        return;
+      }
       targetRing.visible = true;
       targetGlow.visible = true;
       targetRingMaterial.color.setHex(0xffd633);
       targetGlowMaterial.color.setHex(0xffd633);
       targetRing.scale.setScalar(1.85);
       targetGlow.scale.setScalar(1.85);
-      const slab = doorSlabs.get(door)!;
       slab.getWorldPosition(doorWorldPosition);
       targetRing.position.set(doorWorldPosition.x, 0.14, doorWorldPosition.z);
       targetGlow.position.set(doorWorldPosition.x, 0.135, doorWorldPosition.z);
@@ -1111,8 +1080,12 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
         doorHoverRing.visible = false;
         return;
       }
+      const slab = doorSlabs.get(door);
+      if (!slab) {
+        doorHoverRing.visible = false;
+        return;
+      }
       doorHoverRing.visible = true;
-      const slab = doorSlabs.get(door)!;
       slab.getWorldPosition(doorWorldPosition);
       doorHoverRing.position.set(doorWorldPosition.x, 0.15, doorWorldPosition.z);
     },

@@ -1,5 +1,5 @@
 /**
- * The turn-based skirmish: board geometry, the rules that decide what a move or
+ * The real-time skirmish: board geometry, the rules that decide what a move or
  * an attack is allowed to be, and the snapshot both sides read.
  *
  * Pure and DOM-free, exactly like `src/shared/` — the client draws the board
@@ -10,14 +10,12 @@
  * hopped between; each of those is now `SUBDIVISION` cells across, which makes a
  * cell about half a pace wide. Nothing is drawn on the floor to mark them and
  * nothing snaps visibly, so movement reads as walking rather than as stepping
- * from tile to tile — but the simulation is still discrete and deterministic,
- * and it is still strictly turn-based. The grid became a lattice for positions
- * to sit on instead of a board you play on.
+ * from tile to tile. The grid is a lattice for navigation and floor ownership,
+ * while actors move continuously between its cells.
  *
  * Because of that, **every rule is expressed as a distance in room pixels**, not
- * as a count of cells. `MOVE_RANGE` is how far you travel in a turn, full stop;
- * subdividing further would change how finely you can place yourself and nothing
- * else about the game.
+ * as a count of cells. Subdividing further changes how finely navigation can
+ * place actors and nothing else about the game.
  *
  * **Positions stay in room pixels.** Nothing here needs them to be, but the 3D
  * bridge (`rpg-3d/src/client/world.ts`) divides room pixels by 30 to get scene
@@ -31,10 +29,10 @@ import type { Point } from "../../../src/shared/movement.js";
 import type { GameSnapshot, InputMessage } from "../../../src/shared/protocol.js";
 import { ACTIONS, type Action } from "../../../src/shared/actions.js";
 
-/** Tactics fills the fifth shared bar slot with its targeted door interaction. */
+/** The fifth slot is empty now that dungeon doorways are permanently open. */
 export const TACTICS_ACTIONS: readonly (Action | null)[] = [
   ...ACTIONS.slice(0, 4),
-  { id: "interact", kind: "interact" },
+  null,
 ];
 
 // ------------------------------------------------------------------- board
@@ -46,23 +44,32 @@ export const TACTICS_ACTIONS: readonly (Action | null)[] = [
  */
 export const SUBDIVISION = 5;
 
-/** The original board, still the shape of the game: three squares by three. */
-export const SQUARES = 3;
+/** The enlarged starting chamber: six original squares by six. */
+export const SQUARES = 6;
+/** The far chamber matches the enlarged starting room. */
+export const FAR_SQUARES = 6;
 /** One of those squares, in room pixels — three 3D units, a good stride. */
 export const SQUARE_PX = 90;
 
-export const GRID_COLS = SQUARES * SUBDIVISION; // 15
-export const GRID_ROWS = SQUARES * SUBDIVISION; // 15
+export const GRID_COLS = SQUARES * SUBDIVISION; // 30
+export const GRID_ROWS = SQUARES * SUBDIVISION; // 30
+export const FAR_GRID_COLS = FAR_SQUARES * SUBDIVISION;
+export const FAR_GRID_ROWS = FAR_SQUARES * SUBDIVISION;
 
 /** A single cell: 18px, about 0.6 of a 3D unit. Fine enough to read as smooth. */
 export const TILE_PX = SQUARE_PX / SUBDIVISION;
+/**
+ * Wide enough for a 90px hound body to clear both jambs, while remaining
+ * visibly narrower than the 180px corridor.
+ */
+export const DOORWAY_WIDTH_PX = SQUARE_PX * 1.6;
 
 export interface Cell {
   col: number;
   row: number;
 }
 
-export const ARENA_W = SQUARES * SQUARE_PX; // 270
+export const ARENA_W = SQUARES * SQUARE_PX; // 540
 export const ARENA_H = SQUARES * SQUARE_PX;
 /** The board sits in the middle of the room so the overlay's centred UI lines up. */
 export const ARENA_X = (WORLD_WIDTH - ARENA_W) / 2;
@@ -107,24 +114,25 @@ export interface Region {
 export const BOARD_REGION: Region = { col: 0, row: 0, cols: GRID_COLS, rows: GRID_ROWS };
 
 /**
- * The corridor, running south out of the doorway. It is exactly the arena's
- * bottom-right column band — one of the original squares wide — so the masonry
- * the client builds around it lands on cell boundaries rather than near them.
+ * The corridor runs south from the arena's two southeastern bays. It is two
+ * original squares wide and twice its former length.
  */
-export const HALL_ROWS = 20;
+export const HALL_ROWS = 40;
 export const HALL_REGION: Region = {
-  col: (SQUARES - 1) * SUBDIVISION,
+  col: (SQUARES - 2) * SUBDIVISION,
   row: GRID_ROWS,
-  cols: SUBDIVISION,
+  cols: SUBDIVISION * 2,
   rows: HALL_ROWS,
 };
 
 /** The room at the end of it, the same size as the arena and empty. */
 export const FAR_REGION: Region = {
-  col: 0,
+  // This currently resolves to zero because both chambers share a width; keep
+  // it derived so their eastern edges stay aligned if either size changes.
+  col: GRID_COLS - FAR_GRID_COLS,
   row: GRID_ROWS + HALL_ROWS,
-  cols: GRID_COLS,
-  rows: GRID_ROWS,
+  cols: FAR_GRID_COLS,
+  rows: FAR_GRID_ROWS,
 };
 
 export const REGIONS: readonly Region[] = [BOARD_REGION, HALL_REGION, FAR_REGION];
@@ -254,18 +262,20 @@ export function distance(a: Point, b: Point): number {
 // ------------------------------------------------------------------- layout
 
 /**
- * The opening position, unchanged from when the board was three squares wide:
- * the player in the left column, the pack holding the right, and open ground
- * between them.
+ * The player starts near the middle of the chamber; the lone hellhound waits
+ * in the southeast bay beside the arena door.
  *
  * ```
- *   @ . h
- *   . . h
- *   . . D      D is the doorway column: the corridor runs south out of it.
+ *   . . . . . .
+ *   . . . . . .
+ *   . . . . . .
+ *   . . @ . . .
+ *   . . . . . .
+ *   . . . . . h  D is directly south of the hound's bay.
  * ```
  *
- * `SUBDIVISION` is odd, so the centre of each old square is still the centre of
- * a cell and these are the very same points they always were.
+ * `SUBDIVISION` is odd, so the hound can remain centered in its original bay;
+ * the player uses the two central grid axes directly.
  */
 const HALF = Math.floor(SUBDIVISION / 2);
 const squareCentre = (col: number, row: number): Cell => ({
@@ -273,8 +283,12 @@ const squareCentre = (col: number, row: number): Cell => ({
   row: row * SUBDIVISION + HALF,
 });
 
-export const PLAYER_START: Cell = squareCentre(0, 0);
-export const HOUND_STARTS: readonly Cell[] = [squareCentre(2, 0), squareCentre(2, 1)];
+export const PLAYER_START: Cell = {
+  col: Math.floor((GRID_COLS - 1) / 2),
+  row: Math.floor(GRID_ROWS / 2),
+};
+/** The southern hound starts closest to the arena door. */
+export const HOUND_STARTS: readonly Cell[] = [squareCentre(SQUARES - 1, SQUARES - 1)];
 
 // The doorway is not a cell any more, it is the mouth of `HALL_REGION` — see
 // the regions above. It used to end the encounter; now it only leads out of the
@@ -516,20 +530,17 @@ export interface TacticsSnapshot extends GameSnapshot {
   strikes: Array<{ enemyId: string; seq: number }>;
   /** Newest last; the client draws the tail. */
   log: string[];
-  /** One line telling the player what the board is waiting for. */
+  /** One contextual gameplay hint. */
   hint: string;
   /**
-   * True while the world is standing still because nothing is asking it to
-   * run — see `shouldRun` in `TacticsGame`. Purely for the client to say so;
-   * every rule already reads the simulation's own clock, which is what
-   * actually stopped.
+   * Legacy compatibility field. The real-time server always reports false
+   * because its simulation advances continuously.
    */
   paused: boolean;
 }
 
 /**
- * The real-time input messages, all of which still mean something here, plus the
- * three a game with turns needs.
+ * Input messages used by the real-time tactical game.
  *
  * `slot` has *lost* meaning rather than gained it: it now only chooses a weapon.
  * Committing the turn is `attack` or `wait`, which is why they are messages of

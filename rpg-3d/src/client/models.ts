@@ -406,6 +406,24 @@ export interface WolfRig {
   model: THREE.Group;
   /** Front-left, front-right, back-left, back-right. */
   legs: THREE.Group[];
+  /** Imported model thigh bones, populated asynchronously once its GLTF loads. */
+  importedLegs: Array<{
+    bone: THREE.Object3D;
+    bindQuaternion: THREE.Quaternion;
+    lowerBone: THREE.Object3D | null;
+    lowerBindQuaternion: THREE.Quaternion | null;
+    swing: number;
+  }>;
+  importedHead: {
+    bone: THREE.Bone;
+    bindQuaternion: THREE.Quaternion;
+  } | null;
+  importedTail: { bone: THREE.Bone; bindQuaternion: THREE.Quaternion } | null;
+  importedSpine: Array<{
+    bone: THREE.Bone;
+    bindQuaternion: THREE.Quaternion;
+    flex: number;
+  }>;
   head: THREE.Object3D;
   /** Hinged at the back of the muzzle; opens while hunting and snaps on a lunge. */
   jaw: THREE.Group;
@@ -510,10 +528,66 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
       const jaw = visual.getObjectByName("Jaw_9");
       if (jaw) jaw.rotateX(-0.3);
     }
+    // Read from the SkinnedMesh skeleton itself. These are the exact cloned
+    // Bone objects used for vertex deformation, unlike a same-named scene node
+    // which may belong to the source skin after SkeletonUtils cloning.
+    const boundBones = new Map<string, THREE.Bone>();
+    visual.traverse((node) => {
+      if (node instanceof THREE.SkinnedMesh) {
+        for (const bone of node.skeleton.bones) boundBones.set(bone.uuid, bone);
+      }
+    });
+    const normalizedBoneName = (bone: THREE.Bone) => bone.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const findBone = (part: string, side: "l" | "r", front: boolean) =>
+      [...boundBones.values()].find((bone) => {
+        const name = normalizedBoneName(bone);
+        return name.includes(`${part}${side}`) && (front ? name.includes("front") : !name.includes("front"));
+      }) ?? null;
+    const findNamedBone = (name: string) =>
+      [...boundBones.values()].find((bone) => normalizedBoneName(bone) === name) ?? null;
+    const importedLegBones = [
+      [findBone("thigh", "l", true), findBone("shin", "l", true)],
+      [findBone("thigh", "r", true), findBone("shin", "r", true)],
+      [findBone("thigh", "l", false), findBone("shin", "l", false)],
+      [findBone("thigh", "r", false), findBone("shin", "r", false)],
+    ] as const;
+    for (const [bone, lowerBone] of importedLegBones) {
+      if (bone) {
+        rig.importedLegs.push({
+          bone,
+          bindQuaternion: bone.quaternion.clone(),
+          lowerBone,
+          lowerBindQuaternion: lowerBone?.quaternion.clone() ?? null,
+          swing: 0,
+        });
+      }
+    }
+    const importedHead = findNamedBone("head15");
+    const importedTail = findNamedBone("spine0033");
+    if (importedHead) {
+      rig.importedHead = {
+        bone: importedHead,
+        bindQuaternion: importedHead.quaternion.clone(),
+      };
+    }
+    if (importedTail) {
+      rig.importedTail = { bone: importedTail, bindQuaternion: importedTail.quaternion.clone() };
+    }
+    for (const name of ["spine00535", "spine00632", "spine00731", "spine00830", "spine00917", "spine01016"]) {
+      const bone = findNamedBone(name);
+      if (bone) {
+        rig.importedSpine.push({ bone, bindQuaternion: bone.quaternion.clone(), flex: 0 });
+      }
+    }
     rig.model.traverse((node) => {
       if (node.userData["legacyWolf"] && node instanceof THREE.Mesh) node.visible = false;
     });
     rig.model.add(visual);
+    rig.model.updateMatrixWorld(true);
+    // The hidden procedural head is the mount carrying the crown and mouth
+    // weapons. Reparent it to the real bound head bone while preserving its
+    // tuned world transform; from here on the skeleton moves it directly.
+    if (importedHead) importedHead.attach(rig.head);
   }).catch((error: unknown) => console.warn("Could not load imported wolf model", error));
 }
 
@@ -675,7 +749,8 @@ export function buildWolf(accent: THREE.Color, variant: WolfVariant = "hellhound
   model.scale.setScalar(WOLF_SCALE);
 
   const rig: WolfRig = {
-    model, legs, head, jaw, tail, body, neck, ears,
+    model, legs, importedLegs: [], importedHead: null, importedTail: null, importedSpine: [],
+    head, jaw, tail, body, neck, ears,
     eyeMaterial,
     eyeColor: new THREE.Color(WOLF_EYE),
   };

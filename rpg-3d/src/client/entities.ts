@@ -216,18 +216,36 @@ class PlayerWolfActor {
       : 0;
     this.root.rotation.y = this.yaw + spin;
 
+    const swordBend = activeAttack && this.attackKind === "melee"
+      ? Math.sin(easedAttack * Math.PI)
+      : 0;
+    if (this.rig.importedHead) {
+      ATTACK_BEND_QUATERNION.setFromAxisAngle(ATTACK_BEND_AXIS, -swordBend * 0.34);
+      this.rig.importedHead.bone.quaternion
+        .copy(ATTACK_BEND_QUATERNION)
+        .multiply(this.rig.importedHead.bindQuaternion);
+    }
+    if (this.rig.importedTail) {
+      ATTACK_BEND_QUATERNION.setFromAxisAngle(TAIL_BEND_AXIS, swordBend * 0.58);
+      this.rig.importedTail.bone.quaternion
+        .copy(this.rig.importedTail.bindQuaternion)
+        .multiply(ATTACK_BEND_QUATERNION);
+    }
+
     const amp = Math.min(1, speed / WOLF_FULL_SPEED);
     if (moving) this.gait += dt * (5 + amp * 11);
-    this.rig.legs.forEach((leg, i) => {
-      const target = moving ? Math.sin(this.gait + LEG_PHASE[i]!) * 0.7 * amp : 0;
-      leg.rotation.z = damp(leg.rotation.z, target, 18, dt);
-    });
+    animateWolfLegs(this.rig, moving, this.gait, amp, dt);
+    braceWolfLegsForSword(this.rig, swordBend);
 
     const daggerLunge = activeAttack && this.attackKind === "ranged" ? Math.sin(easedAttack * Math.PI) * 0.42 : 0;
     this.fall = damp(this.fall, snap.dead ? 1 : 0, 1000 / FALL_MS, dt);
-    this.rig.model.rotation.z = -this.fall * (Math.PI / 2);
+    const boundRock = moving ? Math.sin(this.gait) * 0.12 * amp : 0;
+    this.rig.model.rotation.z = -this.fall * (Math.PI / 2) + boundRock;
     this.rig.model.position.x = daggerLunge;
-    this.rig.model.position.y = this.fall * 0.3 + (moving ? 0 : Math.sin(elapsed * 1.8) * 0.012);
+    const boundLift = moving ? Math.abs(Math.sin(this.gait)) * 0.12 * amp : 0;
+    this.rig.model.position.y = this.fall * 0.3
+      + boundLift
+      + (moving ? 0 : Math.sin(elapsed * 1.8) * 0.012);
     if (!activeAttack) this.attackAt = null;
   }
 }
@@ -260,8 +278,70 @@ function lerp(a: number, b: number, t: number): number {
 
 // -------------------------------------------------------------------- wolves
 
-/** Diagonal pairs move together, which is what makes a quadruped read as one. */
-const LEG_PHASE = [0, Math.PI, Math.PI, 0];
+/** A bound: front pair together, rear pair together half a cycle later. */
+const LEG_PHASE = [0, 0, Math.PI, Math.PI];
+// This skeleton's leg chains are exported in a rotated parent space. Its local
+// X hinge produces the visible fore/aft stride along the body.
+const LEG_SWING_AXIS = new THREE.Vector3(1, 0, 0);
+const LEG_SIDE_AXIS = new THREE.Vector3(0, 0, 1);
+const LEG_SWING_QUATERNION = new THREE.Quaternion();
+const LEG_SIDE_QUATERNION = new THREE.Quaternion();
+const SPINE_FLEX_AXIS = new THREE.Vector3(0, 0, 1);
+const SPINE_FLEX_QUATERNION = new THREE.Quaternion();
+const ATTACK_BEND_AXIS = new THREE.Vector3(0, 0, 1);
+const TAIL_BEND_AXIS = new THREE.Vector3(1, 0, 0);
+const ATTACK_BEND_QUATERNION = new THREE.Quaternion();
+
+/** Animate both the fallback legs and the visible imported wolf skeleton. */
+function animateWolfLegs(rig: WolfRig, moving: boolean, gait: number, amp: number, dt: number): void {
+  rig.legs.forEach((leg, i) => {
+    const target = moving ? Math.sin(gait + LEG_PHASE[i]!) * 0.45 * amp : 0;
+    leg.rotation.z = damp(leg.rotation.z, target, 18, dt);
+  });
+  rig.importedLegs.forEach((leg, i) => {
+    const cycle = Math.sin(gait + LEG_PHASE[i]!);
+    const stride = i < 2 ? 0.85 : 0.42;
+    const target = moving ? cycle * stride * amp : 0;
+    leg.swing = damp(leg.swing, target, 18, dt);
+    LEG_SWING_QUATERNION.setFromAxisAngle(LEG_SWING_AXIS, leg.swing);
+    leg.bone.quaternion
+      .copy(leg.bindQuaternion)
+      .multiply(LEG_SWING_QUATERNION);
+    if (leg.lowerBone && leg.lowerBindQuaternion) {
+      // Canine forelegs fold backward at the elbow while the rear hocks fold
+      // forward. Giving every lower leg the same sign inverted half the gait.
+      const bendDirection = i < 2 ? 1 : -1;
+      const flex = moving
+        ? bendDirection * (0.08 + Math.max(0, -cycle) * 0.48) * amp
+        : 0;
+      LEG_SWING_QUATERNION.setFromAxisAngle(LEG_SWING_AXIS, flex);
+      leg.lowerBone.quaternion
+        .copy(leg.lowerBindQuaternion)
+        .multiply(LEG_SWING_QUATERNION);
+    }
+  });
+  rig.importedSpine.forEach((joint, i) => {
+    // Offset each successive joint slightly so the torso flex travels from the
+    // hips toward the shoulders rather than hinging as one rigid plank.
+    const target = moving ? Math.sin(gait + i * 0.32) * 0.055 * amp : 0;
+    joint.flex = damp(joint.flex, target, 14, dt);
+    SPINE_FLEX_QUATERNION.setFromAxisAngle(SPINE_FLEX_AXIS, joint.flex);
+    joint.bone.quaternion.copy(joint.bindQuaternion).multiply(SPINE_FLEX_QUATERNION);
+  });
+}
+
+/** Splay the actual bound legs only while the sword spin is under way. */
+function braceWolfLegsForSword(rig: WolfRig, amount: number): void {
+  rig.importedLegs.forEach((leg, i) => {
+    const sideSign = i === 0 || i === 2 ? 1 : -1;
+    LEG_SIDE_QUATERNION.setFromAxisAngle(LEG_SIDE_AXIS, amount * sideSign * 0.34);
+    leg.bone.quaternion.multiply(LEG_SIDE_QUATERNION);
+    if (leg.lowerBone) {
+      LEG_SIDE_QUATERNION.setFromAxisAngle(LEG_SIDE_AXIS, amount * sideSign * 0.2);
+      leg.lowerBone.quaternion.multiply(LEG_SIDE_QUATERNION);
+    }
+  });
+}
 /** Enemy wolves stand just above the player without overwhelming the board. */
 const HELLHOUND_SCALE = 1.3;
 class WolfActor {
@@ -320,10 +400,7 @@ class WolfActor {
 
     const amp = Math.min(1, speed / WOLF_FULL_SPEED);
     if (moving) this.gait += dt * (5 + amp * 11);
-    this.rig.legs.forEach((leg, i) => {
-      const target = moving ? Math.sin(this.gait + LEG_PHASE[i]!) * 0.7 * amp : 0;
-      leg.rotation.z = damp(leg.rotation.z, target, 18, dt);
-    });
+    animateWolfLegs(this.rig, moving, this.gait, amp, dt);
 
     // Hunting posture: head down, tail low, eyes lit.
     //
@@ -345,8 +422,9 @@ class WolfActor {
     this.hurt = Math.max(0, this.hurt - dt * 4);
 
     this.rig.model.position.x = thrust * 0.3 - this.hurt * 0.12;
-    this.rig.model.position.y = (moving ? Math.abs(Math.sin(this.gait)) * 0.05 * amp : 0) - this.hurt * 0.06;
-    this.rig.model.rotation.z = thrust * -0.18 + this.hurt * 0.16;
+    const boundRock = moving ? Math.sin(this.gait) * 0.12 * amp : 0;
+    this.rig.model.position.y = (moving ? Math.abs(Math.sin(this.gait)) * 0.12 * amp : 0) - this.hurt * 0.06;
+    this.rig.model.rotation.z = thrust * -0.18 + this.hurt * 0.16 + boundRock;
     this.rig.head.rotation.z = damp(this.rig.head.rotation.z, hunting ? -0.18 : 0, 6, dt) - thrust * 0.3;
     // A watchful animal keeps its mouth nearly shut. Once it hunts, the jaw
     // parts into a quiet snarl; the attack lunge drives a much wider snap.

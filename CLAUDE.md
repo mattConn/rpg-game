@@ -1222,7 +1222,64 @@ turn-based additions (`phase`, `round`, `moveRange`/`moveFrom`, `meleeRange`,
   headless, so drive `TacticsGame` with a throwaway `node:assert` script under
   `tsx` and delete it. Typecheck and build **in `rpg-tactics/`**.
 
-### Known limitations (turn-based)
+### Current tactics implementation (August 19, 2026)
+
+This section supersedes older statements above about pseudo-turn windows,
+pointer-lock/free mouse look, wooden doors, room-triggered rendering, the 3x3
+arena, two-hound encounters, and a humanoid player. Those describe earlier
+iterations and must not be used as the current contract.
+
+- **The game is real-time.** `TacticsGame.tick` advances continuously; movement,
+  pursuit, attacks, cooldowns, and bites do not wait for a turn window. There is
+  one hellhound, initially stationed near the starting chamber's doorway. The
+  player starts near the center of the enlarged starting chamber.
+- **The dungeon has two large matching chambers and a long broad hallway.** Each
+  chamber is six original squares across (`540px`, 30 fine-grid cells). The hall
+  is two original squares / `180px` wide and 40 cells long. The bare archways
+  are `144px` wide: enough for a hound's 45px body clearance on both jambs but
+  still narrower than the hall.
+- **There are no doors.** No slab renders, nothing can be targeted or toggled,
+  the fifth Interact action slot is empty, and both doorway states remain open
+  only for protocol compatibility. Do not restore door collision or interaction
+  without an explicit request. Player and enemy navigation both use the open
+  arches and `clampPointToFloor`'s region seam handling.
+- **Visibility is ordinary 3D visibility.** There is no room fade, doorway
+  clipping plane, black shroud, or region-based render switch. Geometry renders
+  whenever it is inside the camera frustum and Three.js culls it when offscreen.
+  Distance fog is the scene's only render fog, spanning `BOARD_W * 0.95` through
+  `BOARD_W * 3.2`.
+- **Walls are double height** (`WALL_H = 5.6`). Third-person camera placement
+  raycasts from its look target to the desired orbit position against the real
+  wall meshes. If masonry blocks the sightline, the camera snaps to the nearest
+  clear point; an unobstructed arch remains a valid sightline.
+- **The camera is an orbit controlled by click-drag.** Passive mouse motion does
+  not rotate it. Right/middle/Shift-drag pans, the wheel zooms, and the action
+  bar's handle remains independently draggable. Direct WASD/arrow movement is
+  camera-relative: W/S move toward/away from the top of the view and A/D move
+  across it. Movement faces the wolf along its travel vector.
+- **The player is the imported white wolf**, with yellow glowing eyes and the
+  imported gold crown. The medieval sword and steel dagger sit sideways in its
+  mouth. The sword performs a full spin; the dagger performs its short sweep.
+  The crown and mouth-weapon mount are genuinely reparented with `Bone.attach`
+  to the visible imported `Head_15` bone, so the skeleton—not copied angles—owns
+  their motion.
+- **Wolf animation uses the bound skin, not name-matched scene nodes.**
+  `installImportedWolf` reads bones from each visible `SkinnedMesh.skeleton.bones`
+  after `SkeletonUtils.clone`. The run is a bounding gait: front legs together,
+  rear legs half a cycle later, with shin tuck, a pronounced body rise/fall,
+  body rock, and a small traveling spine flex. The front-leg stride is larger
+  than the rear. Sword attacks bend the imported head and tail and briefly splay
+  the legs. Do not animate the hidden fallback wolf meshes; that was why early
+  leg-animation attempts appeared to do nothing.
+- **The shared vertical action bar has four live actions** (sword, dagger,
+  potion, scroll) and an empty fifth slot. Buttons trigger immediately when
+  clicked and gain yellow viability borders. The bar starts right of center and
+  can be repositioned from its top-left handle.
+- The tactics server runs at `http://localhost:3300`. Verify changes from
+  `rpg-tactics/` with `npm run typecheck`, `npm run build:client`, and
+  `git diff --check`.
+
+### Known limitations (current tactics)
 
 - **No pathfinding exists, and it now shows.** A move is a straight slide to the
   cell you clicked, so leaving the room means clicking the doorway first and the

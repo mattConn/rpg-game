@@ -35,6 +35,7 @@ import {
   AUTO_RESTART_DELAY_MS,
   BOARD_REGION,
   DOOR_CLEARANCE_PX,
+  DOORWAY_WIDTH_PX,
   DOOR_Y,
   type DoorId,
   FAR_REGION,
@@ -121,26 +122,6 @@ const AVOID_WEIGHT = 1.5;
 /** How near its slot counts as standing on it. Slack against per-tick jitter. */
 const ARRIVE_SLACK = 4;
 /**
- * How long a hellhound's bite keeps the world turning after it lands.
- *
- * Long enough for the lunge and the damage number to read as an answer to what
- * you did, short enough that a pack cannot chain bites into a turn of their
- * own: they bite every `ENEMY_ATTACK_INTERVAL_MS`, which is far wider than
- * this, so each extension runs out before the next bite is due.
- */
-const STRIKE_WINDOW_MS = 400;
-/**
- * The beat the pack gets to answer any act of yours in — enough at
- * `ENEMY_SPEED` for a hound to cover most of a square.
- *
- * Without it the window is only as long as your own animation, and a swing that
- * takes 600ms hands the pack 600ms *of that swing*, which is not a turn so much
- * as an overlap. It also matters that they be given long enough to finish
- * arriving: with time moving only on acts, a pack left permanently just short
- * of you is a fight that never starts.
- */
-const PACK_TURN_MS = 600;
-/**
  * Passes of the push-apart. Two hounds settle in one; a third shoved out of one
  * packmate and into another needs the next, and it costs nothing to be right
  * for a bigger pack than this game ships.
@@ -154,15 +135,6 @@ const RANGED_COOLDOWN_MS = 1000;
 const ENEMY_ATTACK_INTERVAL_MS = 1500;
 /** Recovery after throwing a dagger, in ms. */
 const THROW_RECOVER_MS = 220;
-/**
- * No input at all for this long stops the world wherever it stands, *including*
- * mid-chase. **Aggro is permanent**, so a hound that has noticed you is in
- * combat for the whole encounter — which means the one case an away player
- * actually needs covering, being eaten while not at the keyboard, is the one
- * case nothing else catches.
- */
-const AFK_TIMEOUT_MS = 15_000;
-
 /** How fast an un-aggro'd hound patrols, in room pixels per second. */
 const PATROL_SPEED = 50;
 /** Width of the horizontal patrol beat, in room pixels (~1.5 squares). */
@@ -248,7 +220,7 @@ export class TacticsGame {
   private damageNumbers!: DamageNumber[];
   private tombstones!: Array<{ x: number; y: number; gameElapsedMs: number }>;
   private inspectingId!: string | null;
-  /** True means open. Both doors begin shut on a fresh encounter. */
+  /** Doorway state stays open so connected dungeon regions always render. */
   private doors!: Record<DoorId, boolean>;
 
   private strikes!: Array<{ enemyId: string; seq: number }>;
@@ -274,21 +246,7 @@ export class TacticsGame {
   /** Click-to-move destination, cleared on arrival or when WASD overrides. */
   private moveTarget: Point | null = null;
 
-  /**
-   * How long the world still has to run, in `simNow` ms — the deadline on the
-   * action being resolved. This is what carries the pseudo-turn: an act opens a
-   * window, the world runs inside it and stops dead at the end of it.
-   */
-  private actingUntil = 0;
-
-  /** Whether the player was walking last tick — see the handover in `tick`. */
-  private wasMoving = false;
-
-  /**
-   * Whether the player is holding time open with Wait. A *state* rather than an
-   * act: it opens no window and spends no fixed amount, it simply keeps
-   * `shouldRun` true for as long as the button or `.` is down.
-   */
+  /** Legacy input state retained in snapshots for client compatibility. */
   private waiting = false;
 
   /** Player attack cooldown. */
@@ -315,10 +273,6 @@ export class TacticsGame {
    * minute of free bites the instant you moved.
    */
   private simNow = 0;
-  /** Wall-clock ms of the last input of any kind. Only the AFK backstop reads it. */
-  private lastInputAt = 0;
-  /** Whether the last tick decided to stand still. Reported on the snapshot. */
-  private paused = false;
 
   constructor(now: number = Date.now()) {
     this.reset(now);
@@ -369,26 +323,19 @@ export class TacticsGame {
     this.damageNumbers = [];
     this.tombstones = [];
     this.inspectingId = null;
-    this.doors = { arena: false, far: false };
+    this.doors = { arena: true, far: true };
     this.strikes = [];
     this.moveDir = { x: 0, y: 0 };
     this.moveTurnsPlayer = true;
     this.playerHeading = { x: 1, y: 0 };
     this.moveTarget = null;
     this.nextAttackAt = 0;
-    this.actingUntil = 0;
-    this.wasMoving = false;
     this.waiting = false;
     this.deathAt = 0;
     this.killCount = 0;
     this.cooldownStart = null;
-    this.log = ["Two hellhounds watch you from across the vault."];
+    this.log = ["A hellhound watches you from near the vault door."];
     this.lastTick = now;
-    // Real time, not sim time: the backstop measures how long the player has
-    // been away from the keyboard. Left at 0 the encounter would open already
-    // timed out, and the world would never start.
-    this.lastInputAt = now;
-    this.paused = false;
   }
 
   // ------------------------------------------------------------------- tick
@@ -399,34 +346,8 @@ export class TacticsGame {
     // rather than replaying however long the pause lasted as one huge step.
     this.lastTick = realNow;
 
-    // Coming to a halt is the end of an act, and the pack answers it like any
-    // other. Checked before the pause test and not inside the movement code,
-    // because the tick that notices you have stopped is exactly the tick that
-    // would otherwise freeze the world — leaving a hound stranded mid-stride,
-    // and quite possibly just short of you, with the fight yet to start.
-    // Holding Wait is a player at the keyboard with a finger down, so it counts
-    // as input against the away-from-keyboard backstop — the same reasoning that
-    // makes `keyup` count. Without this, holding time open for `AFK_TIMEOUT_MS`
-    // would trip the very rule that exists to catch a player who has left.
-    if (this.waiting) this.lastInputAt = realNow;
-
-    const moving = this.moveTarget !== null || Math.hypot(this.moveDir.x, this.moveDir.y) > 0.001;
-    if (this.wasMoving && !moving) this.act(PACK_TURN_MS);
-    this.wasMoving = moving;
-
-    this.paused = !this.shouldRun(realNow);
-    if (this.paused) {
-      // Damage numbers used to be dropped here, because a still world never
-      // ages them and one caught mid-fade would hang at whatever alpha it had
-      // reached — which was the right call when a pause meant nobody was
-      // playing. Now that the world stops after *every* exchange, dropping them
-      // would blink the round's own numbers out a few hundred ms after they
-      // appeared, and always before they had finished rising. They hold instead,
-      // and resume ageing the moment the next act spends time. A frozen number
-      // over the thing it was taken off is a report of the round just fought.
-      return;
-    }
-
+    // Real-time simulation: the world advances every server tick, regardless
+    // of whether the player is moving, attacking, or standing still.
     this.simNow += dt * 1000;
     this.gameElapsedMs += dt * 1000;
 
@@ -460,11 +381,8 @@ export class TacticsGame {
     if (this.player.health <= 0) {
       this.tombstones.push({ x: this.player.x, y: this.player.y, gameElapsedMs: this.gameElapsedMs });
       this.deathAt = this.simNow;
-      this.finish("dead", "The pack pulls you down.");
+      this.finish("dead", "The hellhound pulls you down.");
       return;
-    }
-    if (this.enemies.length === 0) {
-      this.finish("cleared", "Both hounds are down. The vault is quiet.");
     }
   }
 
@@ -718,9 +636,6 @@ export class TacticsGame {
       this.spawnDamageNumber(this.player.x, this.player.y, HOUND_DAMAGE, DAMAGE_COLOR_TAKEN);
       this.inspectingId = null;
       enemy.nextAttackAt = now + ENEMY_ATTACK_INTERVAL_MS;
-      // The pack's half of "only actions move time": a bite holds the world
-      // open long enough to be seen as the answer it is.
-      this.act(STRIKE_WINDOW_MS);
     }
 
     // Chase: move toward a position where the enemy could bite.
@@ -851,9 +766,7 @@ export class TacticsGame {
    *
    * Worth knowing before adding anything that assumes a fight can lapse:
    * `snapshot.aggro` goes false only when the last woken hound is dead, so the
-   * hunted eye stays lit from the first bark to the end of the encounter, and
-   * `AFK_TIMEOUT_MS` is the *only* thing that will stop a world whose player has
-   * walked away mid-chase.
+   * hunted eye stays lit from the first bark to the end of the encounter.
    */
   private wakeAdjacent(): void {
     const player = this.playerAt();
@@ -1020,20 +933,6 @@ export class TacticsGame {
     this.cooldownSlot = this.activeSlot;
     this.cooldownStart = this.simNow;
     this.cooldownTotal = totalMs;
-    // Swinging is what buys the world its time: your own recovery, or the beat
-    // the pack answers in, whichever is longer. For the sword they are the same
-    // number, so the blind on the action bar *is* the round; a dagger's longer
-    // recovery buys the pack more ground, which is the trade it makes.
-    this.act(Math.max(totalMs, PACK_TURN_MS));
-  }
-
-  /**
-   * Open (or extend) the window the world runs in. Never shortens one — an act
-   * landing inside somebody else's window pushes the end out if it needs to and
-   * otherwise leaves it alone, so a fast bite can't cut a slow throw short.
-   */
-  private act(durationMs: number): void {
-    this.actingUntil = Math.max(this.actingUntil, this.simNow + durationMs);
   }
 
   private wound(enemy: Hound, amount: number): void {
@@ -1050,10 +949,6 @@ export class TacticsGame {
   // ------------------------------------------------------------------ input
 
   handleInput(msg: TacticsInput, now: number = Date.now()): void {
-    // Every message counts, `keyup` included: letting go of a key is the player
-    // being at the keyboard, and the backstop only asks whether they are there.
-    this.lastInputAt = now;
-
     if (msg.type === "restart") {
       this.restart(now);
       return;
@@ -1092,8 +987,7 @@ export class TacticsGame {
         this.attack();
         break;
       case "wait":
-        // Deliberately does not cancel a walk: both simply keep the world
-        // running, and there is nothing to arbitrate between them.
+        // Kept for wire compatibility; waiting no longer controls simulation.
         this.waiting = msg.held;
         break;
       case "move":
@@ -1198,9 +1092,11 @@ export class TacticsGame {
 
   /** Stop a moving actor on its current side of each closed door plane. */
   private stopAtDoor(from: Point, target: Point, clearance = DOOR_CLEARANCE_PX): Point {
+    const doorwayX = cellCenter({ col: HALL_MID_COL, row: 0 }).x;
     for (const id of ["arena", "far"] as const) {
-      if (this.doors[id]) continue;
       const y = DOOR_Y[id];
+      const throughOpening = Math.abs(target.x - doorwayX) <= DOORWAY_WIDTH_PX / 2 - clearance;
+      if (this.doors[id] && throughOpening) continue;
       // Clamp on entry to the clearance band, not merely when the actor's
       // centre crosses the door plane. The old crossing-only test let the eye
       // get almost flush with the wood; at an oblique angle the camera's near
@@ -1244,7 +1140,7 @@ export class TacticsGame {
   private doorInteractionPoint(id: DoorId): Point {
     const doorwayX = cellCenter({ col: HALL_MID_COL, row: 0 }).x;
     if (!this.doors[id]) return { x: doorwayX, y: DOOR_Y[id] };
-    const passageWidth = HALL_REGION.cols * TILE_PX;
+    const passageWidth = DOORWAY_WIDTH_PX;
     const hingeX = doorwayX - passageWidth / 2;
     const halfSlab = (passageWidth - 0.12 * 30) / 2;
     const angle = (id === "arena" ? 1 : -1) * Math.PI * 0.48;
@@ -1424,51 +1320,6 @@ export class TacticsGame {
     );
   }
 
-  /**
-   * **Whether the world has any reason to run — which is to say, whether
-   * anything is being *done*.** Only actions spend time. Standing still spends
-   * none, in a fight exactly as much as out of one: the pack holds mid-stride,
-   * every bite timer holds, the clock holds, and none of it moves again until
-   * you act. Nothing is scaled or skipped — time simply isn't spent.
-   *
-   * That makes the game pseudo-turn-based without a turn structure existing
-   * anywhere in the code. There is no queue, no phase order and no round
-   * counter: there is a window, an act opens one, and the world runs inside it
-   * and stops at the end of it. Two things open a window —
-   *
-   * - **your attack**, for exactly as long as its own cooldown. The window and
-   *   the weapon's cadence are the same number, so the action-bar blind is
-   *   literally the round resolving, and a slow weapon buys the pack more
-   *   ground than a fast one does. That is the trade a dagger makes.
-   * - **a hellhound's bite** (`STRIKE_WINDOW_MS`), so the lunge that answers you
-   *   plays out instead of freezing in the air halfway.
-   *
-   * Walking is the third, and it is not a window but a state: the world runs
-   * while you are moving, because a walk is an action you are still taking. It
-   * is what a hound gets to close on you during, and stopping ends it on the
-   * very next tick.
-   *
-   * **`anyAwake()` used to be the last line here**, and that is the whole of
-   * what changed: a woken pack ran the world by *existing*, so a fight was
-   * continuous real time and only the lull before one was still. Now aggro
-   * grants no time on its own — a hellhound a stride away from your throat stays
-   * there for as long as you leave it.
-   */
-  private shouldRun(realNow: number): boolean {
-    if (realNow - this.lastInputAt >= AFK_TIMEOUT_MS) return false;
-
-    // Dead is not idle: the auto-resurrect timer is the one thing that should
-    // still count down with the player doing nothing, since doing nothing is
-    // exactly what the feature asks of them.
-    if (isOver(this.phase)) return this.phase === "dead" && this.autoRestart;
-
-    if (this.waiting) return true;
-    if (this.moveTarget !== null) return true;
-    if (Math.hypot(this.moveDir.x, this.moveDir.y) > 0.001) return true;
-
-    return this.simNow < this.actingUntil;
-  }
-
   // --------------------------------------------------------------- snapshot
 
   snapshot(): TacticsSnapshot {
@@ -1570,14 +1421,8 @@ export class TacticsGame {
       waiting: this.waiting,
       strikes: this.strikes.map((s) => ({ ...s })),
       log: this.log.slice(-LOG_LINES),
-      hint: this.paused
-        ? this.anyAwake()
-          // A still world in a fight is the player being waited on, not a game
-          // that has stopped — so the line says what it is waiting *for*.
-          ? "Your turn — nothing moves until you do. Space to swing, WASD to move."
-          : "Paused — move, or act, to start the world again."
-        : this.hint(),
-      paused: this.paused,
+      hint: this.hint(),
+      paused: false,
     };
   }
 }
