@@ -59,8 +59,11 @@ const FAR_CX = toX(regionCentre(FAR_REGION).x);
 /** Bare floor between the flagstones and the masonry. */
 const MARGIN = toX(CHAMBER_MARGIN_PX);
 
-const WALL_H = 5.6;
+const WALL_H = 8.4;
 const WALL_T = toX(WALL_THICKNESS_PX);
+const UPPER_WALL_FOG_HEIGHT = 3.5;
+const UPPER_WALL_FOG_OVERHANG = 0.9;
+const DUNGEON_SKY_COLOR = 0x111111;
 
 /** A chamber: the board plus its margin of bare floor. 12x12 units. */
 const START_CHAMBER_W = BOARD_W + MARGIN * 2;
@@ -365,7 +368,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
    */
   renderer.shadowMap.enabled = false;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  renderer.setClearColor(0x111111);
+  renderer.setClearColor(DUNGEON_SKY_COLOR);
 
   const scene = new THREE.Scene();
   /**
@@ -378,7 +381,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
    * The near plane matters as much as the far one — start it too far out and
    * the fog reads as a wall of haze hanging at a fixed distance instead of air.
    */
-  scene.fog = new THREE.Fog(0x111111, BOARD_W * 0.95, BOARD_W * 3.2);
+  scene.fog = new THREE.Fog(DUNGEON_SKY_COLOR, BOARD_W * 0.95, BOARD_W * 3.2);
 
   const loadStoneTexture = (path: string) => {
     const texture = new THREE.TextureLoader().load(path);
@@ -466,7 +469,31 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   // -------------------------------------------------------------------- walls
 
-  const capMaterial = new THREE.MeshLambertMaterial({ color: 0x4c4c58, flatShading: true });
+  const upperWallFogMaterial = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      fogColor: { value: new THREE.Color(DUNGEON_SKY_COLOR) },
+      fogHeight: { value: UPPER_WALL_FOG_HEIGHT },
+    },
+    vertexShader: `
+      uniform float fogHeight;
+      varying float vHeight;
+      void main() {
+        vHeight = position.y / fogHeight + 0.5;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 fogColor;
+      varying float vHeight;
+      void main() {
+        float alpha = smoothstep(0.0, 0.72, vHeight);
+        gl_FragColor = vec4(fogColor, alpha);
+      }
+    `,
+  });
   const wallOccluders: THREE.Mesh[] = [];
   const addWall = (w: number, d: number, x: number, z: number, height = WALL_H) => {
     const tex = wallTexture.clone();
@@ -479,10 +506,27 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     scene.add(wall);
     wall.updateMatrixWorld();
     wallOccluders.push(wall);
-    const cap = new THREE.Mesh(new THREE.BoxGeometry(w + 0.18, 0.2, d + 0.18), capMaterial);
-    cap.position.set(x, height + 0.1, z);
-    cap.castShadow = true;
-    scene.add(cap);
+    // Vertical planes only: a closed box creates its own visible top lip. Two
+    // faces cover either side of each wall while leaving no horizontal edge.
+    const fogY = height - UPPER_WALL_FOG_HEIGHT / 2 + UPPER_WALL_FOG_OVERHANG;
+    if (w >= d) {
+      const geometry = new THREE.PlaneGeometry(w + 0.12, UPPER_WALL_FOG_HEIGHT);
+      for (const side of [-1, 1]) {
+        const fog = new THREE.Mesh(geometry, upperWallFogMaterial);
+        fog.position.set(x, fogY, z + side * (d / 2 + 0.061));
+        fog.renderOrder = 4;
+        scene.add(fog);
+      }
+    } else {
+      const geometry = new THREE.PlaneGeometry(d + 0.12, UPPER_WALL_FOG_HEIGHT);
+      for (const side of [-1, 1]) {
+        const fog = new THREE.Mesh(geometry, upperWallFogMaterial);
+        fog.rotation.y = Math.PI / 2;
+        fog.position.set(x + side * (w / 2 + 0.061), fogY, z);
+        fog.renderOrder = 4;
+        scene.add(fog);
+      }
+    }
   };
 
   const archLeft = ARCH_CENTRE - DOOR_W / 2;
