@@ -600,8 +600,8 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
     });
     rig.model.add(visual);
     rig.model.updateMatrixWorld(true);
-    // The hidden procedural head is the mount carrying the crown and mouth
-    // weapons. Reparent it to the real bound head bone while preserving its
+    // The hidden procedural head is the mount carrying the mouth weapons.
+    // Reparent it to the real bound head bone while preserving its
     // tuned world transform; from here on the skeleton moves it directly.
     if (importedHead) importedHead.attach(rig.head);
   }).catch((error: unknown) => console.warn("Could not load imported wolf model", error));
@@ -844,7 +844,6 @@ export function buildPlayerWolf(): PlayerWolfRig {
   weaponMount.add(sword, dagger);
   installImportedSword(sword);
   installImportedDagger(dagger, "mouth");
-  installImportedCrown(rig.head);
   return { ...rig, sword, dagger };
 }
 
