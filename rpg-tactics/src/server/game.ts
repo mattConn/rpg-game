@@ -40,11 +40,9 @@ import {
   type DoorId,
   FAR_REGION,
   HALL_REGION,
-  HOUND_DAMAGE,
   HOUND_MAX_HEALTH,
   HOUND_STARTS,
   LOG_LINES,
-  MELEE_DAMAGE,
   MELEE_RANGE,
   MIN_SEPARATION,
   MOVE_RANGE,
@@ -78,11 +76,16 @@ import {
 
 const DAMAGE_COLOR_DEALT = "#ffd633";
 const DAMAGE_COLOR_TAKEN = "#ff6b6b";
+/** A deliberately tight 90-degree attack cone: 45 degrees either side. */
+const ATTACK_CONE_DOT = Math.cos(Math.PI / 4);
+const SWORD_FRONT_DAMAGE = 15;
+const SWORD_SPIN_DAMAGE = 8;
 
 const MAX_CORPSES = 8;
 
 /** Player walking speed in room pixels per second. */
 const PLAYER_SPEED = 200;
+const PLAYER_RUN_MULTIPLIER = 1.6;
 /** Enemy chase speed in room pixels per second. */
 const ENEMY_SPEED = 140;
 /**
@@ -133,6 +136,10 @@ const MELEE_COOLDOWN_MS = 600;
 const RANGED_COOLDOWN_MS = 1000;
 /** How often a hellhound bites, in ms. */
 const ENEMY_ATTACK_INTERVAL_MS = 1500;
+/** Slow enough that circling behind a hound creates a real attack window. */
+const HOUND_TURN_SPEED = 2.2;
+/** A strict frontal bite: 35 degrees to either side of the snout. */
+const HOUND_ATTACK_CONE_DOT = Math.cos((35 * Math.PI) / 180);
 /** Recovery after throwing a dagger, in ms. */
 const THROW_RECOVER_MS = 220;
 /** How fast an un-aggro'd hound patrols, in room pixels per second. */
@@ -142,6 +149,8 @@ const PATROL_SPAN = SQUARE_PX * 1.5;
 /** Close enough, centred enough, and faced closely enough to operate a door. */
 const DOOR_INTERACT_RANGE = TILE_PX * 3;
 const DOOR_FACING_DOT = Math.cos(Math.PI / 3);
+const JUMP_MS = 620;
+const JUMP_SPEED_MULTIPLIER = 1.8;
 
 // Corridor waypoints for cross-region navigation.
 const HALL_MID_COL = HALL_REGION.col + Math.floor(HALL_REGION.cols / 2);
@@ -181,6 +190,7 @@ interface Hound extends Actor {
   patrolLeft: number;
   patrolRight: number;
   patrolDir: 1 | -1;
+  heading: Point;
 }
 
 interface DamageNumber {
@@ -242,7 +252,9 @@ export class TacticsGame {
   /** The direction WASD is pushing, as a unit vector or zero. */
   private moveDir: Point = { x: 0, y: 0 };
   private moveTurnsPlayer = true;
+  private playerRunning = false;
   private playerHeading: Point = { x: 1, y: 0 };
+  private jumpUntil = 0;
   /** Click-to-move destination, cleared on arrival or when WASD overrides. */
   private moveTarget: Point | null = null;
 
@@ -308,6 +320,7 @@ export class TacticsGame {
         patrolLeft: center.x,
         patrolRight: center.x,
         patrolDir: -1,
+        heading: { x: -1, y: 0 },
       };
       // Same seating a hound gets when it gives up on you, so a beat is laid
       // out one way and not two.
@@ -327,8 +340,10 @@ export class TacticsGame {
     this.strikes = [];
     this.moveDir = { x: 0, y: 0 };
     this.moveTurnsPlayer = true;
+    this.playerRunning = false;
     this.playerHeading = { x: 1, y: 0 };
     this.moveTarget = null;
+    this.jumpUntil = 0;
     this.nextAttackAt = 0;
     this.waiting = false;
     this.deathAt = 0;
@@ -400,7 +415,10 @@ export class TacticsGame {
       this.moveTarget = null;
       const nx = this.moveDir.x / dirLen;
       const ny = this.moveDir.y / dirLen;
-      const step = PLAYER_SPEED * dt;
+      const movingForward = nx * this.playerHeading.x + ny * this.playerHeading.y > 0.5;
+      const jumpMomentum = this.jumping() && movingForward ? JUMP_SPEED_MULTIPLIER : 1;
+      const runMomentum = this.playerRunning ? PLAYER_RUN_MULTIPLIER : 1;
+      const step = PLAYER_SPEED * runMomentum * jumpMomentum * dt;
       this.stepPlayer(nx * step, ny * step, this.moveTurnsPlayer);
     } else if (this.moveTarget) {
       // Click-to-move: walk toward the target.
@@ -614,6 +632,7 @@ export class TacticsGame {
 
     this.place(enemy, { x: nx, y: pos.y });
     enemy.facing = enemy.patrolDir;
+    enemy.heading = { x: enemy.patrolDir, y: 0 };
   }
 
   /**
@@ -622,6 +641,7 @@ export class TacticsGame {
   private updateEnemy(enemy: Hound, dt: number, now: number): void {
     const enemyPos = this.at(enemy);
     const playerPos = this.playerAt();
+    this.turnHoundToward(enemy, playerPos, dt);
 
     // Biting and moving are not exclusive. Reach is a wide circle and a slot is
     // one point in it, so a hound that stopped dead the instant it could bite
@@ -629,11 +649,19 @@ export class TacticsGame {
     // ended up loitering on the first one's shoulder for the whole fight
     // instead of coming up alongside. It bites from where it is, and keeps
     // taking its place while it does.
-    const biting = canReach(enemyPos, playerPos);
-    if (biting && now >= enemy.nextAttackAt) {
+    const toPlayerX = playerPos.x - enemyPos.x;
+    const toPlayerY = playerPos.y - enemyPos.y;
+    const playerGap = Math.hypot(toPlayerX, toPlayerY);
+    // A broad forward cone: generous at the sides, but never through the
+    // hound's flank or back while it is still trying to turn around.
+    const playerInBiteCone = playerGap < 0.001 ||
+      (toPlayerX * enemy.heading.x + toPlayerY * enemy.heading.y) / playerGap >= HOUND_ATTACK_CONE_DOT;
+    const biting = canReach(enemyPos, playerPos) && playerInBiteCone;
+    if (biting && !this.jumping() && now >= enemy.nextAttackAt) {
+      const biteDamage = Math.random() < 0.5 ? 10 : 20;
       this.strikes.push({ enemyId: enemy.id, seq: ++this.strikeSeq });
-      this.player.health = Math.max(0, this.player.health - HOUND_DAMAGE);
-      this.spawnDamageNumber(this.player.x, this.player.y, HOUND_DAMAGE, DAMAGE_COLOR_TAKEN);
+      this.player.health = Math.max(0, this.player.health - biteDamage);
+      this.spawnDamageNumber(this.player.x, this.player.y, biteDamage, DAMAGE_COLOR_TAKEN);
       this.inspectingId = null;
       enemy.nextAttackAt = now + ENEMY_ATTACK_INTERVAL_MS;
     }
@@ -666,6 +694,19 @@ export class TacticsGame {
     enemy.facing = biting
       ? facingToward(enemyPos, playerPos, enemy.facing)
       : facingToward(enemyPos, target, enemy.facing);
+  }
+
+  private turnHoundToward(enemy: Hound, target: Point, dt: number): void {
+    const dx = target.x - enemy.x;
+    const dy = target.y - enemy.y;
+    if (Math.hypot(dx, dy) < 0.001) return;
+    const current = Math.atan2(enemy.heading.y, enemy.heading.x);
+    const wanted = Math.atan2(dy, dx);
+    const delta = Math.atan2(Math.sin(wanted - current), Math.cos(wanted - current));
+    const turn = Math.max(-HOUND_TURN_SPEED * dt, Math.min(HOUND_TURN_SPEED * dt, delta));
+    const angle = current + turn;
+    enemy.heading = { x: Math.cos(angle), y: Math.sin(angle) };
+    if (Math.abs(enemy.heading.x) > 0.001) enemy.facing = enemy.heading.x >= 0 ? 1 : -1;
   }
 
   /** Which region a cell belongs to, falling back to the board. */
@@ -852,10 +893,7 @@ export class TacticsGame {
     this.activeSlot = index;
   }
 
-  /**
-   * Swing the selected weapon at the mark. Gated by a cooldown rather than
-   * by a turn — the player can keep moving while waiting for the next swing.
-   */
+  /** Swing forward, hitting the nearest hound caught in the attack cone. */
   private attack(): void {
     if (isOver(this.phase)) return;
     if (this.simNow < this.nextAttackAt) return;
@@ -865,9 +903,10 @@ export class TacticsGame {
       this.say("Use Interact on a targeted door.");
       return;
     }
-    const target = this.livingTarget();
+    const target = action?.kind === "melee"
+      ? this.nearestEnemyInMeleeRange()
+      : this.nearestEnemyInAttackCone();
     const reach = target ? canReach(this.playerAt(), this.at(target)) : false;
-    const inFront = target ? this.targetInFront(target) : false;
 
     // **Committing is the decision; connecting is the consequence.** A swing
     // that finds nothing — no mark, or a hound out of reach — still costs
@@ -885,21 +924,16 @@ export class TacticsGame {
       return;
     }
 
-    if (!inFront) {
-      this.say(`The ${target.name.toLowerCase()} is behind you.`);
-      this.startCooldown(action.kind === "melee" ? MELEE_COOLDOWN_MS : RANGED_COOLDOWN_MS);
-      return;
-    }
-
     if (action.kind === "melee") {
       if (!reach) {
         this.say(`You swing and miss the ${target.name.toLowerCase()}.`);
         this.startCooldown(MELEE_COOLDOWN_MS);
         return;
       }
-      this.wound(target, MELEE_DAMAGE);
+      const damage = this.enemyInPlayerAttackCone(target) ? SWORD_FRONT_DAMAGE : SWORD_SPIN_DAMAGE;
+      this.wound(target, damage);
       this.wake(target);
-      this.say(`You cut the ${target.name.toLowerCase()} for ${MELEE_DAMAGE}.`);
+      this.say(`You cut the ${target.name.toLowerCase()} for ${damage}.`);
       this.startCooldown(MELEE_COOLDOWN_MS);
       return;
     }
@@ -991,10 +1025,13 @@ export class TacticsGame {
         this.waiting = msg.held;
         break;
       case "move":
-        this.setMoveDir(msg.dx, msg.dy, msg.turn !== false);
+        this.setMoveDir(msg.dx, msg.dy, msg.turn !== false, msg.run === true);
         break;
       case "face":
         this.setHeading(msg.dx, msg.dy);
+        break;
+      case "jump":
+        if (!isOver(this.phase) && !this.jumping()) this.jumpUntil = this.simNow + JUMP_MS;
         break;
       case "interact": {
         if (TACTICS_ACTIONS[this.activeSlot]?.kind !== "interact") {
@@ -1024,9 +1061,10 @@ export class TacticsGame {
   }
 
   /** Set or clear the movement direction from WASD. */
-  private setMoveDir(dx: number, dy: number, turnToTravel: boolean): void {
+  private setMoveDir(dx: number, dy: number, turnToTravel: boolean, run: boolean): void {
     this.moveDir = { x: dx, y: dy };
     this.moveTurnsPlayer = turnToTravel;
+    this.playerRunning = run;
   }
 
   private setHeading(dx: number, dy: number): void {
@@ -1038,11 +1076,12 @@ export class TacticsGame {
     }
   }
 
+  private jumping(): boolean {
+    return this.simNow < this.jumpUntil;
+  }
+
   private onKey(key: string, code: string, now: number): void {
-    if (code === "Tab") {
-      this.cycleTarget();
-      return;
-    }
+    if (code === "Tab") return;
     if (key >= "1" && key <= "5" && key.length === 1) {
       this.selectSlot(Number(key) - 1);
       return;
@@ -1071,13 +1110,6 @@ export class TacticsGame {
       return;
     }
 
-    const enemy = this.enemyNear(point);
-    if (enemy) {
-      this.targetId = this.targetId === enemy.id ? null : enemy.id;
-      this.targetDoor = null;
-      return;
-    }
-
     // Click-to-move: walk to the clicked point (no grid snapping).
     const cell = cellAtPoint(point);
     if (cell && inGrid(cell)) {
@@ -1086,8 +1118,6 @@ export class TacticsGame {
       return;
     }
 
-    const corpse = this.corpseNear(point);
-    if (corpse) this.targetId = corpse.id;
   }
 
   /** Stop a moving actor on its current side of each closed door plane. */
@@ -1198,23 +1228,10 @@ export class TacticsGame {
   private onDoubleClick(point: Point): void {
     if (this.inspectingId) return;
 
-    const enemy = this.enemyNear(point);
-    if (enemy) {
-      this.targetId = enemy.id;
-      return;
-    }
-
     const corpse = this.corpseNear(point);
     if (corpse) {
-      this.targetId = corpse.id;
       this.inspectingId = corpse.id;
     }
-  }
-
-  private cycleTarget(): void {
-    if (this.enemies.length === 0) return;
-    const at = this.enemies.findIndex((e) => e.id === this.targetId);
-    this.targetId = this.enemies[(at + 1) % this.enemies.length]!.id;
   }
 
   private restart(now: number): void {
@@ -1232,8 +1249,40 @@ export class TacticsGame {
     return this.at(this.player);
   }
 
-  private livingTarget(): Hound | null {
-    return this.enemies.find((e) => e.id === this.targetId) ?? null;
+  private nearestEnemyInAttackCone(): Hound | null {
+    let nearest: Hound | null = null;
+    let nearestGap = Infinity;
+    for (const enemy of this.enemies) {
+      const dx = enemy.x - this.player.x;
+      const dy = enemy.y - this.player.y;
+      const gap = Math.hypot(dx, dy);
+      if (this.enemyInPlayerAttackCone(enemy) && gap < nearestGap) {
+        nearest = enemy;
+        nearestGap = gap;
+      }
+    }
+    return nearest;
+  }
+
+  private nearestEnemyInMeleeRange(): Hound | null {
+    let nearest: Hound | null = null;
+    let nearestGap = Infinity;
+    for (const enemy of this.enemies) {
+      const gap = distance(this.playerAt(), this.at(enemy));
+      if (gap <= MELEE_RANGE && gap < nearestGap) {
+        nearest = enemy;
+        nearestGap = gap;
+      }
+    }
+    return nearest;
+  }
+
+  private enemyInPlayerAttackCone(enemy: Hound): boolean {
+    const dx = enemy.x - this.player.x;
+    const dy = enemy.y - this.player.y;
+    const gap = Math.hypot(dx, dy);
+    return gap < 0.001 ||
+      (dx * this.playerHeading.x + dy * this.playerHeading.y) / gap >= ATTACK_CONE_DOT;
   }
 
   private nextDamageNumberId = 0;
@@ -1260,9 +1309,10 @@ export class TacticsGame {
       return this.targetDoor !== null && this.canInteractWithDoor(this.targetDoor, this.playerHeading);
     }
     if (this.simNow < this.nextAttackAt) return false;
-    const target = this.livingTarget();
+    const target = action?.kind === "melee"
+      ? this.nearestEnemyInMeleeRange()
+      : this.nearestEnemyInAttackCone();
     if (!target) return false;
-    if (!this.targetInFront(target)) return false;
     const reach = canReach(this.playerAt(), this.at(target));
     return action?.kind === "melee" ? reach : action?.kind === "ranged" ? !reach : false;
   }
@@ -1277,7 +1327,7 @@ export class TacticsGame {
         break;
     }
 
-    const target = this.livingTarget();
+    const target = this.nearestEnemyInAttackCone();
     if (this.targetDoor) {
       return this.canInteractWithDoor(this.targetDoor, this.playerHeading)
         ? "Door ready — 5 for Interact, then Space."
@@ -1285,10 +1335,9 @@ export class TacticsGame {
     }
     if (!target) {
       return this.anyAwake()
-        ? "Click a hellhound to mark it, or WASD to move."
-        : "Nothing has noticed you yet. Mark one and throw, or walk closer.";
+        ? "Face a hellhound and attack, or WASD to move."
+        : "Nothing has noticed you yet. Face one and throw, or walk closer.";
     }
-    if (!this.targetInFront(target)) return "Turn to face your marked target before attacking.";
     if (canReach(this.playerAt(), this.at(target))) {
       return "In reach — 1 for the sword, Space to swing.";
     }
@@ -1297,15 +1346,6 @@ export class TacticsGame {
 
   private anyAwake(): boolean {
     return this.enemies.some((e) => e.aggro);
-  }
-
-  /** True throughout the 180-degree hemisphere centred on player heading. */
-  private targetInFront(target: Hound): boolean {
-    const dx = target.x - this.player.x;
-    const dy = target.y - this.player.y;
-    const gap = Math.hypot(dx, dy);
-    if (gap < 0.001) return true;
-    return (dx * this.playerHeading.x + dy * this.playerHeading.y) / gap >= -1e-6;
   }
 
   /**
@@ -1324,7 +1364,6 @@ export class TacticsGame {
 
   snapshot(): TacticsSnapshot {
     const inspected = this.corpses.find((c) => c.id === this.inspectingId) ?? null;
-    const target = this.livingTarget();
     const dead = this.phase === "dead";
 
     const cooldown = this.cooldownStart === null || this.cooldownTotal <= 0
@@ -1337,6 +1376,7 @@ export class TacticsGame {
 
     return {
       playerHeading: { ...this.playerHeading },
+      playerRunning: this.playerRunning,
       doors: { ...this.doors },
       targetDoor: this.targetDoor,
       player: {
@@ -1367,6 +1407,7 @@ export class TacticsGame {
         chasing: e.aggro,
         aggro: e.aggro,
         facing: e.facing,
+        heading: { ...e.heading },
       })),
       corpses: this.corpses.map((c) => ({
         id: c.id,
@@ -1387,8 +1428,8 @@ export class TacticsGame {
         : null,
       projectiles: this.thrown ? [{ ...this.thrown.projectile }] : [],
       damageNumbers: this.damageNumbers.map((dn) => ({ ...dn })),
-      targetId: this.targetId,
-      attacking: target !== null,
+      targetId: null,
+      attacking: false,
       activeSlot: this.activeSlot,
       cooldown,
       selectedCanAttack: this.selectedCanAttack(),

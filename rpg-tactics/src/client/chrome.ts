@@ -46,9 +46,6 @@ export function drawTacticsChrome(
   viewWidth: number = WORLD_WIDTH,
 ): void {
   ctx.setLineDash([]);
-  // Open when something is hunting you, half-lidded when you are merely close
-  // enough to wake it. Open wins: a hound already on you is the louder fact.
-  if (!isOver(snap.phase) && (snap.aggro || snap.nearAggro)) drawHuntedEye(ctx, !snap.aggro);
   if (isOver(snap.phase)) drawOutcome(ctx, snap, viewWidth);
 }
 

@@ -36,11 +36,24 @@ const MOVING_EPSILON = 6;
 /** Full-speed references, so a slow walk swings its legs less than a sprint. */
 const PLAYER_FULL_SPEED = 160;
 const WOLF_FULL_SPEED = 140;
+const PLAYER_WOLF_STRIDE_SPEED = 200;
 
 const SWING_MS = 320;
 const LUNGE_MS = 300;
 const COLLAPSE_MS = 450;
 const FALL_MS = 600;
+const JUMP_MS = 620;
+const JUMP_HEIGHT = 1.4;
+
+/** Quick launch, long fall: peak at 28% of the jump, then gather downward speed. */
+function jumpArc(age: number): number {
+  if (age >= 1) return 0;
+  const t = Math.max(0, age);
+  const riseEnd = 0.28;
+  return t < riseEnd
+    ? Math.sin((t / riseEnd) * Math.PI / 2)
+    : Math.cos(((t - riseEnd) / (1 - riseEnd)) * Math.PI / 2);
+}
 
 /** Walk one id-keyed map of rigs to match the snapshot's list. */
 function syncKeys<T>(
@@ -82,6 +95,7 @@ export class PlayerActor {
   /** ms into the current attack animation, or null when not swinging. */
   private swingAt: number | null = null;
   private fall = 0;
+  private jumpAt: number | null = null;
 
   constructor(_color: string) {
     this.rig = buildHuman();
@@ -91,6 +105,11 @@ export class PlayerActor {
   /** Start the swing animation for the weapon that just fired. */
   swing(now: number, _kind: AttackKind = "melee"): void {
     this.swingAt = now;
+  }
+
+  jump(now: number): void {
+    if (this.jumpAt !== null) return;
+    this.jumpAt = now;
   }
 
   /** Which blade is in the fist — follows the action bar, like the 2D glyph. */
@@ -107,7 +126,10 @@ export class PlayerActor {
     elapsed: number,
   ): void {
     const { x, y } = snap.player;
-    this.root.position.set(toX(x), 0, toZ(y));
+    const jumpAge = this.jumpAt === null ? 1 : (now - this.jumpAt) / JUMP_MS;
+    const jumpLift = jumpArc(jumpAge) * JUMP_HEIGHT;
+    if (jumpAge >= 1) this.jumpAt = null;
+    this.root.position.set(toX(x), jumpLift, toZ(y));
 
     const dx = this.lastX === null ? 0 : x - this.lastX;
     const dy = this.lastY === null ? 0 : y - this.lastY;
@@ -175,6 +197,7 @@ class PlayerWolfActor {
   private attackAt: number | null = null;
   private attackKind: AttackKind = "melee";
   private fall = 0;
+  private jumpAt: number | null = null;
 
   constructor() {
     this.rig = buildPlayerWolf();
@@ -186,6 +209,11 @@ class PlayerWolfActor {
     this.attackKind = kind;
   }
 
+  jump(now: number): void {
+    if (this.jumpAt !== null) return;
+    this.jumpAt = now;
+  }
+
   setWeapon(kind: AttackKind): void {
     this.rig.sword.visible = kind === "melee";
     this.rig.dagger.visible = kind === "ranged";
@@ -193,14 +221,21 @@ class PlayerWolfActor {
 
   update(snap: GameSnapshot, _facePoint: { x: number; y: number } | null, dt: number, now: number, elapsed: number): void {
     const { x, y } = snap.player;
-    this.root.position.set(toX(x), 0, toZ(y));
+    const jumpAge = this.jumpAt === null ? 1 : (now - this.jumpAt) / JUMP_MS;
+    const jumpTuck = jumpArc(jumpAge);
+    const jumpLift = jumpTuck * JUMP_HEIGHT;
+    if (jumpAge >= 1) this.jumpAt = null;
+    this.root.position.set(toX(x), jumpLift, toZ(y));
     const dx = this.lastX === null ? 0 : x - this.lastX;
     const dy = this.lastY === null ? 0 : y - this.lastY;
     this.lastX = x;
     this.lastY = y;
     const speed = dt > 0 ? Math.hypot(dx, dy) / dt : 0;
     const moving = speed > MOVING_EPSILON && !snap.dead;
-    const heading = (snap as GameSnapshot & { playerHeading?: { x: number; y: number } }).playerHeading;
+    const playerState = snap as GameSnapshot & {
+      playerHeading?: { x: number; y: number };
+    };
+    const heading = playerState.playerHeading;
     const wanted = heading ? yawFor(heading.x, heading.y) : moving ? yawFor(dx, dy) : yawFor(snap.player.facing, 0);
     this.yaw += angleDelta(this.yaw, wanted) * (1 - Math.exp(-12 * dt));
 
@@ -219,12 +254,6 @@ class PlayerWolfActor {
     const swordBend = activeAttack && this.attackKind === "melee"
       ? Math.sin(easedAttack * Math.PI)
       : 0;
-    if (this.rig.importedHead) {
-      ATTACK_BEND_QUATERNION.setFromAxisAngle(ATTACK_BEND_AXIS, -swordBend * 0.34);
-      this.rig.importedHead.bone.quaternion
-        .copy(ATTACK_BEND_QUATERNION)
-        .multiply(this.rig.importedHead.bindQuaternion);
-    }
     if (this.rig.importedTail) {
       ATTACK_BEND_QUATERNION.setFromAxisAngle(TAIL_BEND_AXIS, swordBend * 0.58);
       this.rig.importedTail.bone.quaternion
@@ -233,13 +262,16 @@ class PlayerWolfActor {
     }
 
     const amp = Math.min(1, speed / WOLF_FULL_SPEED);
-    if (moving) this.gait += dt * (5 + amp * 11);
-    animateWolfLegs(this.rig, moving, this.gait, amp, dt);
+    const gaitSpeed = Math.min(2, speed / PLAYER_WOLF_STRIDE_SPEED);
+    if (moving) this.gait += dt * (5 + gaitSpeed * 11);
+    const airborne = jumpAge < 1;
+    animateWolfLegs(this.rig, moving && !airborne, this.gait, amp, dt);
     braceWolfLegsForSword(this.rig, swordBend);
+    kickWolfLegsForJump(this.rig, jumpTuck);
 
     const daggerLunge = activeAttack && this.attackKind === "ranged" ? Math.sin(easedAttack * Math.PI) * 0.42 : 0;
     this.fall = damp(this.fall, snap.dead ? 1 : 0, 1000 / FALL_MS, dt);
-    const boundRock = moving ? Math.sin(this.gait) * 0.12 * amp : 0;
+    const boundRock = moving && !airborne ? Math.sin(this.gait) * 0.12 * amp : 0;
     this.rig.model.rotation.z = -this.fall * (Math.PI / 2) + boundRock;
     this.rig.model.position.x = daggerLunge;
     const boundLift = moving ? Math.abs(Math.sin(this.gait)) * 0.12 * amp : 0;
@@ -278,8 +310,11 @@ function lerp(a: number, b: number, t: number): number {
 
 // -------------------------------------------------------------------- wolves
 
-/** A bound: front pair together, rear pair together half a cycle later. */
-const LEG_PHASE = [0, 0, Math.PI, Math.PI];
+/**
+ * A loose bound: rear legs follow the front pair by half a cycle, while the
+ * right side lands a fraction later than the left so the gait is not robotic.
+ */
+const LEG_PHASE = [0, 1.4, Math.PI + 0.18, Math.PI + 1.58];
 // This skeleton's leg chains are exported in a rotated parent space. Its local
 // X hinge produces the visible fore/aft stride along the body.
 const LEG_SWING_AXIS = new THREE.Vector3(1, 0, 0);
@@ -288,9 +323,10 @@ const LEG_SWING_QUATERNION = new THREE.Quaternion();
 const LEG_SIDE_QUATERNION = new THREE.Quaternion();
 const SPINE_FLEX_AXIS = new THREE.Vector3(0, 0, 1);
 const SPINE_FLEX_QUATERNION = new THREE.Quaternion();
-const ATTACK_BEND_AXIS = new THREE.Vector3(0, 0, 1);
 const TAIL_BEND_AXIS = new THREE.Vector3(1, 0, 0);
 const ATTACK_BEND_QUATERNION = new THREE.Quaternion();
+const JAW_BITE_AXIS = new THREE.Vector3(1, 0, 0);
+const JAW_BITE_QUATERNION = new THREE.Quaternion();
 
 /** Animate both the fallback legs and the visible imported wolf skeleton. */
 function animateWolfLegs(rig: WolfRig, moving: boolean, gait: number, amp: number, dt: number): void {
@@ -342,8 +378,28 @@ function braceWolfLegsForSword(rig: WolfRig, amount: number): void {
     }
   });
 }
+
+/** Extend all four paws away from the body at the apex of the jump. */
+function kickWolfLegsForJump(rig: WolfRig, amount: number): void {
+  rig.legs.forEach((leg, i) => {
+    const direction = i < 2 ? -1 : 1;
+    leg.rotation.z += direction * amount * 0.9;
+  });
+  rig.importedLegs.forEach((leg, i) => {
+    const upperDirection = i < 2 ? -1 : 1;
+    const upper = upperDirection * amount * 0.9;
+    LEG_SWING_QUATERNION.setFromAxisAngle(LEG_SWING_AXIS, upper);
+    leg.bone.quaternion.multiply(LEG_SWING_QUATERNION);
+    if (leg.lowerBone) {
+      const lowerDirection = i < 2 ? 1 : -1;
+      const lower = lowerDirection * amount * 0.28;
+      LEG_SWING_QUATERNION.setFromAxisAngle(LEG_SWING_AXIS, lower);
+      leg.lowerBone.quaternion.multiply(LEG_SWING_QUATERNION);
+    }
+  });
+}
 /** Enemy wolves stand just above the player without overwhelming the board. */
-const HELLHOUND_SCALE = 1.3;
+const HELLHOUND_SCALE = 1.95;
 class WolfActor {
   readonly root = new THREE.Group();
   readonly rig: WolfRig;
@@ -388,18 +444,27 @@ class WolfActor {
     const speed = dt > 0 ? Math.hypot(dx, dy) / dt : 0;
     const moving = speed > MOVING_EPSILON;
 
-    // Travel wins over the quarry, unlike the player: a wolf that held its head
-    // on you while crossing the room would strafe. It turns when it arrives.
-    const wanted = moving
-      ? yawFor(dx, dy)
-      : facePoint
-        ? yawFor(facePoint.x - enemy.x, facePoint.y - enemy.y)
-        : yawFor(enemy.facing, 0);
-    this.yaw += angleDelta(this.yaw, wanted) * (1 - Math.exp(-10 * dt));
+    const quarryX = facePoint ? facePoint.x - enemy.x : 0;
+    const quarryY = facePoint ? facePoint.y - enemy.y : 0;
+    const backing = moving && facePoint !== null && dx * quarryX + dy * quarryY < 0;
+
+    // Travel normally wins over the quarry. The exception is a pursuing hound
+    // yielding ground to an advancing player: it keeps its teeth toward the
+    // threat and backpedals instead of spinning around to flee.
+    const wanted = enemy.heading
+      ? yawFor(enemy.heading.x, enemy.heading.y)
+      : moving && !backing
+        ? yawFor(dx, dy)
+        : facePoint
+          ? yawFor(quarryX, quarryY)
+          : yawFor(enemy.facing, 0);
+    // The server already rate-limits hound turning. Follow that authoritative
+    // heading closely so the visible snout and the damaging cone stay aligned.
+    this.yaw += angleDelta(this.yaw, wanted) * (1 - Math.exp(-25 * dt));
     this.root.rotation.y = this.yaw;
 
     const amp = Math.min(1, speed / WOLF_FULL_SPEED);
-    if (moving) this.gait += dt * (5 + amp * 11);
+    if (moving) this.gait += dt * (5 + amp * 11) * (backing ? -1 : 1);
     animateWolfLegs(this.rig, moving, this.gait, amp, dt);
 
     // Hunting posture: head down, tail low, eyes lit.
@@ -417,6 +482,15 @@ class WolfActor {
 
     const lunge = this.lungeAt === null ? null : (now - this.lungeAt) / LUNGE_MS;
     const thrust = lunge !== null && lunge < 1 ? Math.sin(Math.PI * lunge) : 0;
+    if (this.rig.importedJaw) {
+      const biteOpen = lunge !== null && lunge < 1
+        ? (1 - ease(Math.max(0, lunge))) * 0.82
+        : 0;
+      JAW_BITE_QUATERNION.setFromAxisAngle(JAW_BITE_AXIS, biteOpen);
+      this.rig.importedJaw.bone.quaternion
+        .copy(this.rig.importedJaw.bindQuaternion)
+        .multiply(JAW_BITE_QUATERNION);
+    }
     if (lunge !== null && lunge >= 1) this.lungeAt = null;
 
     this.hurt = Math.max(0, this.hurt - dt * 4);
@@ -454,12 +528,42 @@ class CorpseActor {
   }
 
   update(dt: number): void {
-    // Collapse onto its side over the first half second, then stay put forever.
-    this.age = Math.min(1, this.age + dt * (1000 / COLLAPSE_MS));
-    const t = 1 - Math.pow(1 - this.age, 3);
-    this.rig.model.rotation.x = t * (Math.PI / 2);
-    this.rig.model.position.y = t * 0.36 * WOLF_SCALE;
+    // A lightweight skeletal ragdoll: the torso topples first, then the loose
+    // joints oscillate with rapidly decaying energy until the body settles.
+    this.age += dt;
+    const fall = Math.min(1, this.age / (COLLAPSE_MS / 1000));
+    const t = 1 - Math.pow(1 - fall, 3);
+    const energy = Math.exp(-this.age * 3.6);
+    const impact = Math.sin(this.age * 18) * energy;
+    this.rig.model.rotation.x = t * (Math.PI / 2) + impact * 0.1;
+    this.rig.model.rotation.y = Math.sin(this.age * 11 + 0.8) * 0.2 * energy;
+    this.rig.model.rotation.z = impact * 0.28;
+    this.rig.model.position.y = t * 0.36 * WOLF_SCALE + Math.abs(impact) * 0.12;
     this.rig.model.position.z = t * -0.55 * WOLF_SCALE;
+
+    const spineCount = Math.max(1, this.rig.importedSpine.length - 1);
+    this.rig.importedSpine.forEach((joint, i) => {
+      // Each vertebra keeps a little more bend than the one before it, so the
+      // dead torso finishes as a loose curve instead of snapping straight.
+      const settledSlump = 0.08 + (i / spineCount) * 0.16;
+      const flex = settledSlump + Math.sin(this.age * 14 + i * 1.05) * 0.52 * energy;
+      SPINE_FLEX_QUATERNION.setFromAxisAngle(SPINE_FLEX_AXIS, flex);
+      joint.bone.quaternion.copy(joint.bindQuaternion).multiply(SPINE_FLEX_QUATERNION);
+    });
+
+    if (this.rig.importedHead) {
+      const headFlop = 0.32 + Math.sin(this.age * 14 + 0.7) * 0.62 * energy;
+      ATTACK_BEND_QUATERNION.setFromAxisAngle(TAIL_BEND_AXIS, headFlop);
+      this.rig.importedHead.bone.quaternion
+        .copy(this.rig.importedHead.bindQuaternion)
+        .multiply(ATTACK_BEND_QUATERNION);
+    }
+    if (this.rig.importedTail) {
+      ATTACK_BEND_QUATERNION.setFromAxisAngle(TAIL_BEND_AXIS, -0.42 + Math.sin(this.age * 17) * 0.48 * energy);
+      this.rig.importedTail.bone.quaternion
+        .copy(this.rig.importedTail.bindQuaternion)
+        .multiply(ATTACK_BEND_QUATERNION);
+    }
   }
 
   dispose(): void {

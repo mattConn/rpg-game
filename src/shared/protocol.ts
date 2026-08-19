@@ -20,6 +20,8 @@ export interface GameSnapshot {
     aggro: boolean;
     /** +1 right, -1 left. The glyph is mirrored when facing right. */
     facing: 1 | -1;
+    /** Optional full 2D heading for 3D actors that turn independently of travel. */
+    heading?: { x: number; y: number };
   }>;
   /**
    * Dead enemies, left where they fell. Drawn dimmed, and targetable — but

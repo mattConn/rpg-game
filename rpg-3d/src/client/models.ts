@@ -418,6 +418,7 @@ export interface WolfRig {
     bone: THREE.Bone;
     bindQuaternion: THREE.Quaternion;
   } | null;
+  importedJaw: { bone: THREE.Bone; bindQuaternion: THREE.Quaternion } | null;
   importedTail: { bone: THREE.Bone; bindQuaternion: THREE.Quaternion } | null;
   importedSpine: Array<{
     bone: THREE.Bone;
@@ -514,6 +515,9 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
             material.emissive.setHex(eye);
             material.emissiveIntensity = variant === "player" ? 1.6 : 1.25;
             material.map = null;
+          } else if (name.includes("mouth")) {
+            material.emissive.setHex(0x000000);
+            material.emissiveIntensity = 0;
           } else if (!name.includes("mouth")) {
             material.color.setHex(variant === "player" ? 0xf4f3ed : 0x5b515f);
             if (variant === "player" && playerWolfTexture) material.map = playerWolfTexture;
@@ -527,6 +531,14 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
     if (variant === "player") {
       const jaw = visual.getObjectByName("Jaw_9");
       if (jaw) jaw.rotateX(-0.3);
+    }
+    if (variant === "hellhound") {
+      // The old eye halo used a point light inside the procedural head. Its
+      // meshes are hidden by the imported wolf, but lights are not meshes, so
+      // it survived and illuminated the open mouth from within.
+      rig.head.traverse((node) => {
+        if (node instanceof THREE.PointLight) node.visible = false;
+      });
     }
     // Read from the SkinnedMesh skeleton itself. These are the exact cloned
     // Bone objects used for vertex deformation, unlike a same-named scene node
@@ -563,6 +575,7 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
       }
     }
     const importedHead = findNamedBone("head15");
+    const importedJaw = findNamedBone("jaw9");
     const importedTail = findNamedBone("spine0033");
     if (importedHead) {
       rig.importedHead = {
@@ -572,6 +585,9 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
     }
     if (importedTail) {
       rig.importedTail = { bone: importedTail, bindQuaternion: importedTail.quaternion.clone() };
+    }
+    if (importedJaw) {
+      rig.importedJaw = { bone: importedJaw, bindQuaternion: importedJaw.quaternion.clone() };
     }
     for (const name of ["spine00535", "spine00632", "spine00731", "spine00830", "spine00917", "spine01016"]) {
       const bone = findNamedBone(name);
@@ -749,7 +765,8 @@ export function buildWolf(accent: THREE.Color, variant: WolfVariant = "hellhound
   model.scale.setScalar(WOLF_SCALE);
 
   const rig: WolfRig = {
-    model, legs, importedLegs: [], importedHead: null, importedTail: null, importedSpine: [],
+    model, legs, importedLegs: [], importedHead: null, importedJaw: null,
+    importedTail: null, importedSpine: [],
     head, jaw, tail, body, neck, ears,
     eyeMaterial,
     eyeColor: new THREE.Color(WOLF_EYE),

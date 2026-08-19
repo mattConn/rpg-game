@@ -55,6 +55,7 @@ const stage = createStage(sceneCanvas);
  */
 let viewWidth = WORLD_WIDTH;
 let barPositioned = false;
+const SHOW_ACTION_BAR = false;
 
 function resize() {
   const fit = fillViewport(window.innerWidth, window.innerHeight, window.devicePixelRatio || 1);
@@ -180,6 +181,7 @@ function send(msg: TacticsInput) {
 
 const heldKeys = new Set<string>();
 let playerYaw = -Math.PI / 2;
+let running = false;
 
 function sendMoveDir(): void {
   const across = Number(heldKeys.has("d")) - Number(heldKeys.has("a"));
@@ -189,7 +191,7 @@ function sendMoveDir(): void {
   const dy = -Math.sin(cameraYaw) * across - Math.cos(cameraYaw) * forward;
 
   if (dx !== 0 || dy !== 0) playerYaw = Math.atan2(-dx, -dy);
-  send({ type: "move", dx, dy, turn: true });
+  send({ type: "move", dx, dy, turn: true, run: running });
 }
 
 function facingDirection(): Point {
@@ -219,11 +221,27 @@ function holdWait(held: boolean) {
   waitHeld = held;
   send({ type: "wait", held });
 }
-window.addEventListener("blur", () => holdWait(false));
+window.addEventListener("blur", () => {
+  holdWait(false);
+  if (running || heldKeys.size > 0) {
+    running = false;
+    heldKeys.clear();
+    sendMoveDir();
+  }
+});
 document.addEventListener("visibilitychange", () => { if (document.hidden) holdWait(false); });
 
 window.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
+
+  if (event.key === "Shift") {
+    if (!running) {
+      running = true;
+      sendMoveDir();
+    }
+    event.preventDefault();
+    return;
+  }
 
   if (key === ".") {
     holdWait(true);
@@ -268,11 +286,11 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
-  // Space uses a faced door when there is one, otherwise it swings the weapon.
+  // Jump immediately without spending a combat cooldown.
   if (key === " ") {
     if (!event.repeat) {
-      const facing = facingDirection();
-      send({ type: "interact", dx: facing.x, dy: facing.y });
+      actors?.player.jump(performance.now());
+      send({ type: "jump" });
     }
     event.preventDefault();
     return;
@@ -291,6 +309,11 @@ window.addEventListener("keydown", (event) => {
 
 window.addEventListener("keyup", (event) => {
   const key = event.key.toLowerCase();
+  if (event.key === "Shift") {
+    running = false;
+    sendMoveDir();
+    return;
+  }
   if (key === ".") { holdWait(false); return; }
   const mapped = key === "arrowup" ? "w"
     : key === "arrowdown" ? "s"
@@ -349,16 +372,19 @@ function pickRoomPoint(event: MouseEvent): Point | null {
 const DRAG_THRESHOLD = 4;
 
 let dragButton: number | null = null;
-let dragPanning = false;
 let dragMoved = 0;
 let lastDragX = 0;
 let lastDragY = 0;
 let swallowNextClick = false;
-let rightDragWasMove = false;
 let barDragging = false;
 
 uiCanvas.addEventListener("mousedown", (event) => {
-  if (event.button === 0 && hits(actionBarHandleRect(barOrigin), toOverlay(event))) {
+  // Right mouse is intentionally unused; camera control is left-drag only.
+  if (event.button === 2) {
+    event.preventDefault();
+    return;
+  }
+  if (SHOW_ACTION_BAR && event.button === 0 && hits(actionBarHandleRect(barOrigin), toOverlay(event))) {
     barDragging = true;
     dragMoved = 0;
     lastDragX = event.clientX;
@@ -367,12 +393,11 @@ uiCanvas.addEventListener("mousedown", (event) => {
     return;
   }
   dragButton = event.button;
-  dragPanning = event.button === 2 || event.button === 1 || event.shiftKey;
+  // Shift is the run modifier, not a camera-pan modifier. Every accepted drag
+  // rotates the view; this client no longer has lateral camera panning.
   dragMoved = 0;
   lastDragX = event.clientX;
   lastDragY = event.clientY;
-  if (event.button === 2) rightDragWasMove = false;
-  if (dragPanning) event.preventDefault();
 });
 
 window.addEventListener("mouseup", (event) => {
@@ -388,7 +413,6 @@ window.addEventListener("mouseup", (event) => {
   // swallow. Leaving this armed after a right-drag would eat the next real
   // world click instead.
   if (dragButton === 0 && dragMoved > DRAG_THRESHOLD) swallowNextClick = true;
-  if (event.button === 2) rightDragWasMove = dragMoved > DRAG_THRESHOLD;
   dragButton = null;
 });
 
@@ -418,12 +442,9 @@ uiCanvas.addEventListener("mousemove", (event) => {
     lastDragY = event.clientY;
     dragMoved += Math.abs(dx) + Math.abs(dy);
     if (dragMoved > DRAG_THRESHOLD) {
-      if (dragPanning && !stage.firstPerson) stage.pan(dx, dy);
-      else {
-        const bounds = uiCanvas.getBoundingClientRect();
-        stage.look((dx / bounds.width) * 2, -(dy / bounds.height) * 2);
-        if (heldKeys.size > 0) sendMoveDir();
-      }
+      const bounds = uiCanvas.getBoundingClientRect();
+      stage.look((dx / bounds.width) * 2, -(dy / bounds.height) * 2);
+      if (heldKeys.size > 0) sendMoveDir();
     }
   }
 
@@ -449,9 +470,6 @@ uiCanvas.addEventListener("wheel", (event) => {
 // Right-drag pans, so the browser menu must never appear on the canvas.
 uiCanvas.addEventListener("contextmenu", (event) => {
   event.preventDefault();
-  if (rightDragWasMove) {
-    rightDragWasMove = false;
-  }
 });
 
 // ----------------------------------------------------------------- clicking
@@ -463,9 +481,7 @@ uiCanvas.addEventListener("click", (event) => {
   }
 
   const uiPoint = toOverlay(event);
-  const ndc = toNdc(event);
-
-  if (hits(actionBarHandleRect(barOrigin), uiPoint)) return;
+  if (SHOW_ACTION_BAR && hits(actionBarHandleRect(barOrigin), uiPoint)) return;
 
   // The HUD's own buttons first, exactly as in the other two clients — here
   // they restart the encounter rather than revive you mid-fight.
@@ -474,15 +490,9 @@ uiCanvas.addEventListener("click", (event) => {
     return;
   }
 
-  const slot = squareAtPoint(barOrigin, uiPoint, BAR_LAYOUT);
+  const slot = SHOW_ACTION_BAR ? squareAtPoint(barOrigin, uiPoint, BAR_LAYOUT) : null;
   if (slot !== null) {
     if (TACTICS_ACTIONS[slot]) send({ type: "useSlot", index: slot });
-    return;
-  }
-
-  const clickedDoor = stage.doorAt(ndc.x, ndc.y);
-  if (clickedDoor) {
-    send({ type: "targetDoor", door: clickedDoor });
     return;
   }
 
@@ -496,14 +506,9 @@ uiCanvas.addEventListener("click", (event) => {
     return;
   }
 
-  const point = pickRoomPoint(event);
-  if (point) send({ type: "click", x: point.x, y: point.y });
-});
-
-uiCanvas.addEventListener("dblclick", (event) => {
-  if (swallowNextClick) return;
-  const point = pickRoomPoint(event);
-  if (point) send({ type: "dblclick", x: point.x, y: point.y });
+  // Left click always swings the sword. The server's forward cone determines
+  // whether an enemy is close enough and sufficiently in front to be hit.
+  send({ type: "useSlot", index: 0 });
 });
 
 let appliedCursor = DEFAULT_CURSOR;
@@ -512,10 +517,10 @@ function updateCursorStyle(snap: TacticsSnapshot) {
   let wanted = DEFAULT_CURSOR;
   if (barDragging) wanted = "grabbing";
   else if (uiCursor) {
-    if (hits(actionBarHandleRect(barOrigin), uiCursor)) wanted = "grab";
+    if (SHOW_ACTION_BAR && hits(actionBarHandleRect(barOrigin), uiCursor)) wanted = "grab";
     else if (snap.inspect && hitsRect(LOOT_CLOSE_RECT, { x: uiCursor.x - centreShift(viewWidth), y: uiCursor.y })) wanted = "pointer";
     else if (snap.dead && hits(resurrectRect(ctx), uiCursor)) wanted = "pointer";
-    else if (squareAtPoint(barOrigin, uiCursor, BAR_LAYOUT) !== null) wanted = "pointer";
+    else if (SHOW_ACTION_BAR && squareAtPoint(barOrigin, uiCursor, BAR_LAYOUT) !== null) wanted = "pointer";
   }
 
   if (wanted !== appliedCursor) {
@@ -564,13 +569,7 @@ function frame(now: number) {
     : TACTICS_ACTIONS[snap.activeSlot]?.kind;
   actors.player.setWeapon(actingKind === "ranged" ? "ranged" : "melee");
 
-  // Both sides square up to what they are fighting. On a board where reach is a
-  // rule, "who is looking at whom" is worth reading at a glance.
-  const marked = snap.attacking && snap.targetId
-    ? snap.enemies.find((e) => e.id === snap.targetId)
-    : undefined;
-
-  actors.player.update(snap, marked ? { x: marked.x, y: marked.y } : null, dt, now, elapsed);
+  actors.player.update(snap, null, dt, now, elapsed);
   // Behind your own eyes you are the inside of a cloak. The rig still runs —
   // it is what the camera is riding — it just isn't drawn.
   actors.player.root.visible = !stage.firstPerson;
@@ -583,25 +582,10 @@ function frame(now: number) {
   actors.syncProjectiles(snap, elapsed);
   actors.syncTombstones(snap);
 
-  const hoveredEnemy = hoveredEntityId
-    ? snap.enemies.find((enemy) => enemy.id === hoveredEntityId)
-    : undefined;
-  const hoveringPlayer = hoveredEntityId === PLAYER_CURSOR_ID;
-  stage.setCursorRing(
-    hoveredDoor ? null : hoveredEnemy?.x ?? (hoveringPlayer ? snap.player.x : groundCursor?.x) ?? null,
-    hoveredDoor ? null : hoveredEnemy?.y ?? (hoveringPlayer ? snap.player.y : groundCursor?.y) ?? null,
-    hoveredEnemy ? "enemy" : hoveringPlayer ? "interactable" : "floor",
-  );
-  stage.setDoorHoverRing(hoveredDoor);
-
-  // Red under something you are fighting, yellow under a body you have merely
-  // selected — the real-time game's ring colours, on a bigger ring.
-  const targeted = snap.targetId
-    ? snap.enemies.find((e) => e.id === snap.targetId) ?? snap.corpses.find((c) => c.id === snap.targetId)
-    : undefined;
+  stage.setCursorRing(null, null, "floor");
+  stage.setDoorHoverRing(null);
   stage.setDoors(snap.doors);
-  if (snap.targetDoor) stage.setDoorTargetRing(snap.targetDoor);
-  else stage.setTargetRing(targeted?.x ?? null, targeted?.y ?? null, marked ? 0xe23b3b : 0xffd633);
+  stage.setTargetRing(null, null, 0xffd633);
 
   // The board frames itself while you are standing on it; walk out through the
   // doorway and the camera comes with you, or the corridor would be somewhere
@@ -617,6 +601,9 @@ function frame(now: number) {
     showAutoRes: false,
     showRoomLabel: false,
     showGameClock: false,
+    showActionBar: SHOW_ACTION_BAR,
+    compactPlayerHud: true,
+    enemyHealthBars: { whenAggroed: true, maxDistance: 360, width: 150, height: 18, worldHeight: 3.8 },
     actions: TACTICS_ACTIONS,
     viableActions: snap.viableActions,
     barLayout: BAR_LAYOUT,

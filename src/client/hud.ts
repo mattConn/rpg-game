@@ -63,6 +63,7 @@ function drawBar(
   value: number,
   max: number,
   color: string,
+  showValue = false,
 ) {
   ctx.fillStyle = "#1b1b1b";
   ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
@@ -73,6 +74,21 @@ function drawBar(
   ctx.strokeStyle = "#3a3a3a";
   ctx.lineWidth = 1;
   ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.width - 1, rect.height - 1);
+
+  if (showValue) {
+    ctx.font = `bold ${Math.max(9, rect.height - 2)}px monospace`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 3;
+    ctx.lineJoin = "round";
+    ctx.fillStyle = "#ffffff";
+    const label = `${Math.ceil(value)}/${Math.ceil(max)}`;
+    const labelX = rect.x + rect.width / 2;
+    const labelY = rect.y + rect.height / 2 + 0.5;
+    ctx.strokeText(label, labelX, labelY);
+    ctx.fillText(label, labelX, labelY);
+  }
 }
 
 export function drawHud(ctx: CanvasRenderingContext2D, origin: Point, stats: HudStats) {
@@ -110,6 +126,20 @@ export function drawHud(ctx: CanvasRenderingContext2D, origin: Point, stats: Hud
   ctx.textBaseline = "top";
   ctx.fillStyle = stats.dead ? "#444444" : "#dddddd";
   ctx.fillText(label, origin.x, origin.y + PORTRAIT_SIZE + NAME_GAP);
+}
+
+/** Compact corner status: health and mana only, with no portrait or text. */
+export function drawBarsOnlyHud(ctx: CanvasRenderingContext2D, origin: Point, stats: HudStats) {
+  const width = 230;
+  const height = 48;
+  const barHeight = 18;
+  const gap = 8;
+  ctx.setLineDash([]);
+  drawPanelBacking(ctx, origin, width, height);
+  drawBar(ctx, { x: origin.x, y: origin.y, width, height: barHeight },
+    stats.health, stats.maxHealth, "#c0392b", true);
+  drawBar(ctx, { x: origin.x, y: origin.y + barHeight + gap, width, height: barHeight },
+    stats.mana, stats.maxMana, "#2a6fd6", true);
 }
 
 // ----------------------------------------------------------- enemy portrait

@@ -426,7 +426,7 @@ export function stepToward(from: Point, to: Point, limit: number): Point {
 export const PLAYER_MAX_HEALTH = 100;
 export const PLAYER_MAX_MANA = 50;
 
-export const HOUND_MAX_HEALTH = 24;
+export const HOUND_MAX_HEALTH = 150;
 
 /**
  * Damage is tuned so the fight is a race the player can lose. Three sword blows
@@ -477,6 +477,8 @@ export function isOver(phase: Phase): boolean {
 export interface TacticsSnapshot extends GameSnapshot {
   /** Full player heading, independent of the camera's orbit. */
   playerHeading: Point;
+  /** Whether Shift sprint is currently held. */
+  playerRunning: boolean;
   /** True means open. The two corridor doors are independently operated. */
   doors: DoorStates;
   targetDoor: DoorId | null;
@@ -560,8 +562,9 @@ export type TacticsInput =
   /** Activate a bar slot immediately without changing keyboard selection. */
   | { type: "useSlot"; index: number }
   /** Move along dx/dy; reverse movement can explicitly preserve facing. */
-  | { type: "move"; dx: number; dy: number; turn?: boolean }
+  | { type: "move"; dx: number; dy: number; turn?: boolean; run?: boolean }
   | { type: "face"; dx: number; dy: number }
+  | { type: "jump" }
   | { type: "targetDoor"; door: DoorId }
   /** Use the selected action. */
   | { type: "interact"; dx: number; dy: number }

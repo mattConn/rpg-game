@@ -25,7 +25,7 @@ import type { Action } from "../../../src/shared/actions.js";
 import { DAMAGE_NUMBER_LIFETIME, DAMAGE_NUMBER_SPEED } from "../../../src/shared/combat.js";
 import { corpseLabel } from "../../../src/shared/loot.js";
 import { ACTION_BAR_ROW, ACTION_BAR_DEFAULT_ORIGIN, drawActionBar, type ActionBarLayout } from "../../../src/client/actionbar.js";
-import { HUD_DEFAULT_ORIGIN, HUD_WIDTH, NAME_GAP, NAME_HEIGHT, PORTRAIT_SIZE, drawEnemyHud, drawHud } from "../../../src/client/hud.js";
+import { HUD_DEFAULT_ORIGIN, HUD_WIDTH, NAME_GAP, NAME_HEIGHT, PORTRAIT_SIZE, drawBarsOnlyHud, drawEnemyHud, drawHud } from "../../../src/client/hud.js";
 import { drawLootMenu } from "../../../src/client/lootmenu.js";
 
 const NAME_FONT = "12px monospace";
@@ -46,7 +46,7 @@ const MS_PER_GAME_MINUTE = 500;
  */
 const DAMAGE_NUMBER_HEIGHT = 2.5;
 const DAMAGE_NUMBER_RISE_PX = 30;
-const DAMAGE_NUMBER_FONT = "bold 24px monospace";
+const DAMAGE_NUMBER_FONT = "bold 36px monospace";
 /**
  * Held at full strength for most of its life and then dropped, rather than
  * fading from the instant it appears. A number that starts dying immediately is
@@ -106,9 +106,22 @@ export interface OverlayParams {
   /** Optional front-end-specific contents for the shared five-slot bar. */
   actions?: readonly (Action | null)[];
   viableActions?: readonly boolean[];
+  /** Hide the action bar without affecting keyboard-driven actions. */
+  showActionBar?: boolean;
   /** Allow front ends to suppress ambient edge labels without replacing the HUD. */
   showRoomLabel?: boolean;
   showGameClock?: boolean;
+  /** Draw only health and mana in the corner, without portrait or labels. */
+  compactPlayerHud?: boolean;
+  /** Optional larger, always-visible world bars for front ends with big models. */
+  enemyHealthBars?: {
+    always?: boolean;
+    whenAggroed?: boolean;
+    width?: number;
+    height?: number;
+    worldHeight?: number;
+    maxDistance?: number;
+  };
   /**
    * How to arrange the action bar. Omitted is the horizontal strip this client
    * has always drawn; the turn-based front end stacks it instead, and passes
@@ -134,10 +147,12 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, params: OverlayParams
   ctx.setLineDash([]);
 
   if (params.showRoomLabel !== false) drawRoomLabel(ctx, snap);
-  drawWorldLabels(ctx, snap, groundCursor, toScreen);
+  drawWorldLabels(ctx, snap, groundCursor, toScreen, params.enemyHealthBars);
   drawDamageNumbers(ctx, snap, toScreen);
 
-  drawHud(ctx, hudOrigin, { name: snap.player.name, color: snap.player.color, ...snap.stats, dead: snap.dead });
+  const hudStats = { name: snap.player.name, color: snap.player.color, ...snap.stats, dead: snap.dead };
+  if (params.compactPlayerHud) drawBarsOnlyHud(ctx, hudOrigin, hudStats);
+  else drawHud(ctx, hudOrigin, hudStats);
 
   if (snap.dead) {
     const rect = resurrectRect(ctx);
@@ -180,10 +195,12 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, params: OverlayParams
     }
   }
 
-  drawActionBar(
-    ctx, barOrigin, params.actions ?? ACTIONS, snap.activeSlot,
-    snap.cooldown, snap.selectedCanAttack, barLayout, params.viableActions,
-  );
+  if (params.showActionBar !== false) {
+    drawActionBar(
+      ctx, barOrigin, params.actions ?? ACTIONS, snap.activeSlot,
+      snap.cooldown, snap.selectedCanAttack, barLayout, params.viableActions,
+    );
+  }
   if (params.showGameClock !== false) drawGameClock(ctx, snap.gameElapsedMs, viewWidth);
 
   if (params.hurt > 0) drawHurtFlash(ctx, params.hurt, viewWidth);
@@ -225,6 +242,7 @@ function drawWorldLabels(
   snap: GameSnapshot,
   groundCursor: Point | null,
   toScreen: ToScreen,
+  healthBars?: OverlayParams["enemyHealthBars"],
 ): void {
   const near = (x: number, y: number) =>
     !!groundCursor && Math.hypot(groundCursor.x - x, groundCursor.y - y) <= NAME_REVEAL_DISTANCE;
@@ -251,9 +269,22 @@ function drawWorldLabels(
   for (const enemy of snap.enemies) {
     if (!sameRoom(enemy.room, snap.player.room)) continue;
 
-    if (enemy.health < enemy.maxHealth) {
-      const bar = toScreen(enemy.x, enemy.y, 1.55);
-      drawHealthBar(ctx, bar, enemy.health / enemy.maxHealth);
+    const closeEnough = healthBars?.maxDistance === undefined ||
+      Math.hypot(enemy.x - snap.player.x, enemy.y - snap.player.y) <= healthBars.maxDistance;
+    const showHealth = closeEnough && (healthBars?.whenAggroed
+      ? enemy.aggro
+      : healthBars?.always || enemy.health < enemy.maxHealth);
+    if (showHealth) {
+      const bar = toScreen(enemy.x, enemy.y, healthBars?.worldHeight ?? 1.55);
+      drawHealthBar(
+        ctx,
+        bar,
+        enemy.health / enemy.maxHealth,
+        healthBars?.width ?? HEALTH_BAR_WIDTH,
+        healthBars?.height ?? HEALTH_BAR_HEIGHT,
+        enemy.health,
+        enemy.maxHealth,
+      );
     }
 
     if (near(enemy.x, enemy.y)) {
@@ -272,17 +303,35 @@ function drawWorldLabels(
   }
 }
 
-function drawHealthBar(ctx: CanvasRenderingContext2D, at: Point, fraction: number): void {
-  const x = at.x - HEALTH_BAR_WIDTH / 2;
-  const y = at.y - HEALTH_BAR_HEIGHT / 2;
+function drawHealthBar(
+  ctx: CanvasRenderingContext2D,
+  at: Point,
+  fraction: number,
+  width: number,
+  height: number,
+  health: number,
+  maxHealth: number,
+): void {
+  const x = at.x - width / 2;
+  const y = at.y - height / 2;
 
   ctx.fillStyle = "#1b1b1b";
-  ctx.fillRect(x, y, HEALTH_BAR_WIDTH, HEALTH_BAR_HEIGHT);
+  ctx.fillRect(x, y, width, height);
   ctx.fillStyle = "#c0392b";
-  ctx.fillRect(x, y, HEALTH_BAR_WIDTH * Math.max(0, Math.min(1, fraction)), HEALTH_BAR_HEIGHT);
-  ctx.strokeStyle = "#3a3a3a";
-  ctx.lineWidth = 0.5;
-  ctx.strokeRect(x, y, HEALTH_BAR_WIDTH, HEALTH_BAR_HEIGHT);
+  ctx.fillRect(x, y, width * Math.max(0, Math.min(1, fraction)), height);
+  ctx.strokeStyle = "#080808";
+  ctx.lineWidth = Math.max(1, height * 0.12);
+  ctx.strokeRect(x, y, width, height);
+  ctx.font = `bold ${Math.max(9, height - 2)}px monospace`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.strokeStyle = "#000000";
+  ctx.lineWidth = 3;
+  ctx.lineJoin = "round";
+  ctx.fillStyle = "#ffffff";
+  const label = `${Math.ceil(health)}/${Math.ceil(maxHealth)}`;
+  ctx.strokeText(label, at.x, at.y + 0.5);
+  ctx.fillText(label, at.x, at.y + 0.5);
 }
 
 /**
