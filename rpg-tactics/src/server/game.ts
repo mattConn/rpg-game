@@ -78,8 +78,13 @@ const DAMAGE_COLOR_DEALT = "#ffd633";
 const DAMAGE_COLOR_TAKEN = "#ff6b6b";
 /** A deliberately tight 90-degree attack cone: 45 degrees either side. */
 const ATTACK_CONE_DOT = Math.cos(Math.PI / 4);
-const SWORD_FRONT_DAMAGE = 15;
-const SWORD_SPIN_DAMAGE = 8;
+const DIRECT_BITE_DOT = Math.cos(Math.PI / 12);
+const BITE_DAMAGE = 10;
+const DIRECT_BITE_DAMAGE = 15;
+/** Extra forgiveness while crossing the target quickly in midair. */
+const AIR_MELEE_RANGE = MELEE_RANGE * 1.35;
+/** Short committed step carried by the bite itself. */
+const BITE_FORWARD_MOMENTUM = 38;
 
 const MAX_CORPSES = 8;
 
@@ -903,10 +908,27 @@ export class TacticsGame {
       this.say("Use Interact on a targeted door.");
       return;
     }
+    const meleeRange = this.jumping() ? AIR_MELEE_RANGE : MELEE_RANGE;
+    const beforeLunge = this.playerAt();
+    const lungedTarget = action?.kind === "melee" && !this.jumping()
+      ? this.nearestEnemyInAttackCone(meleeRange + BITE_FORWARD_MOMENTUM, beforeLunge)
+      : null;
+    const lungedAlignment = lungedTarget ? this.enemyAlignment(lungedTarget, beforeLunge) : null;
+    if (action?.kind === "melee" && !this.jumping()) {
+      this.stepPlayer(
+        this.playerHeading.x * BITE_FORWARD_MOMENTUM,
+        this.playerHeading.y * BITE_FORWARD_MOMENTUM,
+        false,
+      );
+    }
     const target = action?.kind === "melee"
-      ? this.nearestEnemyInMeleeRange()
+      ? lungedTarget ?? this.nearestEnemyInAttackCone(meleeRange)
       : this.nearestEnemyInAttackCone();
-    const reach = target ? canReach(this.playerAt(), this.at(target)) : false;
+    const reach = target
+      ? action?.kind === "melee"
+        ? target === lungedTarget || distance(this.playerAt(), this.at(target)) <= meleeRange
+        : canReach(this.playerAt(), this.at(target))
+      : false;
 
     // **Committing is the decision; connecting is the consequence.** A swing
     // that finds nothing — no mark, or a hound out of reach — still costs
@@ -930,10 +952,13 @@ export class TacticsGame {
         this.startCooldown(MELEE_COOLDOWN_MS);
         return;
       }
-      const damage = this.enemyInPlayerAttackCone(target) ? SWORD_FRONT_DAMAGE : SWORD_SPIN_DAMAGE;
+      const alignment = target === lungedTarget && lungedAlignment !== null
+        ? lungedAlignment
+        : this.enemyAlignment(target);
+      const damage = alignment >= DIRECT_BITE_DOT ? DIRECT_BITE_DAMAGE : BITE_DAMAGE;
       this.wound(target, damage);
       this.wake(target);
-      this.say(`You cut the ${target.name.toLowerCase()} for ${damage}.`);
+      this.say(`You bite the ${target.name.toLowerCase()} for ${damage}.`);
       this.startCooldown(MELEE_COOLDOWN_MS);
       return;
     }
@@ -1249,27 +1274,14 @@ export class TacticsGame {
     return this.at(this.player);
   }
 
-  private nearestEnemyInAttackCone(): Hound | null {
+  private nearestEnemyInAttackCone(maxRange = Infinity, from: Point = this.playerAt()): Hound | null {
     let nearest: Hound | null = null;
     let nearestGap = Infinity;
     for (const enemy of this.enemies) {
-      const dx = enemy.x - this.player.x;
-      const dy = enemy.y - this.player.y;
+      const dx = enemy.x - from.x;
+      const dy = enemy.y - from.y;
       const gap = Math.hypot(dx, dy);
-      if (this.enemyInPlayerAttackCone(enemy) && gap < nearestGap) {
-        nearest = enemy;
-        nearestGap = gap;
-      }
-    }
-    return nearest;
-  }
-
-  private nearestEnemyInMeleeRange(): Hound | null {
-    let nearest: Hound | null = null;
-    let nearestGap = Infinity;
-    for (const enemy of this.enemies) {
-      const gap = distance(this.playerAt(), this.at(enemy));
-      if (gap <= MELEE_RANGE && gap < nearestGap) {
+      if (gap <= maxRange && this.enemyAlignment(enemy, from) >= ATTACK_CONE_DOT && gap < nearestGap) {
         nearest = enemy;
         nearestGap = gap;
       }
@@ -1278,11 +1290,14 @@ export class TacticsGame {
   }
 
   private enemyInPlayerAttackCone(enemy: Hound): boolean {
-    const dx = enemy.x - this.player.x;
-    const dy = enemy.y - this.player.y;
+    return this.enemyAlignment(enemy) >= ATTACK_CONE_DOT;
+  }
+
+  private enemyAlignment(enemy: Hound, from: Point = this.playerAt()): number {
+    const dx = enemy.x - from.x;
+    const dy = enemy.y - from.y;
     const gap = Math.hypot(dx, dy);
-    return gap < 0.001 ||
-      (dx * this.playerHeading.x + dy * this.playerHeading.y) / gap >= ATTACK_CONE_DOT;
+    return gap < 0.001 ? 1 : (dx * this.playerHeading.x + dy * this.playerHeading.y) / gap;
   }
 
   private nextDamageNumberId = 0;
@@ -1309,11 +1324,13 @@ export class TacticsGame {
       return this.targetDoor !== null && this.canInteractWithDoor(this.targetDoor, this.playerHeading);
     }
     if (this.simNow < this.nextAttackAt) return false;
+    const meleeRange = this.jumping() ? AIR_MELEE_RANGE : MELEE_RANGE;
     const target = action?.kind === "melee"
-      ? this.nearestEnemyInMeleeRange()
+      ? this.nearestEnemyInAttackCone()
       : this.nearestEnemyInAttackCone();
     if (!target) return false;
-    const reach = canReach(this.playerAt(), this.at(target));
+    const reach = distance(this.playerAt(), this.at(target)) <=
+      (action?.kind === "melee" ? meleeRange : MELEE_RANGE);
     return action?.kind === "melee" ? reach : action?.kind === "ranged" ? !reach : false;
   }
 

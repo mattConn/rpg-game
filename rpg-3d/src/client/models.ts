@@ -844,7 +844,13 @@ export function buildPlayerWolf(): PlayerWolfRig {
   weaponMount.add(sword, dagger);
   installImportedSword(sword);
   installImportedDagger(dagger, "mouth");
-  return { ...rig, sword, dagger };
+  // Keep the exact rig object captured by the asynchronous wolf loader. A
+  // spread copy freezes nullable scalar fields like `importedHead` and
+  // `importedJaw` at null, so later bone discovery never reaches the actor.
+  const playerRig = rig as PlayerWolfRig;
+  playerRig.sword = sword;
+  playerRig.dagger = dagger;
+  return playerRig;
 }
 
 // ------------------------------------------------------------------ scenery

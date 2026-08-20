@@ -379,11 +379,6 @@ let swallowNextClick = false;
 let barDragging = false;
 
 uiCanvas.addEventListener("mousedown", (event) => {
-  // Right mouse is intentionally unused; camera control is left-drag only.
-  if (event.button === 2) {
-    event.preventDefault();
-    return;
-  }
   if (SHOW_ACTION_BAR && event.button === 0 && hits(actionBarHandleRect(barOrigin), toOverlay(event))) {
     barDragging = true;
     dragMoved = 0;
@@ -392,7 +387,11 @@ uiCanvas.addEventListener("mousedown", (event) => {
     event.preventDefault();
     return;
   }
-  dragButton = event.button;
+  // Left click is reserved for the bite attack. Only right-drag rotates the
+  // camera, so an attack press can never accidentally disturb the view.
+  if (event.button !== 2) return;
+  event.preventDefault();
+  dragButton = 2;
   // Shift is the run modifier, not a camera-pan modifier. Every accepted drag
   // rotates the view; this client no longer has lateral camera panning.
   dragMoved = 0;
@@ -409,10 +408,6 @@ window.addEventListener("mouseup", (event) => {
     swallowNextClick = true;
     return;
   }
-  // Only the primary button produces the ordinary click event we need to
-  // swallow. Leaving this armed after a right-drag would eat the next real
-  // world click instead.
-  if (dragButton === 0 && dragMoved > DRAG_THRESHOLD) swallowNextClick = true;
   dragButton = null;
 });
 
@@ -467,7 +462,7 @@ uiCanvas.addEventListener("wheel", (event) => {
   stage.zoom(Math.sign(event.deltaY) * 1.8);
 }, { passive: false });
 
-// Right-drag pans, so the browser menu must never appear on the canvas.
+// Right-drag rotates the camera, so the browser menu must never appear here.
 uiCanvas.addEventListener("contextmenu", (event) => {
   event.preventDefault();
 });
