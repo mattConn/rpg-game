@@ -26,6 +26,8 @@ import {
   ARENA_X,
   ARENA_Y,
   BOARD_REGION,
+  BAT_HALL_REGION,
+  BAT_REGION,
   CHAMBER_MARGIN_PX,
   DOORWAY_WIDTH_PX,
   type DoorId,
@@ -55,6 +57,7 @@ const BOARD_CZ = BOARD_Z0 + BOARD_D / 2;
 const FAR_W = toX(FAR_REGION.cols * TILE_PX);
 const FAR_D = toZ(FAR_REGION.rows * TILE_PX);
 const FAR_CX = toX(regionCentre(FAR_REGION).x);
+const BAT_CX = toX(regionCentre(BAT_REGION).x);
 
 /** Bare floor between the flagstones and the masonry. */
 const MARGIN = toX(CHAMBER_MARGIN_PX);
@@ -89,6 +92,8 @@ const ARCH_CENTRE = toX(regionCentre(HALL_REGION).x);
 
 /** The far chamber sits on its own region, a corridor's length to the south. */
 const FAR_CZ = toZ(regionCentre(FAR_REGION).y);
+const BAT_CZ = toZ(regionCentre(BAT_REGION).y);
+const BAT_HALL_LEN = BAT_CZ - FAR_CZ - FAR_CHAMBER_D - WALL_T * 2;
 
 /** What is left for the hall itself once both chambers' walls are accounted for. */
 const HALL_LEN = FAR_CZ - BOARD_CZ
@@ -100,9 +105,11 @@ const HALL_LEN = FAR_CZ - BOARD_CZ
  * here would quietly leave the view halfway across the dungeon the first time
  * the squares were resized.
  */
-const CAMERA_MIN_DISTANCE = BOARD_W * 0.42;
-const CAMERA_MAX_DISTANCE = BOARD_W * 1.15;
-const CAMERA_START_DISTANCE = CAMERA_MIN_DISTANCE;
+const CAMERA_MIN_DISTANCE = BOARD_W * 0.22;
+// Preserve the established opening shot while allowing the wheel to move much
+// closer than that default framing.
+const CAMERA_START_DISTANCE = BOARD_W * 0.42;
+const CAMERA_MAX_DISTANCE = CAMERA_START_DISTANCE;
 
 /**
  * Full vertical orbit: almost level with the floor at one end and almost
@@ -454,17 +461,17 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   // in from outside sees a dungeon continuing into the dark rather than a hole.
   // It has to cover both rooms and the hall between them, so it is sized from
   // the whole complex rather than from the board.
-  const westmost = Math.min(BOARD_CX - START_CHAMBER_W / 2, FAR_CX - FAR_CHAMBER_W / 2);
-  const eastmost = Math.max(BOARD_CX + START_CHAMBER_W / 2, FAR_CX + FAR_CHAMBER_W / 2);
+  const westmost = Math.min(BOARD_CX - START_CHAMBER_W / 2, FAR_CX - FAR_CHAMBER_W / 2, BAT_CX - FAR_CHAMBER_W / 2);
+  const eastmost = Math.max(BOARD_CX + START_CHAMBER_W / 2, FAR_CX + FAR_CHAMBER_W / 2, BAT_CX + FAR_CHAMBER_W / 2);
   const apronW = (eastmost - westmost) * 3;
-  const apronD = (FAR_CZ - BOARD_CZ) + START_CHAMBER_D + FAR_CHAMBER_D;
+  const apronD = (BAT_CZ - BOARD_CZ) + START_CHAMBER_D + FAR_CHAMBER_D;
   const apronTex = floorTexture.clone();
   apronTex.repeat.set(apronW / TEXTURE_SCALE, apronD / TEXTURE_SCALE);
   const apron = new THREE.Mesh(
     new THREE.PlaneGeometry(apronW, apronD).rotateX(-Math.PI / 2),
     new THREE.MeshLambertMaterial({ map: apronTex, color: 0x606068, flatShading: true }),
   );
-  apron.position.set((westmost + eastmost) / 2, -0.06, (BOARD_CZ + FAR_CZ) / 2);
+  apron.position.set((westmost + eastmost) / 2, -0.06, (BOARD_CZ + BAT_CZ) / 2);
   scene.add(apron);
 
   // -------------------------------------------------------------------- walls
@@ -594,7 +601,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     cz: number,
     width: number,
     depth: number,
-    doorway: "north" | "south",
+    doorway: "north" | "south" | "both",
   ) => {
     const floor = stoneFloor(width, depth);
     floor.position.set(cx, 0, cz);
@@ -615,15 +622,21 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       addWall(width + WALL_T * 2, WALL_T, cx, northZ);
       addPiercedWall(southZ, west, east);
       addDoorFrame(southZ);
-    } else {
+    } else if (doorway === "north") {
       addPiercedWall(northZ, west, east);
       addDoorFrame(northZ);
       addWall(width + WALL_T * 2, WALL_T, cx, southZ);
+    } else {
+      addPiercedWall(northZ, west, east);
+      addDoorFrame(northZ);
+      addPiercedWall(southZ, west, east);
+      addDoorFrame(southZ);
     }
   };
 
   buildChamber(BOARD_CX, BOARD_CZ, START_CHAMBER_W, START_CHAMBER_D, "south");
-  buildChamber(FAR_CX, FAR_CZ, FAR_CHAMBER_W, FAR_CHAMBER_D, "north");
+  buildChamber(FAR_CX, FAR_CZ, FAR_CHAMBER_W, FAR_CHAMBER_D, "both");
+  buildChamber(BAT_CX, BAT_CZ, FAR_CHAMBER_W, FAR_CHAMBER_D, "north");
 
   // --------------------------------------------------------------- doors
 
@@ -647,6 +660,14 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   addWall(WALL_T, HALL_LEN, hallLeft - WALL_T / 2, hallCZ);
   addWall(WALL_T, HALL_LEN, hallRight + WALL_T / 2, hallCZ);
+
+  const batHallNorth = FAR_CZ + FAR_CHAMBER_D / 2 + WALL_T;
+  const batHallCZ = batHallNorth + BAT_HALL_LEN / 2;
+  const batHallFloor = stoneFloor(HALL_W + WALL_T * 2, BAT_HALL_LEN);
+  batHallFloor.position.set(ARCH_CENTRE, 0, batHallCZ);
+  scene.add(batHallFloor);
+  addWall(WALL_T, BAT_HALL_LEN, hallLeft - WALL_T / 2, batHallCZ);
+  addWall(WALL_T, BAT_HALL_LEN, hallRight + WALL_T / 2, batHallCZ);
 
   // --------------------------------------------------------------- the arch
 

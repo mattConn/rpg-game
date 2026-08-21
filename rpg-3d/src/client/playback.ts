@@ -40,7 +40,14 @@ export function interpolateSnapshot<T extends GameSnapshot>(
   const enemies = curr.enemies.map((enemy) => {
     const before = prevEnemies.get(enemy.id);
     if (!before) return enemy;
-    return { ...enemy, x: lerp(before.x, enemy.x, t), y: lerp(before.y, enemy.y, t) };
+    return {
+      ...enemy,
+      x: lerp(before.x, enemy.x, t),
+      y: lerp(before.y, enemy.y, t),
+      altitude: before.altitude !== undefined && enemy.altitude !== undefined
+        ? lerp(before.altitude, enemy.altitude, t)
+        : enemy.altitude,
+    };
   });
 
   const elapsed = Math.max(0, sinceSnapshot) / 1000;

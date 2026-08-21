@@ -135,7 +135,23 @@ export const FAR_REGION: Region = {
   rows: FAR_GRID_ROWS,
 };
 
-export const REGIONS: readonly Region[] = [BOARD_REGION, HALL_REGION, FAR_REGION];
+/** A shorter passage continues south from the second chamber. */
+export const BAT_HALL_REGION: Region = {
+  col: HALL_REGION.col,
+  row: FAR_REGION.row + FAR_REGION.rows,
+  cols: HALL_REGION.cols,
+  rows: 22,
+};
+
+/** Third chamber housing the flying bat. */
+export const BAT_REGION: Region = {
+  col: FAR_REGION.col,
+  row: BAT_HALL_REGION.row + BAT_HALL_REGION.rows,
+  cols: FAR_GRID_COLS,
+  rows: FAR_GRID_ROWS,
+};
+
+export const REGIONS: readonly Region[] = [BOARD_REGION, HALL_REGION, FAR_REGION, BAT_HALL_REGION, BAT_REGION];
 
 export type DoorId = "arena" | "far";
 export type DoorStates = Record<DoorId, boolean>;

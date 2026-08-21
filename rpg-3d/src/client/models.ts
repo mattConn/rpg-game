@@ -844,13 +844,64 @@ export function buildPlayerWolf(): PlayerWolfRig {
   weaponMount.add(sword, dagger);
   installImportedSword(sword);
   installImportedDagger(dagger, "mouth");
-  // Keep the exact rig object captured by the asynchronous wolf loader. A
-  // spread copy freezes nullable scalar fields like `importedHead` and
-  // `importedJaw` at null, so later bone discovery never reaches the actor.
-  const playerRig = rig as PlayerWolfRig;
-  playerRig.sword = sword;
-  playerRig.dagger = dagger;
-  return playerRig;
+  installImportedCrown(rig.head);
+  return { ...rig, sword, dagger };
+}
+
+export interface BatRig {
+  model: THREE.Group;
+  mixer: THREE.AnimationMixer | null;
+}
+
+let importedBatScene: Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }> | null = null;
+
+/** Imported flying bat, normalized to game scale with bright red eyes. */
+export function buildBat(): BatRig {
+  const rig: BatRig = { model: new THREE.Group(), mixer: null };
+  importedBatScene ??= new Promise((resolve, reject) => {
+    new GLTFLoader().load(
+      "/shared-models/bat/scene.gltf",
+      (gltf) => resolve({ scene: gltf.scene, animations: gltf.animations }),
+      undefined,
+      reject,
+    );
+  });
+  importedBatScene.then(({ scene, animations }) => {
+    const visual = cloneSkeleton(scene);
+    visual.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(visual);
+    const size = bounds.getSize(new THREE.Vector3());
+    visual.scale.setScalar(9.6 / Math.max(size.x, size.y, size.z));
+    visual.updateMatrixWorld(true);
+    const scaledBounds = new THREE.Box3().setFromObject(visual);
+    const centre = scaledBounds.getCenter(new THREE.Vector3());
+    visual.position.sub(centre);
+    visual.traverse((node) => {
+      if (!(node instanceof THREE.Mesh)) return;
+      // The oversized skinned bat moving rapidly through the view is expensive
+      // to include in every shadow-map update during a swoop.
+      node.castShadow = false;
+      node.receiveShadow = true;
+      const materials = Array.isArray(node.material) ? node.material : [node.material];
+      const replacements = materials.map((source) => {
+        const material = source.clone();
+        if (material.name.toLowerCase().includes("eyes") && material instanceof THREE.MeshStandardMaterial) {
+          material.color.setHex(0xff1010);
+          material.emissive.setHex(0xff0000);
+          material.emissiveIntensity = 1.4;
+          material.map = null;
+        }
+        return material;
+      });
+      node.material = Array.isArray(node.material) ? replacements : replacements[0]!;
+    });
+    rig.model.add(visual);
+    if (animations[0]) {
+      rig.mixer = new THREE.AnimationMixer(visual);
+      rig.mixer.clipAction(animations[0]).play();
+    }
+  }).catch((error: unknown) => console.warn("Could not load imported bat model", error));
+  return rig;
 }
 
 // ------------------------------------------------------------------ scenery

@@ -17,6 +17,7 @@ import { ACTIONS, type AttackKind } from "../../../src/shared/actions.js";
 import type { GameSnapshot } from "../../../src/shared/protocol.js";
 import {
   buildDagger,
+  buildBat,
   buildHuman,
   buildPlayerWolf,
   buildTombstone,
@@ -25,6 +26,7 @@ import {
   WOLF_SCALE,
   tintObject,
   type HumanRig,
+  type BatRig,
   type PlayerWolfRig,
   type WolfRig,
 } from "./models.js";
@@ -39,15 +41,11 @@ const WOLF_FULL_SPEED = 140;
 const PLAYER_WOLF_STRIDE_SPEED = 200;
 
 const SWING_MS = 320;
-const PLAYER_BITE_MS = 280;
-const SLOW_PLAYER_BITE_MS = 420;
-const BITE_FLASH_MS = 85;
 const LUNGE_MS = 300;
 const COLLAPSE_MS = 450;
 const FALL_MS = 600;
 const JUMP_MS = 620;
 const JUMP_HEIGHT = 1.4;
-const ENABLE_PLAYER_SPIN_ATTACK = false;
 
 /** Quick launch, long fall: peak at 28% of the jump, then gather downward speed. */
 function jumpArc(age: number): number {
@@ -194,62 +192,23 @@ export class PlayerActor {
 class PlayerWolfActor {
   readonly root = new THREE.Group();
   private readonly rig: PlayerWolfRig;
-  private readonly biteFlash: THREE.Sprite;
-  private readonly biteFlashMaterial: THREE.SpriteMaterial;
   private yaw = 0;
   private gait = 0;
   private lastX: number | null = null;
   private lastY: number | null = null;
   private attackAt: number | null = null;
   private attackKind: AttackKind = "melee";
-  private biteDuration = PLAYER_BITE_MS;
-  private emphasizeBiteLunge = false;
-  private wasMoving = false;
-  private wasAirborne = false;
   private fall = 0;
   private jumpAt: number | null = null;
-  private headBindPosition: THREE.Vector3 | null = null;
 
   constructor() {
     this.rig = buildPlayerWolf();
-    const flashCanvas = document.createElement("canvas");
-    flashCanvas.width = 64;
-    flashCanvas.height = 64;
-    const flashContext = flashCanvas.getContext("2d");
-    if (flashContext) {
-      const gradient = flashContext.createRadialGradient(32, 32, 3, 32, 32, 31);
-      gradient.addColorStop(0, "rgba(255,255,255,0.08)");
-      gradient.addColorStop(0.38, "rgba(255,255,255,0.22)");
-      gradient.addColorStop(0.62, "rgba(255,255,255,0.95)");
-      gradient.addColorStop(0.82, "rgba(255,255,255,0.14)");
-      gradient.addColorStop(1, "rgba(255,255,255,0)");
-      flashContext.fillStyle = gradient;
-      flashContext.fillRect(0, 0, 64, 64);
-    }
-    this.biteFlashMaterial = new THREE.SpriteMaterial({
-      color: 0xffffff,
-      map: new THREE.CanvasTexture(flashCanvas),
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-    this.biteFlash = new THREE.Sprite(this.biteFlashMaterial);
-    this.biteFlash.position.set(0.34, -0.085, 0);
-    this.biteFlash.visible = false;
-    this.rig.head.add(this.biteFlash);
     this.root.add(this.rig.model);
   }
 
   swing(now: number, kind: AttackKind = "melee"): void {
     this.attackAt = now;
     this.attackKind = kind;
-    // Give stationary and airborne bites a more readable jaw snap. A running
-    // ground bite stays quick so it does not make movement feel sluggish.
-    this.emphasizeBiteLunge = this.wasAirborne || !this.wasMoving;
-    this.biteDuration = this.emphasizeBiteLunge
-      ? SLOW_PLAYER_BITE_MS
-      : PLAYER_BITE_MS;
   }
 
   jump(now: number): void {
@@ -258,7 +217,7 @@ class PlayerWolfActor {
   }
 
   setWeapon(kind: AttackKind): void {
-    this.rig.sword.visible = false;
+    this.rig.sword.visible = kind === "melee";
     this.rig.dagger.visible = kind === "ranged";
   }
 
@@ -282,20 +241,19 @@ class PlayerWolfActor {
     const wanted = heading ? yawFor(heading.x, heading.y) : moving ? yawFor(dx, dy) : yawFor(snap.player.facing, 0);
     this.yaw += angleDelta(this.yaw, wanted) * (1 - Math.exp(-12 * dt));
 
-    const attackDuration = this.attackKind === "melee" ? this.biteDuration : SWING_MS;
-    const attack = this.attackAt === null ? null : (now - this.attackAt) / attackDuration;
+    const attack = this.attackAt === null ? null : (now - this.attackAt) / SWING_MS;
     const activeAttack = attack !== null && attack < 1;
     const easedAttack = activeAttack ? ease(Math.max(0, attack)) : 0;
     const spin = activeAttack
       ? this.attackKind === "melee"
-        ? ENABLE_PLAYER_SPIN_ATTACK ? easedAttack * -Math.PI * 2 : 0
+        ? easedAttack * -Math.PI * 2
         // Dagger sweep: snap 45° left, travel through a 90° rightward arc,
         // then return to the ordinary facing as soon as the attack ends.
         : Math.PI / 4 - easedAttack * Math.PI / 2
       : 0;
     this.root.rotation.y = this.yaw + spin;
 
-    const swordBend = ENABLE_PLAYER_SPIN_ATTACK && activeAttack && this.attackKind === "melee"
+    const swordBend = activeAttack && this.attackKind === "melee"
       ? Math.sin(easedAttack * Math.PI)
       : 0;
     if (this.rig.importedTail) {
@@ -309,62 +267,15 @@ class PlayerWolfActor {
     const gaitSpeed = Math.min(2, speed / PLAYER_WOLF_STRIDE_SPEED);
     if (moving) this.gait += dt * (5 + gaitSpeed * 11);
     const airborne = jumpAge < 1;
-    this.wasMoving = moving;
-    this.wasAirborne = airborne;
     animateWolfLegs(this.rig, moving && !airborne, this.gait, amp, dt);
     braceWolfLegsForSword(this.rig, swordBend);
     kickWolfLegsForJump(this.rig, jumpTuck);
-
-    const biteTime = activeAttack && this.attackKind === "melee"
-      ? Math.max(0, Math.min(1, attack ?? 0))
-      : null;
-    // The player rests fully closed, unlike the snarling hellhound. Open from
-    // that bind pose visibly, hold wide through the thrust, then snap shut.
-    const biteLunge = biteTime === null ? 0 : Math.sin(Math.PI * smootherEase(biteTime));
-    const jawOpen = biteTime === null
-      ? 0
-      : biteTime < 0.18
-        ? smootherEase(biteTime / 0.18) * 1.55
-        : biteTime < 0.42
-          ? 1.55
-          : biteTime < 0.56
-            ? (1 - smootherEase((biteTime - 0.42) / 0.14)) * 1.55
-            : 0;
-    poseWolfLegsForBite(this.rig, Math.max(0, biteLunge));
-    if (this.rig.importedHead) {
-      this.headBindPosition ??= this.rig.importedHead.bone.position.clone();
-      this.rig.importedHead.bone.position.copy(this.headBindPosition);
-      if (this.emphasizeBiteLunge) {
-        this.rig.importedHead.bone.position.x += biteLunge * 0.24;
-      }
-      this.rig.importedHead.bone.quaternion
-        .copy(this.rig.importedHead.bindQuaternion);
-    }
-    if (this.rig.importedJaw) {
-      JAW_BITE_QUATERNION.setFromAxisAngle(JAW_BITE_AXIS, jawOpen);
-      this.rig.importedJaw.bone.quaternion
-        .copy(this.rig.importedJaw.bindQuaternion)
-        .multiply(JAW_BITE_QUATERNION);
-    }
-    this.rig.jaw.rotation.z = -jawOpen;
-
-    // A tiny, hard-edged burst at the instant the jaws close gives the bite a
-    // sense of impact without leaving a glow hanging around the muzzle.
-    const flashStart = this.biteDuration * 0.32;
-    const flashAge = this.attackAt === null ? 1 : (now - this.attackAt - flashStart) / BITE_FLASH_MS;
-    const flashStrength = activeAttack && this.attackKind === "melee" && flashAge >= 0 && flashAge < 1
-      ? Math.sin(flashAge * Math.PI)
-      : 0;
-    this.biteFlash.visible = flashStrength > 0;
-    this.biteFlashMaterial.opacity = flashStrength * 0.46;
-    const flashSize = 0.26 + Math.max(0, Math.min(1, flashAge)) * 0.74;
-    this.biteFlash.scale.set(flashSize, flashSize, 1);
 
     const daggerLunge = activeAttack && this.attackKind === "ranged" ? Math.sin(easedAttack * Math.PI) * 0.42 : 0;
     this.fall = damp(this.fall, snap.dead ? 1 : 0, 1000 / FALL_MS, dt);
     const boundRock = moving && !airborne ? Math.sin(this.gait) * 0.12 * amp : 0;
     this.rig.model.rotation.z = -this.fall * (Math.PI / 2) + boundRock;
-    this.rig.model.position.x = daggerLunge + biteLunge * 0.42;
+    this.rig.model.position.x = daggerLunge;
     const boundLift = moving ? Math.abs(Math.sin(this.gait)) * 0.12 * amp : 0;
     this.rig.model.position.y = this.fall * 0.3
       + boundLift
@@ -395,11 +306,6 @@ function ease(t: number): number {
   return t * t * (3 - 2 * t);
 }
 
-/** Zero velocity and acceleration at both ends for short skeletal motions. */
-function smootherEase(t: number): number {
-  return t * t * t * (t * (t * 6 - 15) + 10);
-}
-
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
@@ -423,6 +329,8 @@ const TAIL_BEND_AXIS = new THREE.Vector3(1, 0, 0);
 const ATTACK_BEND_QUATERNION = new THREE.Quaternion();
 const JAW_BITE_AXIS = new THREE.Vector3(1, 0, 0);
 const JAW_BITE_QUATERNION = new THREE.Quaternion();
+// The imported wing bones run along local Z, so rotating around Z only twists
+// the membrane without moving its silhouette. Local X lifts the full span.
 
 /** Animate both the fallback legs and the visible imported wolf skeleton. */
 function animateWolfLegs(rig: WolfRig, moving: boolean, gait: number, amp: number, dt: number): void {
@@ -490,21 +398,6 @@ function kickWolfLegsForJump(rig: WolfRig, amount: number): void {
       const lowerDirection = i < 2 ? 1 : -1;
       const lower = lowerDirection * amount * 0.28;
       LEG_SWING_QUATERNION.setFromAxisAngle(LEG_SWING_AXIS, lower);
-      leg.lowerBone.quaternion.multiply(LEG_SWING_QUATERNION);
-    }
-  });
-}
-
-/** Brace for a bite by sweeping every leg slightly behind the lunging head. */
-function poseWolfLegsForBite(rig: WolfRig, amount: number): void {
-  rig.legs.forEach((leg) => {
-    leg.rotation.z += amount * 0.34;
-  });
-  rig.importedLegs.forEach((leg) => {
-    LEG_SWING_QUATERNION.setFromAxisAngle(LEG_SWING_AXIS, amount * 0.38);
-    leg.bone.quaternion.multiply(LEG_SWING_QUATERNION);
-    if (leg.lowerBone) {
-      LEG_SWING_QUATERNION.setFromAxisAngle(LEG_SWING_AXIS, amount * -0.18);
       leg.lowerBone.quaternion.multiply(LEG_SWING_QUATERNION);
     }
   });
@@ -622,6 +515,53 @@ class WolfActor {
   }
 }
 
+class BatActor {
+  readonly root = new THREE.Group();
+  private readonly rig: BatRig;
+  private yaw = 0;
+  private hurt = 0;
+  private lungeAt: number | null = null;
+  private lastAltitude: number | null = null;
+
+  constructor(id: string) {
+    this.rig = buildBat();
+    this.root.add(this.rig.model);
+    this.root.userData["entityId"] = id;
+  }
+
+  flinch(): void { this.hurt = 1; }
+  lunge(now: number): void { this.lungeAt = now; }
+
+  update(
+    enemy: GameSnapshot["enemies"][number],
+    dt: number,
+    now: number,
+    elapsed: number,
+    _facePoint: { x: number; y: number } | null = null,
+  ): void {
+    this.rig.mixer?.update(dt);
+    const heading = enemy.heading ?? { x: enemy.facing, y: 0 };
+    const wanted = yawFor(heading.x, heading.y);
+    this.yaw += angleDelta(this.yaw, wanted) * (1 - Math.exp(-8 * dt));
+    this.root.rotation.y = this.yaw;
+    const altitude = enemy.altitude ?? 4.2;
+    const descending = this.lastAltitude !== null && altitude < this.lastAltitude - 0.001;
+    this.lastAltitude = altitude;
+    this.root.position.set(toX(enemy.x), altitude, toZ(enemy.y));
+    this.rig.model.position.y = Math.sin(elapsed * 7) * 0.09;
+    this.hurt = Math.max(0, this.hurt - dt * 5);
+    this.rig.model.position.x = -this.hurt * 0.12;
+    this.rig.model.rotation.z = this.hurt * 0.18;
+    const lunge = this.lungeAt === null ? 1 : (now - this.lungeAt) / LUNGE_MS;
+    const swoopTilt = descending ? -0.55 : 0;
+    this.rig.model.rotation.x = damp(this.rig.model.rotation.x, swoopTilt
+      + (lunge < 1 ? Math.sin(lunge * Math.PI) * -0.32 : 0), 14, dt);
+    if (lunge >= 1) this.lungeAt = null;
+  }
+
+  dispose(): void { disposeObject(this.root); }
+}
+
 /** A body: the same wolf, toppled onto its side and dimmed where it fell. */
 class CorpseActor {
   readonly root = new THREE.Group();
@@ -687,7 +627,7 @@ class CorpseActor {
 /** Everything the snapshot owns, kept in step with it. */
 export class Actors {
   readonly player: PlayerActor | PlayerWolfActor;
-  private readonly enemies = new Map<string, WolfActor>();
+  private readonly enemies = new Map<string, WolfActor | BatActor>();
   private readonly corpses = new Map<string, CorpseActor>();
   private readonly projectiles: THREE.Group[] = [];
   private readonly tombstones = new Map<string, THREE.Group>();
@@ -730,7 +670,7 @@ export class Actors {
       snap.enemies.map((e) => e.id),
       (id) => {
         const enemy = snap.enemies.find((e) => e.id === id)!;
-        const actor = new WolfActor(id, enemy.color);
+        const actor = enemy.kind === "bat" ? new BatActor(id) : new WolfActor(id, enemy.color);
         this.scene.add(actor.root);
         this.pickables.push(actor.root);
         return actor;

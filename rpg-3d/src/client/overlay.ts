@@ -275,7 +275,10 @@ function drawWorldLabels(
       ? enemy.aggro
       : healthBars?.always || enemy.health < enemy.maxHealth);
     if (showHealth) {
-      const bar = toScreen(enemy.x, enemy.y, healthBars?.worldHeight ?? 1.55);
+      const barHeight = enemy.kind === "bat"
+        ? (enemy.altitude ?? 4.2) + 1.3
+        : healthBars?.worldHeight ?? 1.55;
+      const bar = toScreen(enemy.x, enemy.y, barHeight);
       drawHealthBar(
         ctx,
         bar,
@@ -288,7 +291,7 @@ function drawWorldLabels(
     }
 
     if (near(enemy.x, enemy.y)) {
-      const at = toScreen(enemy.x, enemy.y, 1.9);
+      const at = toScreen(enemy.x, enemy.y, enemy.kind === "bat" ? (enemy.altitude ?? 4.2) + 1.65 : 1.9);
       ctx.font = NAME_FONT;
       ctx.fillStyle = "#ffffff";
       ctx.fillText(enemy.name, at.x, at.y);

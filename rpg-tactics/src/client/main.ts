@@ -387,11 +387,12 @@ uiCanvas.addEventListener("mousedown", (event) => {
     event.preventDefault();
     return;
   }
-  // Left click is reserved for the bite attack. Only right-drag rotates the
-  // camera, so an attack press can never accidentally disturb the view.
-  if (event.button !== 2) return;
-  event.preventDefault();
-  dragButton = 2;
+  // Either mouse button may rotate the camera. A left press remains an attack
+  // unless it travels past the drag threshold; right press never opens the
+  // browser menu over the game.
+  if (event.button !== 0 && event.button !== 2) return;
+  if (event.button === 2) event.preventDefault();
+  dragButton = event.button;
   // Shift is the run modifier, not a camera-pan modifier. Every accepted drag
   // rotates the view; this client no longer has lateral camera panning.
   dragMoved = 0;
@@ -408,6 +409,7 @@ window.addEventListener("mouseup", (event) => {
     swallowNextClick = true;
     return;
   }
+  if (dragButton === 0 && dragMoved > DRAG_THRESHOLD) swallowNextClick = true;
   dragButton = null;
 });
 

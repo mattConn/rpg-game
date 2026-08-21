@@ -33,6 +33,7 @@ import {
   ARENA_X,
   ATTACK_MS,
   AUTO_RESTART_DELAY_MS,
+  BAT_REGION,
   BOARD_REGION,
   DOOR_CLEARANCE_PX,
   DOORWAY_WIDTH_PX,
@@ -56,6 +57,7 @@ import {
   canReach,
   cellAtPoint,
   cellCenter,
+  regionCentre,
   clampPointToFloor,
   clampToGrid,
   distance,
@@ -78,13 +80,8 @@ const DAMAGE_COLOR_DEALT = "#ffd633";
 const DAMAGE_COLOR_TAKEN = "#ff6b6b";
 /** A deliberately tight 90-degree attack cone: 45 degrees either side. */
 const ATTACK_CONE_DOT = Math.cos(Math.PI / 4);
-const DIRECT_BITE_DOT = Math.cos(Math.PI / 12);
-const BITE_DAMAGE = 10;
-const DIRECT_BITE_DAMAGE = 15;
-/** Extra forgiveness while crossing the target quickly in midair. */
-const AIR_MELEE_RANGE = MELEE_RANGE * 1.35;
-/** Short committed step carried by the bite itself. */
-const BITE_FORWARD_MOMENTUM = 38;
+const SWORD_FRONT_DAMAGE = 15;
+const SWORD_SPIN_DAMAGE = 8;
 
 const MAX_CORPSES = 8;
 
@@ -156,6 +153,17 @@ const DOOR_INTERACT_RANGE = TILE_PX * 3;
 const DOOR_FACING_DOT = Math.cos(Math.PI / 3);
 const JUMP_MS = 620;
 const JUMP_SPEED_MULTIPLIER = 1.8;
+const BAT_PATROL_RADIUS = SQUARE_PX * 1.35;
+const BAT_PATROL_ANGULAR_SPEED = 0.72;
+const BAT_PURSUIT_SPEED = 92;
+const BAT_DIVE_MS = 1150;
+const BAT_STRIKE_AT_MS = 650;
+const BAT_ATTACK_INTERVAL_MS = 1800;
+const BAT_DIVE_TRIGGER_RANGE = MELEE_RANGE * 2.4;
+const BAT_BITE_RANGE = MELEE_RANGE * 0.72;
+const BAT_CRUISE_ALTITUDE = 4.2;
+const BAT_AGGRO_ALTITUDE = 2.8;
+const BAT_DIVE_ALTITUDE = 0.9;
 
 // Corridor waypoints for cross-region navigation.
 const HALL_MID_COL = HALL_REGION.col + Math.floor(HALL_REGION.cols / 2);
@@ -188,6 +196,7 @@ interface Actor {
 }
 
 interface Hound extends Actor {
+  kind: "hellhound" | "bat";
   glyph: string;
   color: string;
   aggro: boolean;
@@ -196,6 +205,11 @@ interface Hound extends Actor {
   patrolRight: number;
   patrolDir: 1 | -1;
   heading: Point;
+  patrolAngle?: number;
+  diveAt?: number | null;
+  diveHit?: boolean;
+  diveOrigin?: Point;
+  diveTarget?: Point;
 }
 
 interface DamageNumber {
@@ -313,6 +327,7 @@ export class TacticsGame {
       const center = cellCenter(cell);
       const hound: Hound = {
         id: `hound-${this.nextEnemySeq++}`,
+        kind: "hellhound",
         ...HELLHOUND,
         cell: { ...cell },
         pos: center,
@@ -331,6 +346,34 @@ export class TacticsGame {
       // out one way and not two.
       this.seatPatrol(hound, center);
       return hound;
+    });
+    const batCentre = cellCenter({
+      col: BAT_REGION.col + Math.floor(BAT_REGION.cols / 2),
+      row: BAT_REGION.row + Math.floor(BAT_REGION.rows / 2),
+    });
+    this.enemies.push({
+      id: "bat-0",
+      kind: "bat",
+      name: "Vampire Bat",
+      glyph: "B",
+      color: "#702020",
+      cell: cellAtPoint(batCentre)!,
+      pos: batCentre,
+      ...batCentre,
+      facing: -1,
+      health: 90,
+      maxHealth: 90,
+      aggro: false,
+      nextAttackAt: 0,
+      patrolLeft: batCentre.x,
+      patrolRight: batCentre.x,
+      patrolDir: 1,
+      heading: { x: 1, y: 0 },
+      patrolAngle: 0,
+      diveAt: null,
+      diveHit: false,
+      diveOrigin: undefined,
+      diveTarget: undefined,
     });
 
     this.corpses = [];
@@ -385,6 +428,10 @@ export class TacticsGame {
     // its line abreast first, off one board, before any of it moves.
     this.assignFlanks();
     for (const enemy of this.enemies) {
+      if (enemy.kind === "bat") {
+        this.updateBat(enemy, dt, this.simNow);
+        continue;
+      }
       if (enemy.aggro) {
         this.updateEnemy(enemy, dt, this.simNow);
       } else {
@@ -623,6 +670,103 @@ export class TacticsGame {
    * Horizontal patrol for a hound that hasn't noticed the player yet. It walks
    * back and forth within its patrol beat, reversing at either end.
    */
+  private updateBat(bat: Hound, dt: number, now: number): void {
+    const player = this.playerAt();
+    let gap = distance(this.at(bat), player);
+    if (!bat.aggro && gap <= AGGRO_RANGE * 1.25) bat.aggro = true;
+
+    if (!bat.aggro) {
+      bat.patrolAngle = (bat.patrolAngle ?? 0) + dt * BAT_PATROL_ANGULAR_SPEED;
+      const centre = regionCentre(BAT_REGION);
+      const next = {
+        x: centre.x + Math.cos(bat.patrolAngle) * BAT_PATROL_RADIUS,
+        y: centre.y + Math.sin(bat.patrolAngle) * BAT_PATROL_RADIUS,
+      };
+      bat.heading = { x: -Math.sin(bat.patrolAngle), y: Math.cos(bat.patrolAngle) };
+      bat.x = next.x;
+      bat.y = next.y;
+      bat.pos = next;
+      bat.cell = cellAtPoint(next) ?? bat.cell;
+      return;
+    }
+
+    if (bat.diveAt === null || bat.diveAt === undefined) {
+      const dx = player.x - bat.x;
+      const dy = player.y - bat.y;
+      const len = Math.max(0.001, Math.hypot(dx, dy));
+      bat.heading = { x: dx / len, y: dy / len };
+      if (gap > BAT_DIVE_TRIGGER_RANGE * 0.7) {
+        const step = Math.min(gap, BAT_PURSUIT_SPEED * dt);
+        const next = { x: bat.x + bat.heading.x * step, y: bat.y + bat.heading.y * step };
+        const cell = cellAtPoint(next);
+        if (cell) {
+          bat.x = next.x;
+          bat.y = next.y;
+          bat.pos = next;
+          bat.cell = cell;
+          gap = distance(next, player);
+        }
+      }
+      if (now < bat.nextAttackAt || gap > BAT_DIVE_TRIGGER_RANGE) return;
+      bat.diveAt = now;
+      bat.diveHit = false;
+      bat.diveOrigin = { x: bat.x, y: bat.y };
+      bat.diveTarget = { x: player.x, y: player.y };
+    }
+
+    const age = now - bat.diveAt;
+    const diveTarget = bat.diveTarget ?? player;
+    const dx = diveTarget.x - bat.x;
+    const dy = diveTarget.y - bat.y;
+    const len = Math.max(0.001, Math.hypot(dx, dy));
+    bat.heading = { x: dx / len, y: dy / len };
+    if (age < BAT_STRIKE_AT_MS) {
+      const origin = bat.diveOrigin ?? { x: bat.x, y: bat.y };
+      const rawT = Math.max(0, Math.min(1, age / BAT_STRIKE_AT_MS));
+      const t = rawT * rawT * (3 - 2 * rawT);
+      const next = {
+        x: origin.x + (diveTarget.x - origin.x) * t,
+        y: origin.y + (diveTarget.y - origin.y) * t,
+      };
+      const cell = cellAtPoint(next);
+      if (cell) {
+        bat.x = next.x;
+        bat.y = next.y;
+        bat.pos = next;
+        bat.cell = cell;
+      }
+    }
+    if (!bat.diveHit && age >= BAT_STRIKE_AT_MS) {
+      bat.diveHit = true;
+      if (distance(this.at(bat), player) <= BAT_BITE_RANGE) {
+        this.player.health = Math.max(0, this.player.health - 10);
+        this.spawnDamageNumber(this.player.x, this.player.y, 10, DAMAGE_COLOR_TAKEN);
+        if (Math.random() < 0.5) bat.health = Math.min(bat.maxHealth, bat.health + 10);
+        this.strikes.push({ enemyId: bat.id, seq: this.strikeSeq++ });
+      }
+    }
+    if (age >= BAT_DIVE_MS) {
+      bat.diveAt = null;
+      bat.diveOrigin = undefined;
+      bat.diveTarget = undefined;
+      bat.nextAttackAt = now + BAT_ATTACK_INTERVAL_MS;
+    }
+  }
+
+  private batAltitude(bat: Hound): number {
+    if (bat.diveAt === null || bat.diveAt === undefined) {
+      return bat.aggro ? BAT_AGGRO_ALTITUDE : BAT_CRUISE_ALTITUDE;
+    }
+    const age = this.simNow - bat.diveAt;
+    const recoveryAltitude = bat.aggro ? BAT_AGGRO_ALTITUDE : BAT_CRUISE_ALTITUDE;
+    if (age <= BAT_STRIKE_AT_MS) {
+      return recoveryAltitude
+        - (age / BAT_STRIKE_AT_MS) * (recoveryAltitude - BAT_DIVE_ALTITUDE);
+    }
+    const rise = Math.min(1, (age - BAT_STRIKE_AT_MS) / (BAT_DIVE_MS - BAT_STRIKE_AT_MS));
+    return BAT_DIVE_ALTITUDE + rise * (recoveryAltitude - BAT_DIVE_ALTITUDE);
+  }
+
   private patrolEnemy(enemy: Hound, dt: number): void {
     const pos = this.at(enemy);
     let nx = pos.x + PATROL_SPEED * dt * enemy.patrolDir;
@@ -864,17 +1008,19 @@ export class TacticsGame {
 
       if (this.targetId === enemy.id) this.targetId = null;
 
-      this.corpses.push(corpseOf({
-        id: enemy.id,
-        name: enemy.name,
-        glyph: enemy.glyph,
-        color: enemy.color,
-        room: { ...ARENA_ROOM },
-        x: enemy.x,
-        y: enemy.y,
-        facing: enemy.facing,
-      }));
-      if (this.corpses.length > MAX_CORPSES) this.corpses.shift();
+      if (enemy.kind !== "bat") {
+        this.corpses.push(corpseOf({
+          id: enemy.id,
+          name: enemy.name,
+          glyph: enemy.glyph,
+          color: enemy.color,
+          room: { ...ARENA_ROOM },
+          x: enemy.x,
+          y: enemy.y,
+          facing: enemy.facing,
+        }));
+        if (this.corpses.length > MAX_CORPSES) this.corpses.shift();
+      }
 
       this.enemies.splice(i, 1);
       this.killCount++;
@@ -908,27 +1054,10 @@ export class TacticsGame {
       this.say("Use Interact on a targeted door.");
       return;
     }
-    const meleeRange = this.jumping() ? AIR_MELEE_RANGE : MELEE_RANGE;
-    const beforeLunge = this.playerAt();
-    const lungedTarget = action?.kind === "melee" && !this.jumping()
-      ? this.nearestEnemyInAttackCone(meleeRange + BITE_FORWARD_MOMENTUM, beforeLunge)
-      : null;
-    const lungedAlignment = lungedTarget ? this.enemyAlignment(lungedTarget, beforeLunge) : null;
-    if (action?.kind === "melee" && !this.jumping()) {
-      this.stepPlayer(
-        this.playerHeading.x * BITE_FORWARD_MOMENTUM,
-        this.playerHeading.y * BITE_FORWARD_MOMENTUM,
-        false,
-      );
-    }
     const target = action?.kind === "melee"
-      ? lungedTarget ?? this.nearestEnemyInAttackCone(meleeRange)
+      ? this.nearestEnemyInMeleeRange()
       : this.nearestEnemyInAttackCone();
-    const reach = target
-      ? action?.kind === "melee"
-        ? target === lungedTarget || distance(this.playerAt(), this.at(target)) <= meleeRange
-        : canReach(this.playerAt(), this.at(target))
-      : false;
+    const reach = target ? canReach(this.playerAt(), this.at(target)) : false;
 
     // **Committing is the decision; connecting is the consequence.** A swing
     // that finds nothing — no mark, or a hound out of reach — still costs
@@ -952,13 +1081,10 @@ export class TacticsGame {
         this.startCooldown(MELEE_COOLDOWN_MS);
         return;
       }
-      const alignment = target === lungedTarget && lungedAlignment !== null
-        ? lungedAlignment
-        : this.enemyAlignment(target);
-      const damage = alignment >= DIRECT_BITE_DOT ? DIRECT_BITE_DAMAGE : BITE_DAMAGE;
+      const damage = this.enemyInPlayerAttackCone(target) ? SWORD_FRONT_DAMAGE : SWORD_SPIN_DAMAGE;
       this.wound(target, damage);
       this.wake(target);
-      this.say(`You bite the ${target.name.toLowerCase()} for ${damage}.`);
+      this.say(`You cut the ${target.name.toLowerCase()} for ${damage}.`);
       this.startCooldown(MELEE_COOLDOWN_MS);
       return;
     }
@@ -1274,14 +1400,31 @@ export class TacticsGame {
     return this.at(this.player);
   }
 
-  private nearestEnemyInAttackCone(maxRange = Infinity, from: Point = this.playerAt()): Hound | null {
+  private nearestEnemyInAttackCone(): Hound | null {
     let nearest: Hound | null = null;
     let nearestGap = Infinity;
     for (const enemy of this.enemies) {
-      const dx = enemy.x - from.x;
-      const dy = enemy.y - from.y;
+      const dx = enemy.x - this.player.x;
+      const dy = enemy.y - this.player.y;
       const gap = Math.hypot(dx, dy);
-      if (gap <= maxRange && this.enemyAlignment(enemy, from) >= ATTACK_CONE_DOT && gap < nearestGap) {
+      if (enemy.kind === "bat" && !this.jumping()
+        && enemy.diveAt === null && enemy.diveAt === undefined) continue;
+      if (this.enemyInPlayerAttackCone(enemy) && gap < nearestGap) {
+        nearest = enemy;
+        nearestGap = gap;
+      }
+    }
+    return nearest;
+  }
+
+  private nearestEnemyInMeleeRange(): Hound | null {
+    let nearest: Hound | null = null;
+    let nearestGap = Infinity;
+    for (const enemy of this.enemies) {
+      const gap = distance(this.playerAt(), this.at(enemy));
+      if (enemy.kind === "bat" && (!this.enemyInPlayerAttackCone(enemy)
+        || (!this.jumping() && enemy.diveAt === null && enemy.diveAt === undefined))) continue;
+      if (gap <= MELEE_RANGE && gap < nearestGap) {
         nearest = enemy;
         nearestGap = gap;
       }
@@ -1290,14 +1433,11 @@ export class TacticsGame {
   }
 
   private enemyInPlayerAttackCone(enemy: Hound): boolean {
-    return this.enemyAlignment(enemy) >= ATTACK_CONE_DOT;
-  }
-
-  private enemyAlignment(enemy: Hound, from: Point = this.playerAt()): number {
-    const dx = enemy.x - from.x;
-    const dy = enemy.y - from.y;
+    const dx = enemy.x - this.player.x;
+    const dy = enemy.y - this.player.y;
     const gap = Math.hypot(dx, dy);
-    return gap < 0.001 ? 1 : (dx * this.playerHeading.x + dy * this.playerHeading.y) / gap;
+    return gap < 0.001 ||
+      (dx * this.playerHeading.x + dy * this.playerHeading.y) / gap >= ATTACK_CONE_DOT;
   }
 
   private nextDamageNumberId = 0;
@@ -1324,13 +1464,11 @@ export class TacticsGame {
       return this.targetDoor !== null && this.canInteractWithDoor(this.targetDoor, this.playerHeading);
     }
     if (this.simNow < this.nextAttackAt) return false;
-    const meleeRange = this.jumping() ? AIR_MELEE_RANGE : MELEE_RANGE;
     const target = action?.kind === "melee"
-      ? this.nearestEnemyInAttackCone()
+      ? this.nearestEnemyInMeleeRange()
       : this.nearestEnemyInAttackCone();
     if (!target) return false;
-    const reach = distance(this.playerAt(), this.at(target)) <=
-      (action?.kind === "melee" ? meleeRange : MELEE_RANGE);
+    const reach = canReach(this.playerAt(), this.at(target));
     return action?.kind === "melee" ? reach : action?.kind === "ranged" ? !reach : false;
   }
 
@@ -1413,6 +1551,7 @@ export class TacticsGame {
       },
       enemies: this.enemies.map((e) => ({
         id: e.id,
+        kind: e.kind,
         name: e.name,
         glyph: e.glyph,
         color: e.color,
@@ -1425,6 +1564,7 @@ export class TacticsGame {
         aggro: e.aggro,
         facing: e.facing,
         heading: { ...e.heading },
+        altitude: e.kind === "bat" ? this.batAltitude(e) : undefined,
       })),
       corpses: this.corpses.map((c) => ({
         id: c.id,

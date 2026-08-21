@@ -8,6 +8,8 @@ export interface GameSnapshot {
   stats: { level: number; health: number; maxHealth: number; mana: number; maxMana: number };
   enemies: Array<{
     id: string;
+    /** Visual/behaviour family; absent means the original hellhound. */
+    kind?: "hellhound" | "bat";
     name: string;
     glyph: string;
     color: string;
@@ -22,6 +24,8 @@ export interface GameSnapshot {
     facing: 1 | -1;
     /** Optional full 2D heading for 3D actors that turn independently of travel. */
     heading?: { x: number; y: number };
+    /** Height above the floor in scene units for flying enemies. */
+    altitude?: number;
   }>;
   /**
    * Dead enemies, left where they fell. Drawn dimmed, and targetable — but
