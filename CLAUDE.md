@@ -63,6 +63,14 @@ The client entry `rpg-tactics/src/client/main.ts` is bundled by esbuild to
 `rpg-3d/`, so after changing anything in those directories, typecheck and
 rebuild **in all three projects**:
 
+> **Important bundle boundary:** the game running on port 3300 does not load
+> `rpg-3d/public/game3d.js`. It imports `rpg-3d/src/client/*` at bundle time and
+> serves the result from `rpg-tactics/public/tactics.js`. Therefore, rebuilding
+> only `rpg-3d` will not make shared model, material, animation, or entity
+> changes appear in the active tactics game. After any shared 3D source change,
+> always run `npm run build:client` inside `rpg-tactics/` (or keep its
+> `watch:client` process running) and then refresh the browser.
+
 ```bash
 # from the repo root
 npm run typecheck                                   # root src/

@@ -1,0 +1,11 @@
+Model Information:
+* title:	Gray Wolf from COTW game
+* source:	https://sketchfab.com/3d-models/gray-wolf-from-cotw-game-951348a632124b64b2699b8236485e34
+* author:	Game-animal ripper (https://sketchfab.com/game-ripper)
+
+Model License:
+* license type:	CC-BY-NC-4.0 (http://creativecommons.org/licenses/by-nc/4.0/)
+* requirements:	Author must be credited. No commercial use.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Gray Wolf from COTW game" (https://sketchfab.com/3d-models/gray-wolf-from-cotw-game-951348a632124b64b2699b8236485e34) by Game-animal ripper (https://sketchfab.com/game-ripper) licensed under CC-BY-NC-4.0 (http://creativecommons.org/licenses/by-nc/4.0/)

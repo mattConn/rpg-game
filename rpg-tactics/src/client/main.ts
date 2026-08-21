@@ -94,6 +94,7 @@ let currSnapshotTime = 0;
 let snapshotInterval = SERVER_TICK_MS;
 
 let actors: Actors | null = null;
+let showHitboxes = false;
 
 // ------------------------------------------------------- the weapon in hand
 // The sword's swing is stamped from a *fresh cooldown*, the protocol's way of
@@ -269,6 +270,15 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
+  if (key === "h") {
+    if (!event.repeat) {
+      showHitboxes = !showHitboxes;
+      actors?.setHitboxesVisible(showHitboxes);
+    }
+    event.preventDefault();
+    return;
+  }
+
   // Direct movement keys.
   if (key === "w" || key === "a" || key === "s" || key === "d" ||
       key === "arrowleft" || key === "arrowright" ||
@@ -286,21 +296,12 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
-  // Jump immediately without spending a combat cooldown.
-  if (key === " ") {
-    if (!event.repeat) {
-      actors?.player.jump(performance.now());
-      send({ type: "jump" });
-    }
-    event.preventDefault();
-    return;
-  }
-
-  // 1-5 choose a weapon, r restarts, escape drops the mark.
+  // 1-5 choose a weapon, Space attacks, r restarts, escape drops the mark.
   if (
     (key.length === 1 && key >= "1" && key <= "5") ||
     key === "r" ||
-    key === "escape"
+    key === "escape" ||
+    key === " "
   ) {
     send({ type: "keydown", key, code: event.code });
     event.preventDefault();
@@ -559,6 +560,7 @@ function frame(now: number) {
     actors = new Actors(stage.scene, stage.pickables, snap.player.color, true);
     actors.player.root.userData["entityId"] = PLAYER_CURSOR_ID;
     stage.pickables.push(actors.player.root);
+    actors.setHitboxesVisible(showHitboxes);
   }
 
   const actingKind = snap.cooldown && snap.cooldown.remainingMs > 0

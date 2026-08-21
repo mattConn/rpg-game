@@ -139,7 +139,6 @@ export class PlayerActor {
     this.lastY = y;
     const speed = dt > 0 ? Math.hypot(dx, dy) / dt : 0;
     const moving = speed > MOVING_EPSILON && !snap.dead;
-
     const playerHeading = (snap as GameSnapshot & { playerHeading?: { x: number; y: number } }).playerHeading;
     let wanted = this.yaw;
     // Tactics supplies an explicit rotation-driven heading. It takes priority
@@ -234,6 +233,15 @@ class PlayerWolfActor {
     this.lastY = y;
     const speed = dt > 0 ? Math.hypot(dx, dy) / dt : 0;
     const moving = speed > MOVING_EPSILON && !snap.dead;
+    this.rig.mixer?.update(dt);
+    if (moving) {
+      this.rig.idleAction?.stop();
+      if (this.rig.runAction && !this.rig.runAction.isRunning()) this.rig.runAction.reset().play();
+      if (this.rig.runAction) this.rig.runAction.timeScale = Math.max(0.65, speed / PLAYER_WOLF_STRIDE_SPEED);
+    } else {
+      this.rig.runAction?.stop();
+      if (this.rig.idleAction && !this.rig.idleAction.isRunning()) this.rig.idleAction.reset().play();
+    }
     const playerState = snap as GameSnapshot & {
       playerHeading?: { x: number; y: number };
     };
@@ -273,12 +281,9 @@ class PlayerWolfActor {
 
     const daggerLunge = activeAttack && this.attackKind === "ranged" ? Math.sin(easedAttack * Math.PI) * 0.42 : 0;
     this.fall = damp(this.fall, snap.dead ? 1 : 0, 1000 / FALL_MS, dt);
-    const boundRock = moving && !airborne ? Math.sin(this.gait) * 0.12 * amp : 0;
-    this.rig.model.rotation.z = -this.fall * (Math.PI / 2) + boundRock;
+    this.rig.model.rotation.z = -this.fall * (Math.PI / 2);
     this.rig.model.position.x = daggerLunge;
-    const boundLift = moving ? Math.abs(Math.sin(this.gait)) * 0.12 * amp : 0;
     this.rig.model.position.y = this.fall * 0.3
-      + boundLift
       + (moving ? 0 : Math.sin(elapsed * 1.8) * 0.012);
     if (!activeAttack) this.attackAt = null;
   }
@@ -404,6 +409,18 @@ function kickWolfLegsForJump(rig: WolfRig, amount: number): void {
 }
 /** Enemy wolves stand just above the player without overwhelming the board. */
 const HELLHOUND_SCALE = 1.95;
+const HITBOX_MATERIAL = new THREE.LineBasicMaterial({ color: 0xff2020, transparent: true, opacity: 0.9 });
+
+function hitboxOutline(radiusX: number, radiusZ: number): THREE.LineLoop {
+  const points: THREE.Vector3[] = [];
+  for (let i = 0; i < 48; i++) {
+    const angle = (i / 48) * Math.PI * 2;
+    points.push(new THREE.Vector3(Math.cos(angle) * radiusX, 0, Math.sin(angle) * radiusZ));
+  }
+  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+  return new THREE.LineLoop(geometry, HITBOX_MATERIAL);
+}
+
 class WolfActor {
   readonly root = new THREE.Group();
   readonly rig: WolfRig;
@@ -414,12 +431,17 @@ class WolfActor {
   private hurt = 0;
   private lungeAt: number | null = null;
   private readonly accent: THREE.Color;
+  private readonly hitbox: THREE.LineLoop;
 
   constructor(id: string, color: string) {
     this.accent = parseColor(color);
     this.rig = buildWolf(this.accent);
     this.root.add(this.rig.model);
     this.root.scale.setScalar(HELLHOUND_SCALE);
+    this.hitbox = hitboxOutline(0.72, 0.48);
+    this.hitbox.position.y = 0.04;
+    this.hitbox.visible = false;
+    this.root.add(this.hitbox);
     this.root.userData["entityId"] = id;
   }
 
@@ -430,6 +452,8 @@ class WolfActor {
   lunge(now: number): void {
     this.lungeAt = now;
   }
+
+  setHitboxVisible(visible: boolean): void { this.hitbox.visible = visible; }
 
   update(
     enemy: GameSnapshot["enemies"][number],
@@ -447,6 +471,15 @@ class WolfActor {
     this.lastY = enemy.y;
     const speed = dt > 0 ? Math.hypot(dx, dy) / dt : 0;
     const moving = speed > MOVING_EPSILON;
+    this.rig.mixer?.update(dt);
+    if (moving) {
+      this.rig.idleAction?.stop();
+      if (this.rig.runAction && !this.rig.runAction.isRunning()) this.rig.runAction.reset().play();
+      if (this.rig.runAction) this.rig.runAction.timeScale = Math.max(0.65, speed / WOLF_FULL_SPEED);
+    } else {
+      this.rig.runAction?.stop();
+      if (this.rig.idleAction && !this.rig.idleAction.isRunning()) this.rig.idleAction.reset().play();
+    }
 
     const quarryX = facePoint ? facePoint.x - enemy.x : 0;
     const quarryY = facePoint ? facePoint.y - enemy.y : 0;
@@ -500,9 +533,8 @@ class WolfActor {
     this.hurt = Math.max(0, this.hurt - dt * 4);
 
     this.rig.model.position.x = thrust * 0.3 - this.hurt * 0.12;
-    const boundRock = moving ? Math.sin(this.gait) * 0.12 * amp : 0;
-    this.rig.model.position.y = (moving ? Math.abs(Math.sin(this.gait)) * 0.12 * amp : 0) - this.hurt * 0.06;
-    this.rig.model.rotation.z = thrust * -0.18 + this.hurt * 0.16 + boundRock;
+    this.rig.model.position.y = -this.hurt * 0.06;
+    this.rig.model.rotation.z = thrust * -0.18 + this.hurt * 0.16;
     this.rig.head.rotation.z = damp(this.rig.head.rotation.z, hunting ? -0.18 : 0, 6, dt) - thrust * 0.3;
     // A watchful animal keeps its mouth nearly shut. Once it hunts, the jaw
     // parts into a quiet snarl; the attack lunge drives a much wider snap.
@@ -522,15 +554,21 @@ class BatActor {
   private hurt = 0;
   private lungeAt: number | null = null;
   private lastAltitude: number | null = null;
+  private readonly hitbox: THREE.LineLoop;
 
   constructor(id: string) {
     this.rig = buildBat();
     this.root.add(this.rig.model);
+    this.hitbox = hitboxOutline(3.0, 1.26);
+    this.hitbox.position.y = 0;
+    this.hitbox.visible = false;
+    this.root.add(this.hitbox);
     this.root.userData["entityId"] = id;
   }
 
   flinch(): void { this.hurt = 1; }
   lunge(now: number): void { this.lungeAt = now; }
+  setHitboxVisible(visible: boolean): void { this.hitbox.visible = visible; }
 
   update(
     enemy: GameSnapshot["enemies"][number],
@@ -649,6 +687,10 @@ export class Actors {
 
   lunge(id: string, now: number): void {
     this.enemies.get(id)?.lunge(now);
+  }
+
+  setHitboxesVisible(visible: boolean): void {
+    for (const enemy of this.enemies.values()) enemy.setHitboxVisible(visible);
   }
 
   /**

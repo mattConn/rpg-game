@@ -159,8 +159,12 @@ const BAT_PURSUIT_SPEED = 92;
 const BAT_DIVE_MS = 1150;
 const BAT_STRIKE_AT_MS = 650;
 const BAT_ATTACK_INTERVAL_MS = 1800;
-const BAT_DIVE_TRIGGER_RANGE = MELEE_RANGE * 2.4;
+const BAT_DIVE_TRIGGER_RANGE = MELEE_RANGE * 1.7;
 const BAT_BITE_RANGE = MELEE_RANGE * 0.72;
+const BAT_ATTACK_CONE_DOT = Math.cos(Math.PI / 4);
+/** Compact horizontal torso hitbox; wing tips never count. */
+const BAT_BODY_HALF_LENGTH = SQUARE_PX * 1.0;
+const BAT_BODY_HALF_WIDTH = SQUARE_PX * 0.42;
 const BAT_CRUISE_ALTITUDE = 4.2;
 const BAT_AGGRO_ALTITUDE = 2.8;
 const BAT_DIVE_ALTITUDE = 0.9;
@@ -210,6 +214,7 @@ interface Hound extends Actor {
   diveHit?: boolean;
   diveOrigin?: Point;
   diveTarget?: Point;
+  orbitAngle?: number;
 }
 
 interface DamageNumber {
@@ -374,6 +379,7 @@ export class TacticsGame {
       diveHit: false,
       diveOrigin: undefined,
       diveTarget: undefined,
+      orbitAngle: 0,
     });
 
     this.corpses = [];
@@ -691,11 +697,17 @@ export class TacticsGame {
     }
 
     if (bat.diveAt === null || bat.diveAt === undefined) {
-      const dx = player.x - bat.x;
-      const dy = player.y - bat.y;
+      bat.orbitAngle = (bat.orbitAngle ?? 0) + dt * 0.9;
+      const orbitRadius = MELEE_RANGE * 1.3;
+      const orbitTarget = {
+        x: player.x + Math.cos(bat.orbitAngle) * orbitRadius,
+        y: player.y + Math.sin(bat.orbitAngle) * orbitRadius,
+      };
+      const dx = orbitTarget.x - bat.x;
+      const dy = orbitTarget.y - bat.y;
       const len = Math.max(0.001, Math.hypot(dx, dy));
       bat.heading = { x: dx / len, y: dy / len };
-      if (gap > BAT_DIVE_TRIGGER_RANGE * 0.7) {
+      if (gap > orbitRadius * 0.9) {
         const step = Math.min(gap, BAT_PURSUIT_SPEED * dt);
         const next = { x: bat.x + bat.heading.x * step, y: bat.y + bat.heading.y * step };
         const cell = cellAtPoint(next);
@@ -738,10 +750,13 @@ export class TacticsGame {
     }
     if (!bat.diveHit && age >= BAT_STRIKE_AT_MS) {
       bat.diveHit = true;
-      if (distance(this.at(bat), player) <= BAT_BITE_RANGE) {
+      if (distance(this.at(bat), player) <= BAT_BITE_RANGE && this.batAttackConeContains(bat, player)) {
         this.player.health = Math.max(0, this.player.health - 10);
-        this.spawnDamageNumber(this.player.x, this.player.y, 10, DAMAGE_COLOR_TAKEN);
-        if (Math.random() < 0.5) bat.health = Math.min(bat.maxHealth, bat.health + 10);
+        this.spawnDamageNumber(this.player.x, this.player.y, -10, DAMAGE_COLOR_TAKEN);
+        if (Math.random() < 0.2) {
+          bat.health = Math.min(bat.maxHealth, bat.health + 10);
+          this.spawnDamageNumber(bat.x, bat.y, "+10", DAMAGE_COLOR_DEALT);
+        }
         this.strikes.push({ enemyId: bat.id, seq: this.strikeSeq++ });
       }
     }
@@ -810,7 +825,7 @@ export class TacticsGame {
       const biteDamage = Math.random() < 0.5 ? 10 : 20;
       this.strikes.push({ enemyId: enemy.id, seq: ++this.strikeSeq });
       this.player.health = Math.max(0, this.player.health - biteDamage);
-      this.spawnDamageNumber(this.player.x, this.player.y, biteDamage, DAMAGE_COLOR_TAKEN);
+      this.spawnDamageNumber(this.player.x, this.player.y, -biteDamage, DAMAGE_COLOR_TAKEN);
       this.inspectingId = null;
       enemy.nextAttackAt = now + ENEMY_ATTACK_INTERVAL_MS;
     }
@@ -989,6 +1004,7 @@ export class TacticsGame {
     this.thrown = null;
     const enemy = this.enemies.find((e) => e.id === thrown.enemyId);
     if (!enemy) return;
+    if (!this.batAttackWindow(enemy)) return;
     this.wound(enemy, thrown.damage);
   }
 
@@ -1122,7 +1138,7 @@ export class TacticsGame {
 
   private wound(enemy: Hound, amount: number): void {
     enemy.health = Math.max(0, enemy.health - amount);
-    this.spawnDamageNumber(enemy.x, enemy.y, amount, DAMAGE_COLOR_DEALT);
+    this.spawnDamageNumber(enemy.x, enemy.y, -amount, DAMAGE_COLOR_DEALT);
   }
 
   private wake(enemy: Hound): void {
@@ -1407,8 +1423,8 @@ export class TacticsGame {
       const dx = enemy.x - this.player.x;
       const dy = enemy.y - this.player.y;
       const gap = Math.hypot(dx, dy);
-      if (enemy.kind === "bat" && !this.jumping()
-        && enemy.diveAt === null && enemy.diveAt === undefined) continue;
+      if (enemy.kind === "bat" && !this.batBodyContact(enemy)) continue;
+      if (!this.batAttackWindow(enemy)) continue;
       if (this.enemyInPlayerAttackCone(enemy) && gap < nearestGap) {
         nearest = enemy;
         nearestGap = gap;
@@ -1422,8 +1438,8 @@ export class TacticsGame {
     let nearestGap = Infinity;
     for (const enemy of this.enemies) {
       const gap = distance(this.playerAt(), this.at(enemy));
-      if (enemy.kind === "bat" && (!this.enemyInPlayerAttackCone(enemy)
-        || (!this.jumping() && enemy.diveAt === null && enemy.diveAt === undefined))) continue;
+      if (enemy.kind === "bat" && !this.batBodyContact(enemy)) continue;
+      if (!this.batAttackWindow(enemy) || !this.enemyInPlayerAttackCone(enemy)) continue;
       if (gap <= MELEE_RANGE && gap < nearestGap) {
         nearest = enemy;
         nearestGap = gap;
@@ -1440,12 +1456,39 @@ export class TacticsGame {
       (dx * this.playerHeading.x + dy * this.playerHeading.y) / gap >= ATTACK_CONE_DOT;
   }
 
+  /** Bat damage is valid only during its dive or while the player is airborne. */
+  private batAttackWindow(enemy: Hound): boolean {
+    return enemy.kind !== "bat" || this.jumping() || (enemy.diveAt !== null && enemy.diveAt !== undefined);
+  }
+
+  /** Oriented horizontal oval around the bat's torso, aligned to its heading. */
+  private batBodyContact(enemy: Hound): boolean {
+    const dx = this.player.x - enemy.x;
+    const dy = this.player.y - enemy.y;
+    const headingLength = Math.max(0.001, Math.hypot(enemy.heading.x, enemy.heading.y));
+    const hx = enemy.heading.x / headingLength;
+    const hy = enemy.heading.y / headingLength;
+    const along = dx * hx + dy * hy;
+    const across = dx * -hy + dy * hx;
+    return (along * along) / (BAT_BODY_HALF_LENGTH * BAT_BODY_HALF_LENGTH)
+      + (across * across) / (BAT_BODY_HALF_WIDTH * BAT_BODY_HALF_WIDTH) <= 1;
+  }
+
+  private batAttackConeContains(bat: Hound, point: Point): boolean {
+    const dx = point.x - bat.x;
+    const dy = point.y - bat.y;
+    const gap = Math.hypot(dx, dy);
+    if (gap < 0.001) return true;
+    const headingLength = Math.max(0.001, Math.hypot(bat.heading.x, bat.heading.y));
+    return (dx * bat.heading.x + dy * bat.heading.y) / (gap * headingLength) >= BAT_ATTACK_CONE_DOT;
+  }
+
   private nextDamageNumberId = 0;
 
-  private spawnDamageNumber(x: number, y: number, amount: number, color: string): void {
+  private spawnDamageNumber(x: number, y: number, amount: number | string, color: string): void {
     this.damageNumbers.push({
       id: `dn-${this.nextDamageNumberId++}`,
-      x, y, text: String(amount), color, age: 0,
+      x, y, text: typeof amount === "string" ? amount : String(amount), color, age: 0,
     });
   }
 
