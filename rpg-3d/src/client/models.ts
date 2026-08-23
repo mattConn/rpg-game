@@ -727,21 +727,22 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
           color: isPlayer ? 0xffe13b : 0xff2028,
           depthTest: true,
           depthWrite: true,
+          polygonOffset: !isPlayer,
+          polygonOffsetFactor: -2,
+          polygonOffsetUnits: -2,
         });
         const headWorld = importedHead.getWorldPosition(new THREE.Vector3());
         const forward = headWorld.clone().sub(importedBodyWorld).setY(0).normalize();
         const up = new THREE.Vector3(0, 1, 0);
         const sideAxis = new THREE.Vector3().crossVectors(up, forward).normalize();
         const inheritedScale = importedHead.getWorldScale(new THREE.Vector3());
-        const playerEyeBones = isPlayer
-          ? [findNamedBone("lefteye052"), findNamedBone("righteye0105")]
-            .filter((bone): bone is THREE.Bone => bone !== null)
-          : [];
+        const importedEyeBones = [findNamedBone("lefteye052"), findNamedBone("righteye0105")]
+          .filter((bone): bone is THREE.Bone => bone !== null);
         // Only compensate for the enemy actor's explicit 1.95x root scale.
         // World scale also contains the stage hierarchy and pushed the
         // player's eyes back up toward its ears.
         const actorScale = isPlayer ? 1 : (rig.model.parent?.scale.x ?? 1);
-        const worldRadius = isPlayer ? 0.019 : 0.021;
+        const worldRadius = isPlayer ? 0.019 : 0.03;
         const localRadius = worldRadius / Math.max(inheritedScale.x, inheritedScale.y, inheritedScale.z, 0.0001);
         for (const side of [-1, 1] as const) {
           const eye = new THREE.Mesh(
@@ -758,8 +759,8 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
             eye.scale.set(1.12, 0.68, 0.46);
             eye.rotation.z = side * 0.44;
           }
-          const eyeBone = playerEyeBones.length > 0
-            ? playerEyeBones.reduce((best, candidate) => {
+          const eyeBone = importedEyeBones.length > 0
+            ? importedEyeBones.reduce((best, candidate) => {
               const bestSide = best.getWorldPosition(new THREE.Vector3()).dot(sideAxis) * side;
               const candidateSide = candidate.getWorldPosition(new THREE.Vector3()).dot(sideAxis) * side;
               return candidateSide > bestSide ? candidate : best;
@@ -773,7 +774,7 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
             // tiny move toward the muzzle exposes the diamond without laying
             // it over the forehead or letting it show through the skull.
             ? eyeBone.getWorldPosition(new THREE.Vector3())
-              .addScaledVector(eyeSurfaceNormal, 0.027)
+              .addScaledVector(eyeSurfaceNormal, isPlayer ? 0.027 : 0.043)
             : headWorld.clone()
               .addScaledVector(forward, 0.232 * actorScale)
               .addScaledVector(up, -0.025 * actorScale)
@@ -792,7 +793,7 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
             const faceWorldQuaternion = new THREE.Quaternion().setFromRotationMatrix(faceFrame);
             const eyeBoneWorldQuaternion = eyeBone.getWorldQuaternion(new THREE.Quaternion());
             eye.quaternion.copy(eyeBoneWorldQuaternion.invert().multiply(faceWorldQuaternion));
-            eye.rotateZ(side * 0.5);
+            eye.rotateZ(side * (isPlayer ? 0.5 : 0.44));
           }
         }
       }
@@ -1130,6 +1131,48 @@ export function buildBat(): BatRig {
     }
   }).catch((error: unknown) => console.warn("Could not load imported bat model", error));
   return rig;
+}
+
+const importedBloodSplatterScene = new Promise<THREE.Group>((resolve, reject) => {
+  new GLTFLoader().load(
+    "/shared-models/blood-splatter/scene.gltf",
+    (gltf) => resolve(gltf.scene),
+    undefined,
+    reject,
+  );
+});
+
+/** A short-lived imported 3D splash layered beneath the procedural droplets. */
+export function buildBloodSplatter(): THREE.Group {
+  const root = new THREE.Group();
+  importedBloodSplatterScene.then((scene) => {
+    if (root.userData["disposed"]) return;
+    const visual = scene.clone(true);
+    visual.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(visual);
+    const size = bounds.getSize(new THREE.Vector3());
+    visual.scale.setScalar(1 / Math.max(size.x, size.y, size.z, 0.0001));
+    visual.updateMatrixWorld(true);
+    const scaledBounds = new THREE.Box3().setFromObject(visual);
+    const centre = scaledBounds.getCenter(new THREE.Vector3());
+    visual.position.sub(centre);
+    visual.traverse((node) => {
+      if (!(node instanceof THREE.Mesh)) return;
+      node.castShadow = false;
+      node.receiveShadow = false;
+      const materials = Array.isArray(node.material) ? node.material : [node.material];
+      const replacements = materials.map(() => new THREE.MeshBasicMaterial({
+        color: 0x520006,
+        transparent: true,
+        opacity: 0.82,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }));
+      node.material = Array.isArray(node.material) ? replacements : replacements[0]!;
+    });
+    root.add(visual);
+  }).catch((error: unknown) => console.warn("Could not load blood splatter model", error));
+  return root;
 }
 
 // ------------------------------------------------------------------ scenery

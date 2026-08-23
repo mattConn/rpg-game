@@ -22,7 +22,6 @@ import { WORLD_HEIGHT, WORLD_WIDTH } from "../../../src/shared/constants.js";
 import { LOOT_CLOSE_RECT, hitsRect, lootMenuProxyPoint } from "../../../src/shared/loot.js";
 import type { Point } from "../../../src/shared/movement.js";
 import { actionBarHandleRect, actionBarSize, squareAtPoint } from "../../../src/client/actionbar.js";
-import { DEFAULT_CURSOR } from "../../../src/client/cursors.js";
 import { SERVER_TICK_MS, renderFraction, smoothInterval } from "../../../src/client/interpolation.js";
 import { fillViewport } from "../../../src/client/viewport.js";
 import { Actors, applyCues, entityIdOf } from "../../../rpg-3d/src/client/entities.js";
@@ -56,6 +55,7 @@ const stage = createStage(sceneCanvas);
 let viewWidth = WORLD_WIDTH;
 let barPositioned = false;
 const SHOW_ACTION_BAR = false;
+const REGULAR_CURSOR = "default";
 
 function resize() {
   const fit = fillViewport(window.innerWidth, window.innerHeight, window.devicePixelRatio || 1);
@@ -270,6 +270,12 @@ window.addEventListener("keydown", (event) => {
     return;
   }
 
+  if (key === "f") {
+    // First-person view is disabled; reserve F so it cannot reach gameplay.
+    event.preventDefault();
+    return;
+  }
+
   if (key === "h") {
     if (!event.repeat) {
       showHitboxes = !showHitboxes;
@@ -463,7 +469,6 @@ uiCanvas.addEventListener("mouseleave", () => {
 
 uiCanvas.addEventListener("wheel", (event) => {
   event.preventDefault();
-  stage.zoom(Math.sign(event.deltaY) * 1.8);
 }, { passive: false });
 
 // Right-drag rotates the camera, so the browser menu must never appear here.
@@ -510,10 +515,10 @@ uiCanvas.addEventListener("click", (event) => {
   send({ type: "useSlot", index: 0 });
 });
 
-let appliedCursor = DEFAULT_CURSOR;
+let appliedCursor = REGULAR_CURSOR;
 
 function updateCursorStyle(snap: TacticsSnapshot) {
-  let wanted = DEFAULT_CURSOR;
+  let wanted = REGULAR_CURSOR;
   if (barDragging) wanted = "grabbing";
   else if (uiCursor) {
     if (SHOW_ACTION_BAR && hits(actionBarHandleRect(barOrigin), uiCursor)) wanted = "grab";
@@ -590,7 +595,7 @@ function frame(now: number) {
   // The board frames itself while you are standing on it; walk out through the
   // doorway and the camera comes with you, or the corridor would be somewhere
   // you can go but not somewhere you can see.
-  stage.follow(snap.player.x, snap.player.y, snap.player.facing);
+  stage.follow(snap.player.x, snap.player.y, snap.player.facing, snap.playerRunning);
   stage.update(dt);
   stage.animateScenery(elapsed);
   stage.render();
@@ -627,7 +632,30 @@ function frame(now: number) {
       spent: !!cd && cd.remainingMs > 0 && TACTICS_ACTIONS[cd.slot]?.kind === "ranged",
     });
   }
+  if (!stage.firstPerson && !isOver(snap.phase)) {
+    const headingLength = Math.max(0.001, Math.hypot(snap.playerHeading.x, snap.playerHeading.y));
+    const headingX = snap.playerHeading.x / headingLength;
+    const headingY = snap.playerHeading.y / headingLength;
+    let aimedEnemy: TacticsSnapshot["enemies"][number] | null = null;
+    let aimedGap = Infinity;
+    for (const enemy of snap.enemies) {
+      const dx = enemy.x - snap.player.x;
+      const dy = enemy.y - snap.player.y;
+      const gap = Math.hypot(dx, dy);
+      const inCone = gap < 0.001 || (dx * headingX + dy * headingY) / gap >= Math.cos((35 * Math.PI) / 180);
+      const reach = snap.meleeRange + (enemy.kind === "hellhound" ? snap.meleeRange * (2 / 15) : 0);
+      if (inCone && gap <= reach && gap < aimedGap) {
+        aimedEnemy = enemy;
+        aimedGap = gap;
+      }
+    }
+    stage.setAttackReticle(
+      aimedEnemy?.x ?? snap.player.x + headingX * snap.meleeRange,
+      aimedEnemy?.y ?? snap.player.y + headingY * snap.meleeRange,
+      aimedEnemy ? (aimedEnemy.kind === "bat" ? aimedEnemy.altitude ?? 2.25 : 1.35) : 0.08,
+    );
+  } else stage.setAttackReticle(null, null);
 }
 
-uiCanvas.style.cursor = DEFAULT_CURSOR;
+uiCanvas.style.cursor = REGULAR_CURSOR;
 requestAnimationFrame(frame);

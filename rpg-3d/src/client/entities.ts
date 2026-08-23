@@ -18,6 +18,7 @@ import type { GameSnapshot } from "../../../src/shared/protocol.js";
 import {
   buildDagger,
   buildBat,
+  buildBloodSplatter,
   buildHuman,
   buildPlayerWolf,
   buildTombstone,
@@ -398,6 +399,7 @@ function hitboxOutline(radiusX: number, radiusZ: number): THREE.LineLoop {
 
 interface BloodBurst {
   points: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
+  splatter: THREE.Group;
   flash: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial> | null;
   velocities: THREE.Vector3[];
   age: number;
@@ -646,13 +648,6 @@ class CorpseActor {
         .multiply(ATTACK_BEND_QUATERNION);
     }
 
-    // The bright combat-eye overlays do not belong on a dead animal. They are
-    // separate meshes parented to the animated head bone, and during a hard
-    // skeletal collapse they can otherwise appear detached from the real,
-    // closed eyes in the imported skin.
-    this.rig.model.getObjectsByProperty("name", "importedWolfEye")
-      .forEach((eye) => { eye.visible = false; });
-
     // Keep the lowest rendered point on the dungeon floor throughout the
     // collapse. The old fixed lift raised a scaled corpse almost a full world
     // unit and left it visibly hovering once the ragdoll settled.
@@ -750,6 +745,11 @@ export class Actors {
   private readonly projectiles: THREE.Group[] = [];
   private readonly tombstones = new Map<string, THREE.Group>();
   private readonly bloodBursts: BloodBurst[] = [];
+  private readonly pendingBloodBursts: Array<{
+    delay: number;
+    target: THREE.Object3D;
+    source: THREE.Object3D;
+  }> = [];
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -780,12 +780,32 @@ export class Actors {
     this.spawnBlood(this.player.root, attackerId ? this.enemies.get(attackerId)?.root : undefined);
   }
 
+  bloodOnNearestCorpse(): void {
+    let nearest: CorpseActor | BatCorpseActor | null = null;
+    let nearestDistance = Infinity;
+    for (const corpse of this.corpses.values()) {
+      const distance = corpse.root.position.distanceTo(this.player.root.position);
+      if (distance < nearestDistance) {
+        nearest = corpse;
+        nearestDistance = distance;
+      }
+    }
+    if (!nearest) return;
+    this.spawnBlood(nearest.root, this.player.root);
+    this.pendingBloodBursts.push({
+      delay: 0.16,
+      target: nearest.root,
+      source: this.player.root,
+    });
+  }
+
   private spawnBlood(target: THREE.Object3D, source?: THREE.Object3D, showImpactFlash = false): void {
     const targetWorld = target.getWorldPosition(new THREE.Vector3());
     const sourceWorld = source?.getWorldPosition(new THREE.Vector3());
     const towardSource = sourceWorld
       ? sourceWorld.sub(targetWorld).setY(0).normalize()
       : new THREE.Vector3(1, 0, 0);
+    if (towardSource.lengthSq() < 0.0001) towardSource.set(1, 0, 0);
     const isBat = target.position.y > 1.5;
     const origin = targetWorld.clone()
       .addScaledVector(towardSource, isBat ? 0.5 : 0.38)
@@ -814,6 +834,17 @@ export class Actors {
     });
     const points = new THREE.Points(geometry, material);
     this.scene.add(points);
+    const splatter = buildBloodSplatter();
+    splatter.position.copy(origin);
+    // The source asset is a floor splash. Turn its broad face toward the blow
+    // so it reads at the actual bite/sword contact point instead of lying flat
+    // in midair.
+    splatter.quaternion.setFromUnitVectors(
+      new THREE.Vector3(0, 1, 0),
+      towardSource.clone().normalize(),
+    );
+    splatter.scale.setScalar(0.82);
+    this.scene.add(splatter);
     let flash: BloodBurst["flash"] = null;
     if (showImpactFlash) {
       flash = new THREE.Mesh(
@@ -829,10 +860,17 @@ export class Actors {
       flash.position.copy(origin);
       this.scene.add(flash);
     }
-    this.bloodBursts.push({ points, flash, velocities, age: 0 });
+    this.bloodBursts.push({ points, splatter, flash, velocities, age: 0 });
   }
 
   private updateBlood(dt: number): void {
+    for (let i = this.pendingBloodBursts.length - 1; i >= 0; i--) {
+      const pending = this.pendingBloodBursts[i]!;
+      pending.delay -= dt;
+      if (pending.delay > 0) continue;
+      this.spawnBlood(pending.target, pending.source);
+      this.pendingBloodBursts.splice(i, 1);
+    }
     for (let i = this.bloodBursts.length - 1; i >= 0; i--) {
       const burst = this.bloodBursts[i]!;
       burst.age += dt;
@@ -849,6 +887,15 @@ export class Actors {
       }
       positions.needsUpdate = true;
       burst.points.material.opacity = Math.max(0, 1 - burst.age / 0.56);
+      const splatterT = Math.min(1, burst.age / 0.5);
+      burst.splatter.scale.setScalar(0.82 + splatterT * 1.78);
+      burst.splatter.traverse((node) => {
+        if (!(node instanceof THREE.Mesh)) return;
+        const materials = Array.isArray(node.material) ? node.material : [node.material];
+        for (const material of materials) {
+          if (material instanceof THREE.MeshBasicMaterial) material.opacity = 0.82 * (1 - splatterT);
+        }
+      });
       if (burst.flash) {
         const flashT = Math.min(1, burst.age / 0.3);
         const flashScale = 1 + flashT * 6.5;
@@ -857,6 +904,13 @@ export class Actors {
       }
       if (burst.age < 0.56) continue;
       this.scene.remove(burst.points);
+      this.scene.remove(burst.splatter);
+      burst.splatter.userData["disposed"] = true;
+      burst.splatter.traverse((node) => {
+        if (!(node instanceof THREE.Mesh)) return;
+        const materials = Array.isArray(node.material) ? node.material : [node.material];
+        for (const material of materials) material.dispose();
+      });
       burst.points.geometry.dispose();
       burst.points.material.dispose();
       if (burst.flash) {
@@ -1014,6 +1068,10 @@ export function applyCues<T extends GameSnapshot>(
    */
   bitersOf?: (previous: T, snap: T) => string[],
 ): boolean {
+  const previousEating = (previous as GameSnapshot & { playerEating?: boolean }).playerEating === true;
+  const eating = (snap as GameSnapshot & { playerEating?: boolean }).playerEating === true;
+  if (eating && !previousEating) actors.bloodOnNearestCorpse();
+
   const before = previous.cooldown;
   const after = snap.cooldown;
   if (after && (!before || before.slot !== after.slot || after.remainingMs > before.remainingMs + 1)) {

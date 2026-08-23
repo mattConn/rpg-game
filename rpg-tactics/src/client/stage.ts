@@ -105,11 +105,10 @@ const HALL_LEN = FAR_CZ - BOARD_CZ
  * here would quietly leave the view halfway across the dungeon the first time
  * the squares were resized.
  */
-const CAMERA_MIN_DISTANCE = BOARD_W * 0.22;
-// Preserve the established opening shot while allowing the wheel to move much
-// closer than that default framing.
-const CAMERA_START_DISTANCE = BOARD_W * 0.42;
-const CAMERA_MAX_DISTANCE = CAMERA_START_DISTANCE;
+// Lock the third-person camera at the closest framing that was previously
+// reachable with the wheel: maximum zoom is now both the default and the only
+// allowed distance.
+const CAMERA_START_DISTANCE = BOARD_W * 0.22;
 
 /**
  * Full vertical orbit: almost level with the floor at one end and almost
@@ -174,7 +173,7 @@ export interface Stage {
    * Where the player is and which way they are facing, so the camera knows what
    * it should be framing — and, in first person, where it is and where it looks.
    */
-  follow(px: number, py: number, facing: 1 | -1): void;
+  follow(px: number, py: number, facing: 1 | -1, running?: boolean): void;
   /** Swap between the overhead view and the player's own eyes. Returns the new mode. */
   toggleFirstPerson(): boolean;
   readonly firstPerson: boolean;
@@ -189,6 +188,7 @@ export interface Stage {
   project(point: THREE.Vector3): { x: number; y: number };
   /** Show a faint floor marker, colored for enemies and interactables. */
   setCursorRing(px: number | null, py: number | null, kind: "floor" | "enemy" | "interactable"): void;
+  setAttackReticle(px: number | null, py: number | null, height?: number): void;
   setTargetRing(px: number | null, py: number | null, color: number): void;
   setDoorTargetRing(door: DoorId): void;
   setDoorHoverRing(door: DoorId | null): void;
@@ -777,6 +777,21 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   cursorRing.visible = false;
   scene.add(cursorRing);
 
+  const attackReticle = new THREE.Mesh(
+    new THREE.RingGeometry(0.1, 0.13, 32),
+    new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.5,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  );
+  attackReticle.renderOrder = 100;
+  attackReticle.visible = false;
+  scene.add(attackReticle);
+
   const doorHoverMaterial = new THREE.MeshBasicMaterial({
     color: 0xffd633,
     transparent: true,
@@ -838,9 +853,16 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   /** The player's head, in scene units — where the eyes are when they are ours. */
   const eye = new THREE.Vector3(BOARD_CX, EYE_HEIGHT, BOARD_CZ);
+  const cameraOrigin = new THREE.Vector3();
   const forward = new THREE.Vector3();
   /** Which way the player's model is facing: +1 east, -1 west. */
   let playerFacing: 1 | -1 = 1;
+  let lastFollowX: number | null = null;
+  let lastFollowY: number | null = null;
+  let playerMoving = false;
+  let playerRunning = false;
+  let bobPhase = 0;
+  let bobWeight = 0;
   const doorWorldPosition = new THREE.Vector3();
   const desiredCameraPosition = new THREE.Vector3();
   const cameraSightline = new THREE.Vector3();
@@ -855,13 +877,25 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       // Straight out of the head, along the same yaw/pitch the orbit uses: the
       // overhead camera looks from `+(sin yaw, ., cos yaw)` back at its focus,
       // so the direction it is facing is the negative of that.
-      camera.position.set(eye.x, eye.y, eye.z);
+      const amplitude = playerRunning ? 0.085 : 0.05;
+      const verticalBob = Math.sin(bobPhase * 2) * amplitude * bobWeight;
+      const lateralBob = Math.cos(bobPhase) * amplitude * 0.42 * bobWeight;
+      cameraOrigin.set(
+        eye.x + Math.cos(smoothed.yaw) * lateralBob,
+        eye.y + verticalBob,
+        eye.z - Math.sin(smoothed.yaw) * lateralBob,
+      );
+      camera.position.copy(cameraOrigin);
       forward.set(
         -Math.sin(smoothed.yaw) * Math.cos(smoothed.pitch),
         -Math.sin(smoothed.pitch),
         -Math.cos(smoothed.yaw) * Math.cos(smoothed.pitch),
       );
-      camera.lookAt(eye.x + forward.x, eye.y + forward.y, eye.z + forward.z);
+      camera.lookAt(
+        cameraOrigin.x + forward.x,
+        cameraOrigin.y + forward.y,
+        cameraOrigin.z + forward.z,
+      );
     } else {
       const horizontal = Math.cos(smoothed.pitch) * smoothed.distance;
       const armX = Math.sin(smoothed.yaw);
@@ -895,6 +929,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     // overlay's world-label projection both run before the next render.
     camera.updateMatrixWorld();
     camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+    attackReticle.quaternion.copy(camera.quaternion);
   };
   applyCamera();
 
@@ -922,10 +957,8 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       camera.updateProjectionMatrix();
     },
 
-    zoom(delta) {
-      // Nothing to pull the camera back from when it is your own head.
-      if (firstPerson) return;
-      distance = clamp(distance + delta, CAMERA_MIN_DISTANCE, CAMERA_MAX_DISTANCE);
+    zoom(_delta) {
+      // Camera distance is deliberately locked at maximum zoom.
     },
 
     orbit(dx, dy) {
@@ -1014,8 +1047,13 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       applyFocus();
     },
 
-    follow(px, py, facing) {
+    follow(px, py, facing, running = false) {
       playerFacing = facing;
+      playerMoving = lastFollowX !== null && lastFollowY !== null
+        && Math.hypot(px - lastFollowX, py - lastFollowY) > 0.01;
+      playerRunning = running;
+      lastFollowX = px;
+      lastFollowY = py;
       // The eyes ride the *interpolated* position undamped: this is the one
       // point in the scene that has to be exactly where the player is, and a
       // damped head lags a half-step behind its own body on every walk.
@@ -1043,6 +1081,9 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     },
 
     update(dt) {
+      const bobTarget = firstPerson && playerMoving ? 1 : 0;
+      bobWeight = damp(bobWeight, bobTarget, playerMoving ? 14 : 9, dt);
+      if (playerMoving) bobPhase += dt * (playerRunning ? 8.8 : 5.8);
       smoothed.yaw = damp(smoothed.yaw, yaw, 16, dt);
       smoothed.pitch = damp(smoothed.pitch, pitch, 16, dt);
       smoothed.distance = damp(smoothed.distance, distance, 12, dt);
@@ -1104,6 +1145,16 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       );
       cursorRingMaterial.opacity = kind === "floor" ? 0.3 : 0.5;
       cursorRing.position.set(toX(px), 0.145, toZ(py));
+    },
+
+    setAttackReticle(px, py, height = 0.08) {
+      if (px === null || py === null) {
+        attackReticle.visible = false;
+        return;
+      }
+      attackReticle.visible = true;
+      attackReticle.position.set(toX(px), height, toZ(py));
+      attackReticle.quaternion.copy(camera.quaternion);
     },
 
     setTargetRing(px, py, color) {
