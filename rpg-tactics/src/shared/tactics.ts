@@ -495,6 +495,8 @@ export interface TacticsSnapshot extends GameSnapshot {
   playerHeading: Point;
   /** Whether Shift sprint is currently held. */
   playerRunning: boolean;
+  /** True during the one-second corpse-eating action. */
+  playerEating: boolean;
   /** True means open. The two corridor doors are independently operated. */
   doors: DoorStates;
   targetDoor: DoorId | null;

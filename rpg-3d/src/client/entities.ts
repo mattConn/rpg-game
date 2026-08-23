@@ -208,6 +208,13 @@ class PlayerWolfActor {
   swing(now: number, kind: AttackKind = "melee"): void {
     this.attackAt = now;
     this.attackKind = kind;
+    if (kind === "melee" && this.rig.attackAction) {
+      this.rig.attackAction.reset();
+      this.rig.attackAction.setLoop(THREE.LoopOnce, 1);
+      this.rig.attackAction.clampWhenFinished = false;
+      this.rig.attackAction.timeScale = 2.5;
+      this.rig.attackAction.play();
+    }
   }
 
   jump(now: number): void {
@@ -216,7 +223,7 @@ class PlayerWolfActor {
   }
 
   setWeapon(kind: AttackKind): void {
-    this.rig.sword.visible = kind === "melee";
+    this.rig.sword.visible = false;
     this.rig.dagger.visible = kind === "ranged";
   }
 
@@ -233,13 +240,41 @@ class PlayerWolfActor {
     this.lastY = y;
     const speed = dt > 0 ? Math.hypot(dx, dy) / dt : 0;
     const moving = speed > MOVING_EPSILON && !snap.dead;
+    const playerStateFlags = snap as GameSnapshot & { playerRunning?: boolean; playerEating?: boolean };
+    const sprinting = playerStateFlags.playerRunning === true;
+    const eating = playerStateFlags.playerEating === true;
     this.rig.mixer?.update(dt);
-    if (moving) {
+    const importedMeleeAttack = this.rig.attackAction?.isRunning() ?? false;
+    if (eating) {
       this.rig.idleAction?.stop();
-      if (this.rig.runAction && !this.rig.runAction.isRunning()) this.rig.runAction.reset().play();
-      if (this.rig.runAction) this.rig.runAction.timeScale = Math.max(0.65, speed / PLAYER_WOLF_STRIDE_SPEED);
-    } else {
       this.rig.runAction?.stop();
+      this.rig.sprintAction?.stop();
+      this.rig.attackAction?.stop();
+      const eatAction = this.rig.eatAction;
+      if (eatAction && !eatAction.isRunning()) {
+        eatAction.reset();
+        eatAction.setLoop(THREE.LoopOnce, 1);
+        eatAction.clampWhenFinished = false;
+        eatAction.timeScale = 1;
+        eatAction.play();
+      }
+    } else if (importedMeleeAttack) {
+      this.rig.eatAction?.stop();
+      this.rig.idleAction?.stop();
+      this.rig.runAction?.stop();
+      this.rig.sprintAction?.stop();
+    } else if (moving) {
+      this.rig.eatAction?.stop();
+      this.rig.idleAction?.stop();
+      const movementAction = sprinting ? (this.rig.sprintAction ?? this.rig.runAction) : this.rig.runAction;
+      const inactiveAction = sprinting ? this.rig.runAction : this.rig.sprintAction;
+      inactiveAction?.stop();
+      if (movementAction && !movementAction.isRunning()) movementAction.reset().play();
+      if (movementAction) movementAction.timeScale = Math.max(0.65, speed / PLAYER_WOLF_STRIDE_SPEED);
+    } else {
+      this.rig.eatAction?.stop();
+      this.rig.runAction?.stop();
+      this.rig.sprintAction?.stop();
       if (this.rig.idleAction && !this.rig.idleAction.isRunning()) this.rig.idleAction.reset().play();
     }
     const playerState = snap as GameSnapshot & {
@@ -252,31 +287,18 @@ class PlayerWolfActor {
     const attack = this.attackAt === null ? null : (now - this.attackAt) / SWING_MS;
     const activeAttack = attack !== null && attack < 1;
     const easedAttack = activeAttack ? ease(Math.max(0, attack)) : 0;
-    const spin = activeAttack
-      ? this.attackKind === "melee"
-        ? easedAttack * -Math.PI * 2
-        // Dagger sweep: snap 45° left, travel through a 90° rightward arc,
-        // then return to the ordinary facing as soon as the attack ends.
-        : Math.PI / 4 - easedAttack * Math.PI / 2
+    // Melee uses the imported close-left attack. The procedural sweep remains
+    // only for the thrown dagger.
+    const spin = activeAttack && this.attackKind === "ranged"
+      ? Math.PI / 4 - easedAttack * Math.PI / 2
       : 0;
     this.root.rotation.y = this.yaw + spin;
-
-    const swordBend = activeAttack && this.attackKind === "melee"
-      ? Math.sin(easedAttack * Math.PI)
-      : 0;
-    if (this.rig.importedTail) {
-      ATTACK_BEND_QUATERNION.setFromAxisAngle(TAIL_BEND_AXIS, swordBend * 0.58);
-      this.rig.importedTail.bone.quaternion
-        .copy(this.rig.importedTail.bindQuaternion)
-        .multiply(ATTACK_BEND_QUATERNION);
-    }
 
     const amp = Math.min(1, speed / WOLF_FULL_SPEED);
     const gaitSpeed = Math.min(2, speed / PLAYER_WOLF_STRIDE_SPEED);
     if (moving) this.gait += dt * (5 + gaitSpeed * 11);
     const airborne = jumpAge < 1;
     animateWolfLegs(this.rig, moving && !airborne, this.gait, amp, dt);
-    braceWolfLegsForSword(this.rig, swordBend);
     kickWolfLegsForJump(this.rig, jumpTuck);
 
     const daggerLunge = activeAttack && this.attackKind === "ranged" ? Math.sin(easedAttack * Math.PI) * 0.42 : 0;
@@ -325,66 +347,19 @@ const LEG_PHASE = [0, 1.4, Math.PI + 0.18, Math.PI + 1.58];
 // This skeleton's leg chains are exported in a rotated parent space. Its local
 // X hinge produces the visible fore/aft stride along the body.
 const LEG_SWING_AXIS = new THREE.Vector3(1, 0, 0);
-const LEG_SIDE_AXIS = new THREE.Vector3(0, 0, 1);
 const LEG_SWING_QUATERNION = new THREE.Quaternion();
-const LEG_SIDE_QUATERNION = new THREE.Quaternion();
 const SPINE_FLEX_AXIS = new THREE.Vector3(0, 0, 1);
 const SPINE_FLEX_QUATERNION = new THREE.Quaternion();
 const TAIL_BEND_AXIS = new THREE.Vector3(1, 0, 0);
 const ATTACK_BEND_QUATERNION = new THREE.Quaternion();
-const JAW_BITE_AXIS = new THREE.Vector3(1, 0, 0);
-const JAW_BITE_QUATERNION = new THREE.Quaternion();
 // The imported wing bones run along local Z, so rotating around Z only twists
 // the membrane without moving its silhouette. Local X lifts the full span.
 
-/** Animate both the fallback legs and the visible imported wolf skeleton. */
+/** Animate fallback geometry; the imported skeleton uses its `run fwd` clip. */
 function animateWolfLegs(rig: WolfRig, moving: boolean, gait: number, amp: number, dt: number): void {
   rig.legs.forEach((leg, i) => {
     const target = moving ? Math.sin(gait + LEG_PHASE[i]!) * 0.45 * amp : 0;
     leg.rotation.z = damp(leg.rotation.z, target, 18, dt);
-  });
-  rig.importedLegs.forEach((leg, i) => {
-    const cycle = Math.sin(gait + LEG_PHASE[i]!);
-    const stride = i < 2 ? 0.85 : 0.42;
-    const target = moving ? cycle * stride * amp : 0;
-    leg.swing = damp(leg.swing, target, 18, dt);
-    LEG_SWING_QUATERNION.setFromAxisAngle(LEG_SWING_AXIS, leg.swing);
-    leg.bone.quaternion
-      .copy(leg.bindQuaternion)
-      .multiply(LEG_SWING_QUATERNION);
-    if (leg.lowerBone && leg.lowerBindQuaternion) {
-      // Canine forelegs fold backward at the elbow while the rear hocks fold
-      // forward. Giving every lower leg the same sign inverted half the gait.
-      const bendDirection = i < 2 ? 1 : -1;
-      const flex = moving
-        ? bendDirection * (0.08 + Math.max(0, -cycle) * 0.48) * amp
-        : 0;
-      LEG_SWING_QUATERNION.setFromAxisAngle(LEG_SWING_AXIS, flex);
-      leg.lowerBone.quaternion
-        .copy(leg.lowerBindQuaternion)
-        .multiply(LEG_SWING_QUATERNION);
-    }
-  });
-  rig.importedSpine.forEach((joint, i) => {
-    // Offset each successive joint slightly so the torso flex travels from the
-    // hips toward the shoulders rather than hinging as one rigid plank.
-    const target = moving ? Math.sin(gait + i * 0.32) * 0.055 * amp : 0;
-    joint.flex = damp(joint.flex, target, 14, dt);
-    SPINE_FLEX_QUATERNION.setFromAxisAngle(SPINE_FLEX_AXIS, joint.flex);
-    joint.bone.quaternion.copy(joint.bindQuaternion).multiply(SPINE_FLEX_QUATERNION);
-  });
-}
-
-/** Splay the actual bound legs only while the sword spin is under way. */
-function braceWolfLegsForSword(rig: WolfRig, amount: number): void {
-  rig.importedLegs.forEach((leg, i) => {
-    const sideSign = i === 0 || i === 2 ? 1 : -1;
-    LEG_SIDE_QUATERNION.setFromAxisAngle(LEG_SIDE_AXIS, amount * sideSign * 0.34);
-    leg.bone.quaternion.multiply(LEG_SIDE_QUATERNION);
-    if (leg.lowerBone) {
-      LEG_SIDE_QUATERNION.setFromAxisAngle(LEG_SIDE_AXIS, amount * sideSign * 0.2);
-      leg.lowerBone.quaternion.multiply(LEG_SIDE_QUATERNION);
-    }
   });
 }
 
@@ -421,6 +396,13 @@ function hitboxOutline(radiusX: number, radiusZ: number): THREE.LineLoop {
   return new THREE.LineLoop(geometry, HITBOX_MATERIAL);
 }
 
+interface BloodBurst {
+  points: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
+  flash: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial> | null;
+  velocities: THREE.Vector3[];
+  age: number;
+}
+
 class WolfActor {
   readonly root = new THREE.Group();
   readonly rig: WolfRig;
@@ -438,7 +420,7 @@ class WolfActor {
     this.rig = buildWolf(this.accent);
     this.root.add(this.rig.model);
     this.root.scale.setScalar(HELLHOUND_SCALE);
-    this.hitbox = hitboxOutline(0.72, 0.48);
+    this.hitbox = hitboxOutline(0.9, 0.62);
     this.hitbox.position.y = 0.04;
     this.hitbox.visible = false;
     this.root.add(this.hitbox);
@@ -451,6 +433,16 @@ class WolfActor {
 
   lunge(now: number): void {
     this.lungeAt = now;
+    const attackAction = this.rig.attackAction;
+    if (attackAction) {
+      attackAction.reset();
+      attackAction.setLoop(THREE.LoopOnce, 1);
+      attackAction.clampWhenFinished = false;
+      // The source clip is about 1.56 seconds. Compressing it into the 300ms
+      // damage window made the bite unreadably fast; play it near native speed.
+      attackAction.timeScale = 1.25;
+      attackAction.play();
+    }
   }
 
   setHitboxVisible(visible: boolean): void { this.hitbox.visible = visible; }
@@ -471,13 +463,25 @@ class WolfActor {
     this.lastY = enemy.y;
     const speed = dt > 0 ? Math.hypot(dx, dy) / dt : 0;
     const moving = speed > MOVING_EPSILON;
+    const aggroed = enemy.chasing;
+    const attackProgress = this.lungeAt === null ? null : (now - this.lungeAt) / LUNGE_MS;
+    const attacking = this.rig.attackAction?.isRunning()
+      ?? (attackProgress !== null && attackProgress < 1);
     this.rig.mixer?.update(dt);
-    if (moving) {
+    if (attacking) {
       this.rig.idleAction?.stop();
-      if (this.rig.runAction && !this.rig.runAction.isRunning()) this.rig.runAction.reset().play();
-      if (this.rig.runAction) this.rig.runAction.timeScale = Math.max(0.65, speed / WOLF_FULL_SPEED);
+      this.rig.runAction?.stop();
+      this.rig.aggressiveAction?.stop();
+    } else if (moving) {
+      this.rig.idleAction?.stop();
+      const movementAction = aggroed ? (this.rig.aggressiveAction ?? this.rig.runAction) : this.rig.runAction;
+      const inactiveAction = aggroed ? this.rig.runAction : this.rig.aggressiveAction;
+      inactiveAction?.stop();
+      if (movementAction && !movementAction.isRunning()) movementAction.reset().play();
+      if (movementAction) movementAction.timeScale = Math.max(0.65, speed / WOLF_FULL_SPEED);
     } else {
       this.rig.runAction?.stop();
+      this.rig.aggressiveAction?.stop();
       if (this.rig.idleAction && !this.rig.idleAction.isRunning()) this.rig.idleAction.reset().play();
     }
 
@@ -511,34 +515,23 @@ class WolfActor {
     // for the animal, and worst exactly when it should read as dangerous. It
     // still *drops* into the hunt, because that is carriage rather than
     // greeting, and it is one of the two tells that a hound has woken.
-    const hunting = enemy.chasing;
+    const hunting = aggroed;
     this.rig.tail.rotation.z = damp(this.rig.tail.rotation.z, hunting ? 0.35 : 0.95, 6, dt);
     // Lit from the rig's own eye colour, not the accent: the eyes are red on
     // every hellhound, while the accent is whatever this one happens to be.
     this.rig.eyeMaterial.color.copy(hunting ? this.rig.eyeColor : darken(this.rig.eyeColor, 0.55));
 
-    const lunge = this.lungeAt === null ? null : (now - this.lungeAt) / LUNGE_MS;
-    const thrust = lunge !== null && lunge < 1 ? Math.sin(Math.PI * lunge) : 0;
-    if (this.rig.importedJaw) {
-      const biteOpen = lunge !== null && lunge < 1
-        ? (1 - ease(Math.max(0, lunge))) * 0.82
-        : 0;
-      JAW_BITE_QUATERNION.setFromAxisAngle(JAW_BITE_AXIS, biteOpen);
-      this.rig.importedJaw.bone.quaternion
-        .copy(this.rig.importedJaw.bindQuaternion)
-        .multiply(JAW_BITE_QUATERNION);
-    }
-    if (lunge !== null && lunge >= 1) this.lungeAt = null;
+    if (attackProgress !== null && attackProgress >= 1) this.lungeAt = null;
 
     this.hurt = Math.max(0, this.hurt - dt * 4);
 
-    this.rig.model.position.x = thrust * 0.3 - this.hurt * 0.12;
+    this.rig.model.position.x = -this.hurt * 0.12;
     this.rig.model.position.y = -this.hurt * 0.06;
-    this.rig.model.rotation.z = thrust * -0.18 + this.hurt * 0.16;
-    this.rig.head.rotation.z = damp(this.rig.head.rotation.z, hunting ? -0.18 : 0, 6, dt) - thrust * 0.3;
+    this.rig.model.rotation.z = this.hurt * 0.16;
+    this.rig.head.rotation.z = damp(this.rig.head.rotation.z, hunting ? -0.18 : 0, 6, dt);
     // A watchful animal keeps its mouth nearly shut. Once it hunts, the jaw
     // parts into a quiet snarl; the attack lunge drives a much wider snap.
-    const jawOpen = -(hunting ? 0.22 : 0.035) - thrust * 0.5;
+    const jawOpen = -(hunting ? 0.22 : 0.035);
     this.rig.jaw.rotation.z = damp(this.rig.jaw.rotation.z, jawOpen, 14, dt);
   }
 
@@ -559,7 +552,7 @@ class BatActor {
   constructor(id: string) {
     this.rig = buildBat();
     this.root.add(this.rig.model);
-    this.hitbox = hitboxOutline(3.0, 1.26);
+    this.hitbox = hitboxOutline(5.25, 4.5);
     this.hitbox.position.y = 0;
     this.hitbox.visible = false;
     this.root.add(this.hitbox);
@@ -627,7 +620,6 @@ class CorpseActor {
     this.rig.model.rotation.x = t * (Math.PI / 2) + impact * 0.1;
     this.rig.model.rotation.y = Math.sin(this.age * 11 + 0.8) * 0.2 * energy;
     this.rig.model.rotation.z = impact * 0.28;
-    this.rig.model.position.y = t * 0.36 * WOLF_SCALE + Math.abs(impact) * 0.12;
     this.rig.model.position.z = t * -0.55 * WOLF_SCALE;
 
     const spineCount = Math.max(1, this.rig.importedSpine.length - 1);
@@ -653,11 +645,99 @@ class CorpseActor {
         .copy(this.rig.importedTail.bindQuaternion)
         .multiply(ATTACK_BEND_QUATERNION);
     }
+
+    // The bright combat-eye overlays do not belong on a dead animal. They are
+    // separate meshes parented to the animated head bone, and during a hard
+    // skeletal collapse they can otherwise appear detached from the real,
+    // closed eyes in the imported skin.
+    this.rig.model.getObjectsByProperty("name", "importedWolfEye")
+      .forEach((eye) => { eye.visible = false; });
+
+    // Keep the lowest rendered point on the dungeon floor throughout the
+    // collapse. The old fixed lift raised a scaled corpse almost a full world
+    // unit and left it visibly hovering once the ragdoll settled.
+    this.rig.model.position.y = 0;
+    this.root.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().makeEmpty();
+    this.rig.model.traverse((object) => {
+      if (!(object instanceof THREE.Mesh) || !object.visible) return;
+      if (object instanceof THREE.SkinnedMesh) {
+        // Box3.setFromObject uses the undeformed geometry bounds for a skinned
+        // mesh. Compute against the current bone pose so a wolf lying on its
+        // side is grounded by the corpse, not by its former standing pose.
+        object.skeleton.update();
+        object.computeBoundingBox();
+        if (object.boundingBox) bounds.union(object.boundingBox.clone().applyMatrix4(object.matrixWorld));
+        return;
+      }
+      object.geometry.computeBoundingBox();
+      if (object.geometry.boundingBox) {
+        bounds.union(object.geometry.boundingBox.clone().applyMatrix4(object.matrixWorld));
+      }
+    });
+    if (Number.isFinite(bounds.min.y)) {
+      const worldFloor = this.root.position.y + 0.015;
+      this.rig.model.position.y = (worldFloor - bounds.min.y) / this.root.scale.y;
+    }
   }
 
   dispose(): void {
     disposeObject(this.root);
   }
+}
+
+/** A slain flying enemy rolls belly-up, drops, and remains where it lands. */
+class BatCorpseActor {
+  readonly root = new THREE.Group();
+  private readonly rig: BatRig;
+  private age = 0;
+  private readonly startAltitude: number;
+
+  constructor(id: string, corpse: GameSnapshot["corpses"][number]) {
+    this.rig = buildBat();
+    this.root.add(this.rig.model);
+    this.root.userData["entityId"] = id;
+    this.startAltitude = corpse.altitude ?? 2.25;
+    this.root.position.set(toX(corpse.x), this.startAltitude, toZ(corpse.y));
+    this.root.rotation.y = yawFor(corpse.facing, 0);
+    tintObject(this.rig.model, new THREE.Color(0x000000), 0.28);
+  }
+
+  update(dt: number): void {
+    this.age += dt;
+    // A corpse must not continue playing the looping flight clip. This check
+    // runs every frame because the imported rig may finish loading after death.
+    this.rig.flightAction?.stop();
+    this.rig.mixer?.stopAllAction();
+    const fall = Math.min(1, this.age / 0.82);
+    const eased = fall * fall * (3 - 2 * fall);
+    const loose = Math.exp(-this.age * 3.2);
+    for (const joint of this.rig.wingJoints) {
+      const segment = joint.order / 5;
+      const droop = joint.side * (0.32 + segment * 0.22);
+      const flop = joint.side * Math.sin(this.age * (11 + joint.order) + joint.order * 0.7)
+        * (0.55 - segment * 0.16) * loose;
+      const ragdoll = new THREE.Quaternion().setFromEuler(new THREE.Euler(
+        0.12 + segment * 0.08,
+        0,
+        droop + flop,
+      ));
+      joint.bone.quaternion.copy(joint.bindQuaternion).multiply(ragdoll);
+    }
+    this.rig.model.rotation.x = eased * Math.PI;
+    this.rig.model.rotation.z = Math.sin(fall * Math.PI) * 0.24;
+    this.root.position.y = this.startAltitude * (1 - eased);
+    if (fall < 1) return;
+
+    // The imported bat is centred around its body rather than grounded at its
+    // feet. Once it lands, lift only enough for the flipped mesh to meet y=0.
+    this.rig.model.position.y = 0;
+    this.root.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(this.rig.model);
+    if (Number.isFinite(bounds.min.y)) this.rig.model.position.y = 0.025 - bounds.min.y;
+  }
+
+  dispose(): void { disposeObject(this.root); }
 }
 
 // ------------------------------------------------------------------ manager
@@ -666,9 +746,10 @@ class CorpseActor {
 export class Actors {
   readonly player: PlayerActor | PlayerWolfActor;
   private readonly enemies = new Map<string, WolfActor | BatActor>();
-  private readonly corpses = new Map<string, CorpseActor>();
+  private readonly corpses = new Map<string, CorpseActor | BatCorpseActor>();
   private readonly projectiles: THREE.Group[] = [];
   private readonly tombstones = new Map<string, THREE.Group>();
+  private readonly bloodBursts: BloodBurst[] = [];
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -689,6 +770,104 @@ export class Actors {
     this.enemies.get(id)?.lunge(now);
   }
 
+  bloodOnEnemy(id: string): void {
+    const enemy = this.enemies.get(id);
+    if (!enemy) return;
+    this.spawnBlood(enemy.root, this.player.root, true);
+  }
+
+  bloodOnPlayer(attackerId: string | null): void {
+    this.spawnBlood(this.player.root, attackerId ? this.enemies.get(attackerId)?.root : undefined);
+  }
+
+  private spawnBlood(target: THREE.Object3D, source?: THREE.Object3D, showImpactFlash = false): void {
+    const targetWorld = target.getWorldPosition(new THREE.Vector3());
+    const sourceWorld = source?.getWorldPosition(new THREE.Vector3());
+    const towardSource = sourceWorld
+      ? sourceWorld.sub(targetWorld).setY(0).normalize()
+      : new THREE.Vector3(1, 0, 0);
+    const isBat = target.position.y > 1.5;
+    const origin = targetWorld.clone()
+      .addScaledVector(towardSource, isBat ? 0.5 : 0.38)
+      .add(new THREE.Vector3(0, isBat ? 0.05 : 0.82, 0));
+    const positions = new Float32Array(14 * 3);
+    const velocities: THREE.Vector3[] = [];
+    for (let i = 0; i < 14; i++) {
+      positions[i * 3] = origin.x;
+      positions[i * 3 + 1] = origin.y;
+      positions[i * 3 + 2] = origin.z;
+      velocities.push(towardSource.clone().multiplyScalar(0.7 + Math.random() * 1.1).add(new THREE.Vector3(
+        (Math.random() - 0.5) * 1.2,
+        0.45 + Math.random() * 1.25,
+        (Math.random() - 0.5) * 1.2,
+      )));
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    const material = new THREE.PointsMaterial({
+      color: 0x490006,
+      size: 0.13,
+      transparent: true,
+      opacity: 1,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+    const points = new THREE.Points(geometry, material);
+    this.scene.add(points);
+    let flash: BloodBurst["flash"] = null;
+    if (showImpactFlash) {
+      flash = new THREE.Mesh(
+        new THREE.SphereGeometry(0.18, 12, 8),
+        new THREE.MeshBasicMaterial({
+          color: 0xb20b13,
+          transparent: true,
+          opacity: 0.3,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        }),
+      );
+      flash.position.copy(origin);
+      this.scene.add(flash);
+    }
+    this.bloodBursts.push({ points, flash, velocities, age: 0 });
+  }
+
+  private updateBlood(dt: number): void {
+    for (let i = this.bloodBursts.length - 1; i >= 0; i--) {
+      const burst = this.bloodBursts[i]!;
+      burst.age += dt;
+      const positions = burst.points.geometry.getAttribute("position") as THREE.BufferAttribute;
+      for (let p = 0; p < burst.velocities.length; p++) {
+        const velocity = burst.velocities[p]!;
+        velocity.y -= 4.5 * dt;
+        positions.setXYZ(
+          p,
+          positions.getX(p) + velocity.x * dt,
+          positions.getY(p) + velocity.y * dt,
+          positions.getZ(p) + velocity.z * dt,
+        );
+      }
+      positions.needsUpdate = true;
+      burst.points.material.opacity = Math.max(0, 1 - burst.age / 0.56);
+      if (burst.flash) {
+        const flashT = Math.min(1, burst.age / 0.3);
+        const flashScale = 1 + flashT * 6.5;
+        burst.flash.scale.setScalar(flashScale);
+        burst.flash.material.opacity = 0.3 * (1 - flashT);
+      }
+      if (burst.age < 0.56) continue;
+      this.scene.remove(burst.points);
+      burst.points.geometry.dispose();
+      burst.points.material.dispose();
+      if (burst.flash) {
+        this.scene.remove(burst.flash);
+        burst.flash.geometry.dispose();
+        burst.flash.material.dispose();
+      }
+      this.bloodBursts.splice(i, 1);
+    }
+  }
+
   setHitboxesVisible(visible: boolean): void {
     for (const enemy of this.enemies.values()) enemy.setHitboxVisible(visible);
   }
@@ -707,6 +886,7 @@ export class Actors {
     elapsed: number,
     facePointFor?: (enemy: GameSnapshot["enemies"][number]) => { x: number; y: number } | null,
   ): void {
+    this.updateBlood(dt);
     syncKeys(
       this.enemies,
       snap.enemies.map((e) => e.id),
@@ -731,7 +911,7 @@ export class Actors {
       snap.corpses.map((c) => c.id),
       (id) => {
         const corpse = snap.corpses.find((c) => c.id === id)!;
-        const actor = new CorpseActor(id, corpse);
+        const actor = corpse.kind === "bat" ? new BatCorpseActor(id, corpse) : new CorpseActor(id, corpse);
         this.scene.add(actor.root);
         this.pickables.push(actor.root);
         return actor;
@@ -844,13 +1024,28 @@ export function applyCues<T extends GameSnapshot>(
   const healthBefore = new Map(previous.enemies.map((e) => [e.id, e.health]));
   for (const enemy of snap.enemies) {
     const was = healthBefore.get(enemy.id);
-    if (was !== undefined && enemy.health < was) actors.flinch(enemy.id);
+    if (was !== undefined && enemy.health < was) {
+      actors.flinch(enemy.id);
+      actors.bloodOnEnemy(enemy.id);
+    }
+  }
+  // A lethal blow removes an enemy before this snapshot is emitted. Its actor
+  // still exists until the render loop syncs the new state, so burst at that
+  // last confirmed contact point too.
+  const livingIds = new Set(snap.enemies.map((enemy) => enemy.id));
+  for (const enemy of previous.enemies) {
+    if (!livingIds.has(enemy.id)) actors.bloodOnEnemy(enemy.id);
   }
 
   const wounded = snap.stats.health < previous.stats.health;
 
   const biters = bitersOf ? bitersOf(previous, snap) : wounded ? [nearestHunter(snap)] : [];
-  for (const biter of biters) if (biter) actors.lunge(biter, now);
+  for (const biter of biters) {
+    if (!biter) continue;
+    actors.lunge(biter, now);
+    actors.bloodOnPlayer(biter);
+  }
+  if (wounded && biters.length === 0) actors.bloodOnPlayer(null);
 
   return wounded;
 }

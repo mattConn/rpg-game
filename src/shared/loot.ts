@@ -24,6 +24,9 @@ export interface Corpse {
   x: number;
   y: number;
   facing: 1 | -1;
+  kind?: "hellhound" | "bat";
+  /** Scene-space flight height at death; only present for flying corpses. */
+  altitude?: number;
   loot: LootItem[];
 }
 
@@ -42,6 +45,8 @@ export function corpseOf(enemy: Omit<Corpse, "loot">): Corpse {
     x: enemy.x,
     y: enemy.y,
     facing: enemy.facing,
+    kind: enemy.kind,
+    altitude: enemy.altitude,
     loot: [], // hellhounds carry nothing
   };
 }

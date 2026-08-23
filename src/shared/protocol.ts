@@ -40,6 +40,8 @@ export interface GameSnapshot {
     x: number;
     y: number;
     facing: 1 | -1;
+    kind?: "hellhound" | "bat";
+    altitude?: number;
   }>;
   /**
    * The open inspect menu, or null. `title` is what both the menu header and

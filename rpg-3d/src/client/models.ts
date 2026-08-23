@@ -167,7 +167,7 @@ function installImportedSword(sword: THREE.Group): void {
     visual.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
     // Its grip is around source X=0.7. Cancel that offset at half scale, then
     // tuck the complete weapon slightly back into the mouth.
-    visual.position.set(-0.32, -0.28, 0.04);
+    visual.position.set(-0.32, 0.32, 0.28);
     visual.traverse((node) => {
       if (node instanceof THREE.Mesh) {
         node.castShadow = true;
@@ -442,6 +442,10 @@ export interface WolfRig {
   eyeColor: THREE.Color;
   mixer: THREE.AnimationMixer | null;
   runAction: THREE.AnimationAction | null;
+  sprintAction: THREE.AnimationAction | null;
+  aggressiveAction: THREE.AnimationAction | null;
+  attackAction: THREE.AnimationAction | null;
+  eatAction: THREE.AnimationAction | null;
   idleAction: THREE.AnimationAction | null;
 }
 
@@ -592,8 +596,20 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
       node.material = Array.isArray(node.material) ? replacements : replacements[0]!;
     });
     rig.mixer = new THREE.AnimationMixer(visual);
-    const clip = (needle: string) => animations.find((item) => item.name.toLowerCase().includes(needle));
-    rig.runAction = clip("run fwd") ? rig.mixer.clipAction(clip("run fwd")!) : null;
+    const clip = (animationName: string) => animations.find((item) =>
+      item.name.toLowerCase().split("|").at(-1) === animationName,
+    );
+    const movementClipName = variant === "hellhound" ? "walk fwd aggressive" : "run fwd";
+    rig.runAction = clip(movementClipName) ? rig.mixer.clipAction(clip(movementClipName)!) : null;
+    rig.sprintAction = clip("sprint fwd") ? rig.mixer.clipAction(clip("sprint fwd")!) : null;
+    rig.aggressiveAction = clip("trot fwd aggressive")
+      ? rig.mixer.clipAction(clip("trot fwd aggressive")!)
+      : null;
+    const attackClipName = variant === "player" ? "attack close lft" : "attack fwd";
+    rig.attackAction = clip(attackClipName) ? rig.mixer.clipAction(clip(attackClipName)!) : null;
+    rig.attackAction?.setLoop(THREE.LoopOnce, 1);
+    const eatClip = clip("idle drink pose to low pose");
+    rig.eatAction = eatClip ? rig.mixer.clipAction(eatClip) : null;
     const idleNeedle = variant === "player" ? "idle smell" : "idle pose";
     rig.idleAction = clip(idleNeedle) ? rig.mixer.clipAction(clip(idleNeedle)!) : null;
     rig.idleAction?.play();
@@ -678,6 +694,33 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
       rig.head.position.set(0, 0, 0);
       rig.head.rotation.set(0, 0, 0);
       rig.head.scale.set(1, 1, 1);
+      if (variant === "player") {
+        const weaponMount = rig.head.getObjectByName("wolfWeaponMount");
+        if (weaponMount) {
+          importedHead.attach(weaponMount);
+          const headWorld = importedHead.getWorldPosition(new THREE.Vector3());
+          const forward = headWorld.clone().sub(importedBodyWorld).setY(0).normalize();
+          const up = new THREE.Vector3(0, 1, 0);
+          const sideAxis = new THREE.Vector3().crossVectors(up, forward).normalize();
+          const mouthWorld = headWorld.clone()
+            .addScaledVector(forward, 0.30)
+            .addScaledVector(up, -0.13);
+          weaponMount.position.copy(importedHead.worldToLocal(mouthWorld));
+
+          // The imported sword runs along the mount's local Z axis. Build a
+          // head-relative frame whose Z axis crosses the muzzle sideways.
+          const mountWorldMatrix = new THREE.Matrix4().makeBasis(
+            forward,
+            up,
+            sideAxis.clone().negate(),
+          );
+          const mountWorldQuaternion = new THREE.Quaternion().setFromRotationMatrix(mountWorldMatrix);
+          const parentWorldQuaternion = importedHead.getWorldQuaternion(new THREE.Quaternion());
+          weaponMount.quaternion.copy(parentWorldQuaternion.invert().multiply(mountWorldQuaternion));
+          weaponMount.rotateY(Math.PI);
+          weaponMount.scale.set(1, 1, 1);
+        }
+      }
       if (variant === "player" || variant === "hellhound") {
         const isPlayer = variant === "player";
         const eyeMaterial = new THREE.MeshBasicMaterial({
@@ -690,7 +733,14 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
         const up = new THREE.Vector3(0, 1, 0);
         const sideAxis = new THREE.Vector3().crossVectors(up, forward).normalize();
         const inheritedScale = importedHead.getWorldScale(new THREE.Vector3());
-        const actorScale = rig.model.parent?.getWorldScale(new THREE.Vector3()).x ?? 1;
+        const playerEyeBones = isPlayer
+          ? [findNamedBone("lefteye052"), findNamedBone("righteye0105")]
+            .filter((bone): bone is THREE.Bone => bone !== null)
+          : [];
+        // Only compensate for the enemy actor's explicit 1.95x root scale.
+        // World scale also contains the stage hierarchy and pushed the
+        // player's eyes back up toward its ears.
+        const actorScale = isPlayer ? 1 : (rig.model.parent?.scale.x ?? 1);
         const worldRadius = isPlayer ? 0.019 : 0.021;
         const localRadius = worldRadius / Math.max(inheritedScale.x, inheritedScale.y, inheritedScale.z, 0.0001);
         for (const side of [-1, 1] as const) {
@@ -698,6 +748,7 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
             new THREE.OctahedronGeometry(localRadius, 0),
             eyeMaterial,
           );
+          eye.name = "importedWolfEye";
           // Keep the already-approved player setup independent from enemy
           // tuning so later hellhound changes cannot disturb it.
           if (isPlayer) {
@@ -707,14 +758,42 @@ function installImportedWolf(rig: WolfRig, variant: WolfVariant): void {
             eye.scale.set(1.12, 0.68, 0.46);
             eye.rotation.z = side * 0.44;
           }
-          const target = headWorld.clone()
-            // Head_046 sits back near the ear line. The visible eyes are
-            // farther toward the muzzle and below that pivot.
-            .addScaledVector(forward, 0.232 * actorScale)
-            .addScaledVector(up, -0.025 * actorScale)
-            .addScaledVector(sideAxis, side * 0.065 * actorScale);
+          const eyeBone = playerEyeBones.length > 0
+            ? playerEyeBones.reduce((best, candidate) => {
+              const bestSide = best.getWorldPosition(new THREE.Vector3()).dot(sideAxis) * side;
+              const candidateSide = candidate.getWorldPosition(new THREE.Vector3()).dot(sideAxis) * side;
+              return candidateSide > bestSide ? candidate : best;
+            })
+            : null;
+          const eyeSurfaceNormal = forward.clone().multiplyScalar(0.82)
+            .addScaledVector(sideAxis, side * 0.58)
+            .normalize();
+          const target = eyeBone
+            // The dedicated eye-bone pivot is inside the modeled eyeball. A
+            // tiny move toward the muzzle exposes the diamond without laying
+            // it over the forehead or letting it show through the skull.
+            ? eyeBone.getWorldPosition(new THREE.Vector3())
+              .addScaledVector(eyeSurfaceNormal, 0.027)
+            : headWorld.clone()
+              .addScaledVector(forward, 0.232 * actorScale)
+              .addScaledVector(up, -0.025 * actorScale)
+              .addScaledVector(sideAxis, side * 0.065 * actorScale);
           eye.position.copy(importedHead.worldToLocal(target));
           importedHead.add(eye);
+          if (eyeBone) {
+            rig.model.updateMatrixWorld(true);
+            eyeBone.attach(eye);
+            // Lay the broad X/Y face of the octahedron against the cheek. Its
+            // thin local Z axis points out of the corresponding side of the
+            // skull; the final roll keeps the approved angry inward slant.
+            const outward = eyeSurfaceNormal;
+            const acrossFace = new THREE.Vector3().crossVectors(up, outward).normalize();
+            const faceFrame = new THREE.Matrix4().makeBasis(acrossFace, up, outward);
+            const faceWorldQuaternion = new THREE.Quaternion().setFromRotationMatrix(faceFrame);
+            const eyeBoneWorldQuaternion = eyeBone.getWorldQuaternion(new THREE.Quaternion());
+            eye.quaternion.copy(eyeBoneWorldQuaternion.invert().multiply(faceWorldQuaternion));
+            eye.rotateZ(side * 0.5);
+          }
         }
       }
     }
@@ -886,6 +965,10 @@ export function buildWolf(accent: THREE.Color, variant: WolfVariant = "hellhound
     eyeColor: new THREE.Color(WOLF_EYE),
     mixer: null,
     runAction: null,
+    sprintAction: null,
+    aggressiveAction: null,
+    attackAction: null,
+    eatAction: null,
     idleAction: null,
   };
   model.traverse((node) => {
@@ -956,6 +1039,7 @@ export function buildPlayerWolf(): PlayerWolfRig {
   weaponMount.name = "wolfWeaponMount";
   rig.head.add(weaponMount);
   const sword = buildBlade(0.72, 0.09);
+  sword.visible = false;
   const dagger = buildBlade(0.4, 0.07);
   dagger.visible = false;
   weaponMount.add(sword, dagger);
@@ -971,13 +1055,20 @@ export function buildPlayerWolf(): PlayerWolfRig {
 export interface BatRig {
   model: THREE.Group;
   mixer: THREE.AnimationMixer | null;
+  flightAction: THREE.AnimationAction | null;
+  wingJoints: Array<{
+    bone: THREE.Bone;
+    bindQuaternion: THREE.Quaternion;
+    side: -1 | 1;
+    order: number;
+  }>;
 }
 
 let importedBatScene: Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }> | null = null;
 
 /** Imported flying bat, normalized to game scale with bright red eyes. */
 export function buildBat(): BatRig {
-  const rig: BatRig = { model: new THREE.Group(), mixer: null };
+  const rig: BatRig = { model: new THREE.Group(), mixer: null, flightAction: null, wingJoints: [] };
   importedBatScene ??= new Promise((resolve, reject) => {
     new GLTFLoader().load(
       "/shared-models/bat/scene.gltf",
@@ -997,6 +1088,22 @@ export function buildBat(): BatRig {
     const centre = scaledBounds.getCenter(new THREE.Vector3());
     visual.position.sub(centre);
     visual.traverse((node) => {
+      if (node instanceof THREE.Bone) {
+        const name = node.name.toLowerCase();
+        const wingPart = /(?:clavicle|arm[12]|wing[123])\.[lr]_armature/.exec(name);
+        if (wingPart) {
+          const order = name.includes("clavicle") ? 0
+            : name.includes("arm1") ? 1
+              : name.includes("arm2") ? 2
+                : Number(/wing([123])/.exec(name)?.[1] ?? 1) + 2;
+          rig.wingJoints.push({
+            bone: node,
+            bindQuaternion: node.quaternion.clone(),
+            side: name.includes(".l_") ? -1 : 1,
+            order,
+          });
+        }
+      }
       if (!(node instanceof THREE.Mesh)) return;
       // The oversized skinned bat moving rapidly through the view is expensive
       // to include in every shadow-map update during a swoop.
@@ -1018,7 +1125,8 @@ export function buildBat(): BatRig {
     rig.model.add(visual);
     if (animations[0]) {
       rig.mixer = new THREE.AnimationMixer(visual);
-      rig.mixer.clipAction(animations[0]).play();
+      rig.flightAction = rig.mixer.clipAction(animations[0]);
+      rig.flightAction.play();
     }
   }).catch((error: unknown) => console.warn("Could not load imported bat model", error));
   return rig;

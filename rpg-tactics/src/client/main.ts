@@ -300,6 +300,7 @@ window.addEventListener("keydown", (event) => {
   if (
     (key.length === 1 && key >= "1" && key <= "5") ||
     key === "r" ||
+    key === "e" ||
     key === "escape" ||
     key === " "
   ) {
