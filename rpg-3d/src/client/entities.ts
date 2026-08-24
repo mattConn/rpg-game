@@ -18,6 +18,7 @@ import type { GameSnapshot } from "../../../src/shared/protocol.js";
 import {
   buildDagger,
   buildBat,
+  buildGargoyle,
   buildSpider,
   buildBloodSplatter,
   buildHuman,
@@ -29,6 +30,7 @@ import {
   tintObject,
   type HumanRig,
   type BatRig,
+  type GargoyleRig,
   type SpiderRig,
   type PlayerWolfRig,
   type WolfRig,
@@ -671,6 +673,53 @@ class SpiderActor {
   dispose(): void { disposeObject(this.root); }
 }
 
+function addGargoyleEyes(root: THREE.Group): void {
+  const material = new THREE.MeshBasicMaterial({ color: 0xff1808 });
+  for (const z of [-0.105, 0.105]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 8), material);
+    eye.position.set(0.43, 1.73, z);
+    root.add(eye);
+    const glow = new THREE.PointLight(0xff1008, 0.28, 0.65, 2);
+    glow.position.copy(eye.position);
+    root.add(glow);
+  }
+}
+
+class GargoyleActor {
+  readonly root = new THREE.Group();
+  private readonly rig: GargoyleRig;
+  private readonly hitbox: THREE.LineLoop;
+  private yaw = 0;
+  private hurt = 0;
+
+  constructor(id: string) {
+    this.rig = buildGargoyle();
+    this.root.add(this.rig.model);
+    addGargoyleEyes(this.root);
+    this.hitbox = hitboxOutline(1.15, 1.15);
+    this.hitbox.position.y = 0.04;
+    this.hitbox.visible = false;
+    this.root.add(this.hitbox);
+    this.root.userData["entityId"] = id;
+  }
+
+  flinch(): void { this.hurt = 1; }
+  lunge(_now: number): void {}
+  setHitboxVisible(visible: boolean): void { this.hitbox.visible = visible; }
+
+  update(enemy: GameSnapshot["enemies"][number], dt: number): void {
+    this.root.position.set(toX(enemy.x), 0, toZ(enemy.y));
+    const heading = enemy.heading ?? { x: enemy.facing, y: 0 };
+    const wanted = yawFor(heading.x, heading.y);
+    this.yaw += angleDelta(this.yaw, wanted) * (1 - Math.exp(-10 * dt));
+    this.root.rotation.y = this.yaw;
+    this.hurt = Math.max(0, this.hurt - dt * 5);
+    this.rig.model.position.x = -this.hurt * 0.08;
+  }
+
+  dispose(): void { disposeObject(this.root); }
+}
+
 /** A body: the same wolf, toppled onto its side and dimmed where it fell. */
 class CorpseActor {
   readonly root = new THREE.Group();
@@ -867,13 +916,44 @@ class SpiderCorpseActor {
   dispose(): void { disposeObject(this.root); }
 }
 
+class GargoyleCorpseActor {
+  readonly root = new THREE.Group();
+  private readonly rig = buildGargoyle();
+  private age = 0;
+
+  constructor(id: string, corpse: GameSnapshot["corpses"][number]) {
+    this.root.add(this.rig.model);
+    this.root.userData["entityId"] = id;
+    this.root.position.set(toX(corpse.x), 0, toZ(corpse.y));
+    this.root.rotation.y = yawFor(corpse.facing, 0);
+  }
+
+  update(dt: number): void {
+    this.age += dt;
+    const fall = Math.min(1, this.age / 0.48);
+    const eased = 1 - Math.pow(1 - fall, 3);
+    // The imported statue's authored axes make a local-Z fall land on its
+    // back. Roll around local X instead so it settles on one shoulder/side.
+    this.rig.model.rotation.x = eased * Math.PI / 2;
+    this.rig.model.rotation.z = 0;
+    // The visual arrives asynchronously; settle it after loading as well as on
+    // later frames so a defeated statue never hovers above the flagstones.
+    this.rig.model.position.y = 0;
+    this.root.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(this.rig.model);
+    if (Number.isFinite(bounds.min.y)) this.rig.model.position.y = 0.02 - bounds.min.y;
+  }
+
+  dispose(): void { disposeObject(this.root); }
+}
+
 // ------------------------------------------------------------------ manager
 
 /** Everything the snapshot owns, kept in step with it. */
 export class Actors {
   readonly player: PlayerActor | PlayerWolfActor;
-  private readonly enemies = new Map<string, WolfActor | BatActor | SpiderActor>();
-  private readonly corpses = new Map<string, CorpseActor | BatCorpseActor | SpiderCorpseActor>();
+  private readonly enemies = new Map<string, WolfActor | BatActor | SpiderActor | GargoyleActor>();
+  private readonly corpses = new Map<string, CorpseActor | BatCorpseActor | SpiderCorpseActor | GargoyleCorpseActor>();
   private readonly corpseOpacity = new Map<string, number>();
   private readonly projectiles: THREE.Group[] = [];
   private readonly tombstones = new Map<string, THREE.Group>();
@@ -916,7 +996,7 @@ export class Actors {
   }
 
   bloodOnNearestCorpse(): void {
-    let nearest: CorpseActor | BatCorpseActor | SpiderCorpseActor | null = null;
+    let nearest: CorpseActor | BatCorpseActor | SpiderCorpseActor | GargoyleCorpseActor | null = null;
     let nearestDistance = Infinity;
     for (const corpse of this.corpses.values()) {
       const distance = corpse.root.position.distanceTo(this.player.root.position);
@@ -1094,7 +1174,8 @@ export class Actors {
         const enemy = snap.enemies.find((e) => e.id === id)!;
         const actor = enemy.kind === "bat" ? new BatActor(id)
           : enemy.kind === "spider" ? new SpiderActor(id)
-            : new WolfActor(id, enemy.color);
+            : enemy.kind === "gargoyle" ? new GargoyleActor(id)
+              : new WolfActor(id, enemy.color);
         this.scene.add(actor.root);
         this.pickables.push(actor.root);
         return actor;
@@ -1115,7 +1196,8 @@ export class Actors {
         const corpse = snap.corpses.find((c) => c.id === id)!;
         const actor = corpse.kind === "bat" ? new BatCorpseActor(id, corpse)
           : corpse.kind === "spider" ? new SpiderCorpseActor(id, corpse)
-            : new CorpseActor(id, corpse);
+            : corpse.kind === "gargoyle" ? new GargoyleCorpseActor(id, corpse)
+              : new CorpseActor(id, corpse);
         this.scene.add(actor.root);
         this.pickables.push(actor.root);
         return actor;

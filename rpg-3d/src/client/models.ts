@@ -1072,6 +1072,50 @@ export interface SpiderRig {
   limbRoots: THREE.Bone[];
 }
 
+export interface GargoyleRig {
+  model: THREE.Group;
+}
+
+let importedGargoyleScene: Promise<THREE.Group> | null = null;
+
+/** Static stone gargoyle, normalized to actor scale; the source mesh is already a modest ~10k triangles. */
+export function buildGargoyle(): GargoyleRig {
+  const model = new THREE.Group();
+  importedGargoyleScene ??= new Promise((resolve, reject) => {
+    new GLTFLoader().load("/shared-models/gargoyle-statue/scene.gltf", (gltf) => resolve(gltf.scene), undefined, reject);
+  });
+  importedGargoyleScene.then((source) => {
+    const visual = source.clone(true);
+    // Match the actor convention: the statue looks along local +X.
+    visual.rotation.y = Math.PI / 2;
+    visual.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(visual);
+    const size = bounds.getSize(new THREE.Vector3());
+    visual.scale.setScalar(2.65 / Math.max(0.001, size.y));
+    visual.updateMatrixWorld(true);
+    const scaled = new THREE.Box3().setFromObject(visual);
+    const centre = scaled.getCenter(new THREE.Vector3());
+    visual.position.set(-centre.x, -scaled.min.y, -centre.z);
+    visual.traverse((node) => {
+      if (!(node instanceof THREE.Mesh)) return;
+      node.castShadow = true;
+      node.receiveShadow = true;
+      const sources = Array.isArray(node.material) ? node.material : [node.material];
+      const materials = sources.map((sourceMaterial) => {
+        const material = sourceMaterial.clone();
+        if (material instanceof THREE.MeshStandardMaterial) {
+          material.color.multiplyScalar(0.72);
+          material.roughness = Math.max(0.88, material.roughness);
+        }
+        return material;
+      });
+      node.material = Array.isArray(node.material) ? materials : materials[0]!;
+    });
+    model.add(visual);
+  }).catch((error: unknown) => console.warn("Could not load gargoyle statue", error));
+  return { model };
+}
+
 let importedSpiderScene: Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }> | null = null;
 
 /** Imported dungeon spider with its authored walking cycle and a dark texture tint. */

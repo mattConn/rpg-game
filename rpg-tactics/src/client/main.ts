@@ -203,6 +203,22 @@ function send(msg: TacticsInput) {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
 }
 
+let nextVisibilityReportAt = 0;
+let lastVisibleEnemyKey = "";
+
+function reportGargoyleVisibility(snap: TacticsSnapshot, now: number): void {
+  if (now < nextVisibilityReportAt) return;
+  nextVisibilityReportAt = now + 100;
+  const ids = snap.enemies
+    .filter((enemy) => enemy.kind === "gargoyle" && stage.isPointVisible(enemy.x, enemy.y, 1.35))
+    .map((enemy) => enemy.id)
+    .sort();
+  const key = ids.join("|");
+  if (key === lastVisibleEnemyKey) return;
+  lastVisibleEnemyKey = key;
+  send({ type: "enemyVisibility", ids });
+}
+
 // ---------------------------------------------------------------- keyboard
 
 /** Direct movement oriented to the camera's current horizontal heading. */
@@ -635,6 +651,7 @@ function frame(now: number) {
   stage.update(dt);
   stage.animateScenery(elapsed);
   stage.render();
+  reportGargoyleVisibility(snap, now);
 
   updateCursorStyle(snap);
   drawOverlay(ctx, {

@@ -11,7 +11,7 @@ export interface GameSnapshot {
   enemies: Array<{
     id: string;
     /** Visual/behaviour family; absent means the original hellhound. */
-    kind?: "hellhound" | "bat" | "spider";
+    kind?: "hellhound" | "bat" | "spider" | "gargoyle";
     name: string;
     glyph: string;
     color: string;
@@ -46,7 +46,7 @@ export interface GameSnapshot {
     x: number;
     y: number;
     facing: 1 | -1;
-    kind?: "hellhound" | "bat" | "spider";
+    kind?: "hellhound" | "bat" | "spider" | "gargoyle";
     altitude?: number;
     /** True after the player has consumed this corpse; clients fade it away. */
     eaten?: boolean;

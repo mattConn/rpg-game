@@ -197,6 +197,8 @@ export interface Stage {
   groundAt(ndcX: number, ndcY: number): { x: number; y: number } | null;
   pickAt(ndcX: number, ndcY: number): THREE.Object3D | null;
   project(point: THREE.Vector3): { x: number; y: number };
+  /** True when a world point lies inside the active camera frustum. */
+  isPointVisible(px: number, py: number, height?: number): boolean;
   /** Show a faint floor marker, colored for enemies and interactables. */
   setCursorRing(px: number | null, py: number | null, kind: "floor" | "enemy" | "interactable"): void;
   setAttackReticle(px: number | null, py: number | null, height?: number): void;
@@ -1766,6 +1768,20 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
         x: ((projected.x + 1) / 2) * roomWidth,
         y: ((1 - projected.y) / 2) * WORLD_HEIGHT,
       };
+    },
+
+    isPointVisible(px, py, height = 1.25) {
+      const world = new THREE.Vector3(toX(px), height, toZ(py));
+      const projected = world.clone().project(camera);
+      if (!(projected.z >= -1 && projected.z <= 1
+        && projected.x >= -1 && projected.x <= 1
+        && projected.y >= -1 && projected.y <= 1)) return false;
+      const sightline = world.sub(camera.position);
+      const distance = sightline.length();
+      cameraWallRay.set(camera.position, sightline.normalize());
+      cameraWallRay.far = distance;
+      const wall = cameraWallRay.intersectObjects(wallOccluders, false)[0];
+      return !wall || wall.distance >= distance - 0.15;
     },
 
     setCursorRing(px, py, kind) {

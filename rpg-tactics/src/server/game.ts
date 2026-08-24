@@ -145,6 +145,8 @@ const ARRIVE_SLACK = 4;
 const SEPARATION_PASSES = 3;
 /** Melee cooldown in ms. */
 const MELEE_COOLDOWN_MS = 600;
+/** The damaging/visible portion of the player's melee animation. */
+const PLAYER_MELEE_ACTIVE_MS = 320;
 /** Ranged cooldown in ms. */
 const RANGED_COOLDOWN_MS = 1000;
 /** How often a hellhound bites, in ms. */
@@ -206,6 +208,11 @@ const SPIDER_BACKUP_DISTANCE = SPIDER_CONTACT_RANGE * 0.7;
 const SPIDER_CONTACT_COOLDOWN_MS = 1500;
 const SPIDER_MOVE_DURATION_MS = 3000;
 const SPIDER_PAUSE_DURATION_MS = 2000;
+const GARGOYLE_SPEED = 120;
+const GARGOYLE_CONTACT_RANGE = SQUARE_PX * 0.72;
+const GARGOYLE_ATTACK_INTERVAL_MS = 1500;
+const GARGOYLE_DAMAGE = 50;
+const GARGOYLE_HITBOX_BONUS = SQUARE_PX * 0.32;
 const ENEMY_MOVEMENT_START_DELAY_MS = 3000;
 const POISON_DAMAGE = 10;
 const POISON_INTERVAL_MS = 2000;
@@ -244,7 +251,7 @@ interface Actor {
 type SpiderSurface = "floor" | "north" | "east" | "south" | "west";
 
 interface Hound extends Actor {
-  kind: "hellhound" | "bat" | "spider";
+  kind: "hellhound" | "bat" | "spider" | "gargoyle";
   glyph: string;
   color: string;
   aggro: boolean;
@@ -267,6 +274,8 @@ interface Hound extends Actor {
   wallGoal?: Exclude<SpiderSurface, "floor">;
   nextSpiderPauseAt?: number;
   spiderPauseUntil?: number;
+  /** Set only when the statue's own unseen movement carries it into contact. */
+  gargoyleSneakArmed?: boolean;
   movementStartsAt: number;
   roomIndex: number;
 }
@@ -348,6 +357,8 @@ export class TacticsGame {
   private poisoned = false;
   private poisonTicksRemaining = 0;
   private nextPoisonAt = 0;
+  /** Camera-frustum report from the active client, used by watch-bound gargoyles. */
+  private visibleEnemyIds = new Set<string>();
   /** Click-to-move destination, cleared on arrival or when WASD overrides. */
   private moveTarget: Point | null = null;
 
@@ -356,6 +367,7 @@ export class TacticsGame {
 
   /** Player attack cooldown. */
   private nextAttackAt = 0;
+  private playerAttackUntil = 0;
   private cooldownSlot = 0;
   private cooldownStart: number | null = null;
   private cooldownTotal = 0;
@@ -448,6 +460,17 @@ export class TacticsGame {
           roomIndex: spawn.roomIndex,
         };
       }
+      if (spawn.kind === "gargoyle") {
+        return {
+          id: `gargoyle-${this.nextEnemySeq++}`, kind: "gargoyle" as const,
+          name: "Stone Gargoyle", glyph: "G", color: "#5c5961",
+          cell: { ...cell }, pos: center, ...center, facing: -1 as const,
+          health: 300, maxHealth: 300, aggro: false, nextAttackAt: 0,
+          patrolLeft: center.x, patrolRight: center.x, patrolDir: 1 as const,
+          heading: { x: 1, y: 0 }, movementStartsAt,
+          roomIndex: spawn.roomIndex,
+        };
+      }
       const hound: Hound = {
         id: `hound-${this.nextEnemySeq++}`,
         kind: "hellhound",
@@ -494,7 +517,9 @@ export class TacticsGame {
     this.poisoned = false;
     this.poisonTicksRemaining = 0;
     this.nextPoisonAt = 0;
+    this.visibleEnemyIds.clear();
     this.nextAttackAt = 0;
+    this.playerAttackUntil = 0;
     this.waiting = false;
     this.deathAt = 0;
     this.killCount = 0;
@@ -550,6 +575,10 @@ export class TacticsGame {
       }
       if (enemy.kind === "spider") {
         this.updateSpider(enemy, dt);
+        continue;
+      }
+      if (enemy.kind === "gargoyle") {
+        this.updateGargoyle(enemy, dt);
         continue;
       }
       if (enemy.aggro) {
@@ -976,6 +1005,65 @@ export class TacticsGame {
     const rise = Math.min(1,
       (age - BAT_STRIKE_AT_MS - BAT_DIVE_LINGER_MS) / BAT_DIVE_RECOVERY_MS);
     return BAT_DIVE_ALTITUDE + rise * (recoveryAltitude - BAT_DIVE_ALTITUDE);
+  }
+
+  /** A watch-bound statue: after room-entry aggro, it pursues anywhere outside the camera view. */
+  private updateGargoyle(gargoyle: Hound, dt: number): void {
+    const playerRegion = this.regionOfCell(clampToGrid(this.playerAt()));
+    if (!gargoyle.aggro && playerRegion === ROOM_REGIONS[gargoyle.roomIndex]) this.wake(gargoyle);
+    if (!gargoyle.aggro) return;
+
+    const player = this.playerAt();
+    const dx = gargoyle.x - player.x;
+    const dy = gargoyle.y - player.y;
+    const gap = Math.max(0.001, Math.hypot(dx, dy));
+
+    if (gap <= GARGOYLE_CONTACT_RANGE) {
+      // Walking into a frozen statue is harmless. Contact damage exists only
+      // when its own unseen pursuit crossed into this range.
+      if (!gargoyle.gargoyleSneakArmed) return;
+      // A committed melee swing holds the statue off during the active attack
+      // frames and consumes that sneak attempt; recovery alone grants nothing.
+      if (this.simNow < this.playerAttackUntil) {
+        gargoyle.gargoyleSneakArmed = false;
+        return;
+      }
+      if (this.simNow >= gargoyle.nextAttackAt) {
+        this.player.health = Math.max(0, this.player.health - GARGOYLE_DAMAGE);
+        gargoyle.nextAttackAt = this.simNow + GARGOYLE_ATTACK_INTERVAL_MS;
+        gargoyle.gargoyleSneakArmed = false;
+        this.strikes.push({ enemyId: gargoyle.id, seq: this.strikeSeq++ });
+      }
+      return;
+    }
+    // It lost contact before cashing in the ambush; approaching it later must
+    // not resurrect an old sneak attack.
+    gargoyle.gargoyleSneakArmed = false;
+
+    // Seeing it freezes pursuit, but not contact it already established while
+    // off-screen. Otherwise the camera reveals it a frame before impact and
+    // makes the gargoyle mechanically incapable of ever landing a hit.
+    if (this.visibleEnemyIds.has(gargoyle.id)) return;
+
+    const waypoint = this.nextWaypoint(gargoyle);
+    const target = waypoint ?? player;
+    const tx = target.x - gargoyle.x;
+    const ty = target.y - gargoyle.y;
+    const targetGap = Math.max(0.001, Math.hypot(tx, ty));
+    gargoyle.heading = { x: tx / targetGap, y: ty / targetGap };
+    gargoyle.facing = gargoyle.heading.x >= 0 ? 1 : -1;
+    // Intermediate doorway points must be reached exactly. Applying the final
+    // player-contact standoff here left the statue permanently parked just in
+    // front of every otherwise open doorway.
+    const standoff = waypoint ? 0 : GARGOYLE_CONTACT_RANGE * 0.7;
+    const step = Math.min(GARGOYLE_SPEED * dt, Math.max(0, targetGap - standoff));
+    const moved = this.place(gargoyle, {
+      x: gargoyle.x + gargoyle.heading.x * step,
+      y: gargoyle.y + gargoyle.heading.y * step,
+    });
+    if (distance(moved, player) <= GARGOYLE_CONTACT_RANGE) {
+      gargoyle.gargoyleSneakArmed = true;
+    }
   }
 
   /** Wander across the floor and occasionally climb a room wall, never its ceiling. */
@@ -1507,6 +1595,7 @@ export class TacticsGame {
     const player = this.playerAt();
     for (const enemy of this.enemies) {
       if (enemy.aggro) continue;
+      if (enemy.kind === "gargoyle") continue;
       if (withinAggro(this.at(enemy), player)) this.wake(enemy);
     }
   }
@@ -1606,6 +1695,7 @@ export class TacticsGame {
       this.say("Use Interact on a targeted door.");
       return;
     }
+    if (action?.kind === "melee") this.playerAttackUntil = this.simNow + PLAYER_MELEE_ACTIVE_MS;
     if (action?.kind === "melee" && this.tryDestroyPurpleGem()) {
       this.startCooldown(MELEE_COOLDOWN_MS);
       return;
@@ -1749,6 +1839,9 @@ export class TacticsGame {
       case "face":
         this.setHeading(msg.dx, msg.dy);
         break;
+      case "enemyVisibility":
+        this.visibleEnemyIds = new Set(msg.ids.filter((id) => typeof id === "string").slice(0, 32));
+        break;
       case "jump":
         if (!isOver(this.phase) && !this.jumping()) this.jumpUntil = this.simNow + JUMP_MS;
         break;
@@ -1807,7 +1900,8 @@ export class TacticsGame {
     if (this.eating() || this.phase === "dead") return;
     const player = this.playerAt();
     const corpse = this.corpses
-      .filter((candidate) => !this.eatenCorpseIds.has(candidate.id) && distance(player, candidate) <= EAT_RANGE)
+      .filter((candidate) => candidate.kind !== "gargoyle"
+        && !this.eatenCorpseIds.has(candidate.id) && distance(player, candidate) <= EAT_RANGE)
       .sort((a, b) => distance(player, a) - distance(player, b))[0];
     if (!corpse) {
       this.say("Stand on a hellhound's body to eat it.");
@@ -2035,7 +2129,8 @@ export class TacticsGame {
       const gap = distance(this.playerAt(), this.at(enemy));
       if (enemy.kind === "bat" && !this.batBodyContact(enemy) && !this.playerHeadContact(enemy)) continue;
       if (!this.batAttackWindow(enemy) || (!this.enemyInPlayerAttackCone(enemy) && !this.playerHeadContact(enemy))) continue;
-      const reach = MELEE_RANGE + (enemy.kind === "hellhound" ? HOUND_HITBOX_BONUS : 0);
+      const reach = MELEE_RANGE + (enemy.kind === "hellhound" ? HOUND_HITBOX_BONUS
+        : enemy.kind === "gargoyle" ? GARGOYLE_HITBOX_BONUS : 0);
       if (gap <= reach && gap < nearestGap) {
         nearest = enemy;
         nearestGap = gap;
@@ -2053,7 +2148,8 @@ export class TacticsGame {
   }
 
   private playerCanReach(enemy: Hound): boolean {
-    const reach = MELEE_RANGE + (enemy.kind === "hellhound" ? HOUND_HITBOX_BONUS : 0);
+    const reach = MELEE_RANGE + (enemy.kind === "hellhound" ? HOUND_HITBOX_BONUS
+      : enemy.kind === "gargoyle" ? GARGOYLE_HITBOX_BONUS : 0);
     return distance(this.playerAt(), this.at(enemy)) <= reach || this.playerHeadContact(enemy);
   }
 
@@ -2068,8 +2164,9 @@ export class TacticsGame {
       x: this.player.x + (this.playerHeading.x / headingLength) * PLAYER_HEAD_FORWARD,
       y: this.player.y + (this.playerHeading.y / headingLength) * PLAYER_HEAD_FORWARD,
     };
-    if (enemy.kind === "hellhound") {
-      return distance(head, this.at(enemy)) <= ENEMY_RADIUS + PLAYER_HEAD_RADIUS;
+    if (enemy.kind === "hellhound" || enemy.kind === "gargoyle") {
+      const radius = enemy.kind === "gargoyle" ? ENEMY_RADIUS + GARGOYLE_HITBOX_BONUS : ENEMY_RADIUS;
+      return distance(head, this.at(enemy)) <= radius + PLAYER_HEAD_RADIUS;
     }
     const enemyHeadingLength = Math.max(0.001, Math.hypot(enemy.heading.x, enemy.heading.y));
     const hx = enemy.heading.x / enemyHeadingLength;
@@ -2298,7 +2395,7 @@ export class TacticsGame {
       projectiles: this.thrown ? [{ ...this.thrown.projectile }] : [],
       damageNumbers: this.damageNumbers.map((dn) => ({ ...dn })),
       targetId: null,
-      attacking: false,
+      attacking: this.simNow < this.playerAttackUntil,
       activeSlot: this.activeSlot,
       cooldown,
       selectedCanAttack: this.selectedCanAttack(),

@@ -211,7 +211,7 @@ export let HALL_ROWS = HALL_REGION.rows;
 export let REGIONS: readonly Region[] = ROOM_REGIONS.flatMap((room, index) =>
   index < HALL_REGIONS.length ? [room, HALL_REGIONS[index]!] : [room]);
 
-export interface DungeonEnemySpawn { kind: "hellhound" | "bat" | "spider"; cell: Cell; roomIndex: number }
+export interface DungeonEnemySpawn { kind: "hellhound" | "bat" | "spider" | "gargoyle"; cell: Cell; roomIndex: number }
 /** One to four enemies per combat room; room zero is always the safe spawn. */
 const generateEnemies = (seed: number, rooms: readonly Region[]): readonly DungeonEnemySpawn[] => {
   const enemyRandom = seededRandom(seed ^ 0x9e3779b9);
@@ -241,6 +241,32 @@ const generateEnemies = (seed: number, rooms: readonly Region[]): readonly Dunge
       });
     }
   });
+  // A single rare statue occupies a free corner in one ordinary combat room.
+  // Keep the established four-enemy room cap by choosing only a room with room
+  // for it; the dedicated spawn and portal chambers remain quiet.
+  if (enemyRandom() < 0.1) {
+    const eligible = rooms.map((room, roomIndex) => ({ room, roomIndex })).filter(({ roomIndex }) =>
+      roomIndex !== 0 && roomIndex !== PORTAL_ROOM_INDEX);
+    const chosen = eligible[Math.floor(enemyRandom() * eligible.length)];
+    if (chosen) {
+      const roomEnemies = result.filter((enemy) => enemy.roomIndex === chosen.roomIndex);
+      if (roomEnemies.length >= 4) {
+        const replaced = result.lastIndexOf(roomEnemies.at(-1)!);
+        if (replaced >= 0) result.splice(replaced, 1);
+      }
+      const corner = Math.floor(enemyRandom() * 4);
+      const across = corner % 2 === 0 ? 0.16 : 0.84;
+      const down = corner < 2 ? 0.16 : 0.84;
+      result.push({
+        kind: "gargoyle",
+        roomIndex: chosen.roomIndex,
+        cell: {
+          col: chosen.room.col + Math.floor(chosen.room.cols * across),
+          row: chosen.room.row + Math.floor(chosen.room.rows * down),
+        },
+      });
+    }
+  }
   return result;
 };
 
@@ -832,6 +858,8 @@ export type TacticsInput =
   /** Move along dx/dy; reverse movement can explicitly preserve facing. */
   | { type: "move"; dx: number; dy: number; turn?: boolean; run?: boolean }
   | { type: "face"; dx: number; dy: number }
+  /** Gargoyles act only while their centre is inside the current camera frustum. */
+  | { type: "enemyVisibility"; ids: string[] }
   | { type: "jump" }
   | { type: "targetDoor"; door: DoorId }
   /** Use the selected action. */
