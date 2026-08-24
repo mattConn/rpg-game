@@ -29,6 +29,7 @@ import { barOrigin, centreShift, drawOverlay, hits, resurrectRect } from "../../
 import { interpolateSnapshot } from "../../../rpg-3d/src/client/playback.js";
 import { toX, toZ } from "../../../rpg-3d/src/client/world.js";
 import {
+  configureDungeon,
   isOver,
   TACTICS_ACTIONS,
   type TacticsInput,
@@ -39,6 +40,16 @@ import { createStage } from "./stage.js";
 import { drawHeldWeapon } from "./viewmodel.js";
 
 // ------------------------------------------------------------------ canvases
+
+const pageUrl = new URL(location.href);
+const requestedSeed = pageUrl.searchParams.get("seed");
+let dungeonSeed = requestedSeed === null ? NaN : Number(requestedSeed);
+if (!Number.isSafeInteger(dungeonSeed) || dungeonSeed < 1 || dungeonSeed > 0xffffffff) {
+  dungeonSeed = crypto.getRandomValues(new Uint32Array(1))[0]! || 1;
+  pageUrl.searchParams.set("seed", String(dungeonSeed));
+  history.replaceState(null, "", pageUrl);
+}
+configureDungeon(dungeonSeed);
 
 const sceneCanvas = document.getElementById("scene") as HTMLCanvasElement;
 const uiCanvas = document.getElementById("ui") as HTMLCanvasElement;
@@ -106,7 +117,7 @@ let swingStartTime = -Infinity;
 let hurt = 0;
 
 const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
-const wsUrl = `${wsProtocol}//${location.host}`;
+const wsUrl = `${wsProtocol}//${location.host}/?seed=${dungeonSeed}`;
 
 function connectWebSocket() {
   const ws = new WebSocket(wsUrl);
@@ -605,6 +616,7 @@ function frame(now: number) {
     snap, uiCursor, groundCursor, toScreen, hurt,
     showAutoRes: false,
     showRoomLabel: false,
+    showHoverNames: false,
     showGameClock: false,
     showActionBar: SHOW_ACTION_BAR,
     compactPlayerHud: true,
@@ -649,11 +661,15 @@ function frame(now: number) {
         aimedGap = gap;
       }
     }
-    stage.setAttackReticle(
-      aimedEnemy?.x ?? snap.player.x + headingX * snap.meleeRange,
-      aimedEnemy?.y ?? snap.player.y + headingY * snap.meleeRange,
-      aimedEnemy ? (aimedEnemy.kind === "bat" ? aimedEnemy.altitude ?? 2.25 : 1.35) : 0.08,
-    );
+    if (aimedEnemy) {
+      stage.setAttackReticle(
+        aimedEnemy.x,
+        aimedEnemy.y,
+        aimedEnemy.kind === "bat" ? aimedEnemy.altitude ?? 2.25 : 1.35,
+      );
+    } else {
+      stage.setAttackReticle(null, null);
+    }
   } else stage.setAttackReticle(null, null);
 }
 

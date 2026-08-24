@@ -1113,11 +1113,22 @@ export function buildBat(): BatRig {
       const materials = Array.isArray(node.material) ? node.material : [node.material];
       const replacements = materials.map((source) => {
         const material = source.clone();
-        if (material.name.toLowerCase().includes("eyes") && material instanceof THREE.MeshStandardMaterial) {
+        const isEye = material.name.toLowerCase().includes("eyes")
+          || node.name.toLowerCase().includes("eyes");
+        if (isEye && material instanceof THREE.MeshStandardMaterial) {
           material.color.setHex(0xff1010);
           material.emissive.setHex(0xff0000);
           material.emissiveIntensity = 1.4;
           material.map = null;
+        } else if (
+          material instanceof THREE.MeshStandardMaterial
+          || material instanceof THREE.MeshPhongMaterial
+          || material instanceof THREE.MeshLambertMaterial
+        ) {
+          // Multiply the imported texture darker without replacing its natural
+          // colour variation or the detail across the wings and body.
+          material.color.setHex(0xbcbcc4);
+          if ("emissive" in material) material.emissive.setHex(0x000000);
         }
         return material;
       });

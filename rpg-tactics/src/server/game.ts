@@ -16,7 +16,7 @@ import {
   spawnDagger,
   type Projectile,
 } from "../../../src/shared/combat.js";
-import { HELLHOUND } from "../../../src/shared/enemies.js";
+import { ENEMY_RADIUS, HELLHOUND } from "../../../src/shared/enemies.js";
 import {
   LOOT_CLOSE_RECT,
   LOOT_MENU_RECT,
@@ -38,9 +38,11 @@ import {
   DOOR_CLEARANCE_PX,
   DOORWAY_WIDTH_PX,
   DOOR_Y,
+  DUNGEON_ENEMIES,
   type DoorId,
   FAR_REGION,
   HALL_REGION,
+  HALL_REGIONS,
   HOUND_MAX_HEALTH,
   HOUND_STARTS,
   LOG_LINES,
@@ -50,6 +52,8 @@ import {
   PLAYER_MAX_HEALTH,
   PLAYER_MAX_MANA,
   PLAYER_START,
+  ROOM_REGIONS,
+  REGIONS,
   RANGED_DAMAGE,
   SQUARE_PX,
   TILE_PX,
@@ -160,21 +164,26 @@ const EAT_HEAL = 30;
 const EAT_RANGE = MIN_SEPARATION;
 /** Extra contact allowance for the hellhound's visibly broad imported body. */
 const HOUND_HITBOX_BONUS = SQUARE_PX * 0.2;
+/** Forward head volume used when the attack animation visibly overlaps a body. */
+const PLAYER_HEAD_FORWARD = SQUARE_PX * 0.5;
+const PLAYER_HEAD_RADIUS = SQUARE_PX * 0.28;
 const JUMP_SPEED_MULTIPLIER = 1.8;
 const BAT_PATROL_RADIUS = SQUARE_PX * 1.35;
 const BAT_PATROL_ANGULAR_SPEED = 0.72;
 const BAT_PURSUIT_SPEED = 92;
-const BAT_STRIKE_AT_MS = 650;
+const BAT_STRIKE_AT_MS = 300;
 const BAT_DIVE_LINGER_MS = 500;
 const BAT_DIVE_RECOVERY_MS = 500;
 const BAT_DIVE_MS = BAT_STRIKE_AT_MS + BAT_DIVE_LINGER_MS + BAT_DIVE_RECOVERY_MS;
 const BAT_ATTACK_INTERVAL_MS = 1800;
-const BAT_DIVE_TRIGGER_RANGE = MELEE_RANGE * 1.7;
-const BAT_BITE_RANGE = MELEE_RANGE * 0.72;
+const BAT_DIVE_TRIGGER_RANGE = MELEE_RANGE * 2.0;
+const BAT_BITE_RANGE = MELEE_RANGE;
 const BAT_ATTACK_CONE_DOT = Math.cos(Math.PI / 4);
 /** Broad ellipse covering the bat's body and extended wings. */
 const BAT_BODY_HALF_LENGTH = SQUARE_PX * 1.75;
 const BAT_BODY_HALF_WIDTH = SQUARE_PX * 1.5;
+/** Large enough to keep the oversized flying models from occupying each other. */
+const BAT_SEPARATION = SQUARE_PX * 2;
 const BAT_CRUISE_ALTITUDE = 4.2;
 const BAT_AGGRO_ALTITUDE = 2.25;
 const BAT_DIVE_ALTITUDE = 0.9;
@@ -226,6 +235,7 @@ interface Hound extends Actor {
   diveOrigin?: Point;
   diveTarget?: Point;
   orbitAngle?: number;
+  roomIndex: number;
 }
 
 interface DamageNumber {
@@ -342,8 +352,33 @@ export class TacticsGame {
       maxHealth: PLAYER_MAX_HEALTH,
     };
 
-    this.enemies = HOUND_STARTS.map((cell) => {
+    this.enemies = DUNGEON_ENEMIES.map((spawn, spawnIndex) => {
+      const cell = spawn.cell;
       const center = cellCenter(cell);
+      if (spawn.kind === "bat") {
+        const roomBats = DUNGEON_ENEMIES.filter(
+          (candidate) => candidate.roomIndex === spawn.roomIndex && candidate.kind === "bat",
+        );
+        const batOrdinal = DUNGEON_ENEMIES.slice(0, spawnIndex).filter(
+          (candidate) => candidate.roomIndex === spawn.roomIndex && candidate.kind === "bat",
+        ).length;
+        // Every bat used to begin at angle zero, so the first simulation tick
+        // teleported all bats in a room onto the exact same point of their
+        // circular patrol. Spread their phases evenly and preserve that phase
+        // when they switch to orbiting the player.
+        const orbitPhase = (batOrdinal / roomBats.length) * Math.PI * 2;
+        return {
+          id: `bat-${this.nextEnemySeq++}`, kind: "bat" as const,
+          name: "Vampire Bat", glyph: "B", color: "#702020",
+          cell: { ...cell }, pos: center, ...center, facing: -1 as const,
+          health: 80, maxHealth: 80, aggro: false, nextAttackAt: 0,
+          patrolLeft: center.x, patrolRight: center.x, patrolDir: 1 as const,
+          heading: { x: -Math.sin(orbitPhase), y: Math.cos(orbitPhase) },
+          patrolAngle: orbitPhase, diveAt: null,
+          diveHit: false, diveOrigin: undefined, diveTarget: undefined, orbitAngle: orbitPhase,
+          roomIndex: spawn.roomIndex,
+        };
+      }
       const hound: Hound = {
         id: `hound-${this.nextEnemySeq++}`,
         kind: "hellhound",
@@ -360,40 +395,12 @@ export class TacticsGame {
         patrolRight: center.x,
         patrolDir: -1,
         heading: { x: -1, y: 0 },
+        roomIndex: spawn.roomIndex,
       };
       // Same seating a hound gets when it gives up on you, so a beat is laid
       // out one way and not two.
       this.seatPatrol(hound, center);
       return hound;
-    });
-    const batCentre = cellCenter({
-      col: BAT_REGION.col + Math.floor(BAT_REGION.cols / 2),
-      row: BAT_REGION.row + Math.floor(BAT_REGION.rows / 2),
-    });
-    this.enemies.push({
-      id: "bat-0",
-      kind: "bat",
-      name: "Vampire Bat",
-      glyph: "B",
-      color: "#702020",
-      cell: cellAtPoint(batCentre)!,
-      pos: batCentre,
-      ...batCentre,
-      facing: -1,
-      health: 80,
-      maxHealth: 80,
-      aggro: false,
-      nextAttackAt: 0,
-      patrolLeft: batCentre.x,
-      patrolRight: batCentre.x,
-      patrolDir: 1,
-      heading: { x: 1, y: 0 },
-      patrolAngle: 0,
-      diveAt: null,
-      diveHit: false,
-      diveOrigin: undefined,
-      diveTarget: undefined,
-      orbitAngle: 0,
     });
 
     this.corpses = [];
@@ -517,7 +524,11 @@ export class TacticsGame {
   private stepPlayer(dx: number, dy: number, turnToTravel = true): boolean {
     const from = this.playerAt();
     const raw = { x: from.x + dx, y: from.y + dy };
-    const target = this.stopAtDoor(from, clampPointToFloor(raw));
+    // The generated dungeon has permanently open passages. The former
+    // two-door prototype clamped movement against two world-wide Y planes;
+    // procedural north/south corridors can cross those planes away from the
+    // original doorway X and were therefore stopped by an invisible wall.
+    const target = clampPointToFloor(raw);
     if (distance(from, target) < 0.01) return false;
 
     if (turnToTravel) {
@@ -622,10 +633,7 @@ export class TacticsGame {
    * of bookkeeping twice with the rule in neither.
    */
   private place(enemy: Hound, raw: Point): Point {
-    // Hounds are much longer than the player's eye clearance. Keep their
-    // centre a full body radius from a closed slab so the muzzle and lunge rig
-    // cannot visually pass through while the simulation remains outside.
-    const wanted = this.stopAtDoor(this.at(enemy), clampPointToFloor(raw), MIN_SEPARATION);
+    const wanted = clampPointToFloor(raw);
     let target = wanted;
 
     if (this.crowds(enemy, wanted)) {
@@ -703,11 +711,12 @@ export class TacticsGame {
 
     if (!bat.aggro) {
       bat.patrolAngle = (bat.patrolAngle ?? 0) + dt * BAT_PATROL_ANGULAR_SPEED;
-      const centre = regionCentre(BAT_REGION);
-      const next = {
+      const centre = regionCentre(ROOM_REGIONS[bat.roomIndex]!);
+      const wanted = {
         x: centre.x + Math.cos(bat.patrolAngle) * BAT_PATROL_RADIUS,
         y: centre.y + Math.sin(bat.patrolAngle) * BAT_PATROL_RADIUS,
       };
+      const next = this.separateBat(bat, wanted);
       bat.heading = { x: -Math.sin(bat.patrolAngle), y: Math.cos(bat.patrolAngle) };
       bat.x = next.x;
       bat.y = next.y;
@@ -729,7 +738,10 @@ export class TacticsGame {
       bat.heading = { x: dx / len, y: dy / len };
       if (gap > orbitRadius * 0.9) {
         const step = Math.min(gap, BAT_PURSUIT_SPEED * dt);
-        const next = { x: bat.x + bat.heading.x * step, y: bat.y + bat.heading.y * step };
+        const next = this.separateBat(bat, {
+          x: bat.x + bat.heading.x * step,
+          y: bat.y + bat.heading.y * step,
+        });
         const cell = cellAtPoint(next);
         if (cell) {
           bat.x = next.x;
@@ -756,10 +768,11 @@ export class TacticsGame {
       const origin = bat.diveOrigin ?? { x: bat.x, y: bat.y };
       const rawT = Math.max(0, Math.min(1, age / BAT_STRIKE_AT_MS));
       const t = rawT * rawT * (3 - 2 * rawT);
-      const next = {
+      const wanted = {
         x: origin.x + (diveTarget.x - origin.x) * t,
         y: origin.y + (diveTarget.y - origin.y) * t,
       };
+      const next = this.separateBat(bat, wanted);
       const cell = cellAtPoint(next);
       if (cell) {
         bat.x = next.x;
@@ -785,6 +798,31 @@ export class TacticsGame {
       bat.diveTarget = undefined;
       bat.nextAttackAt = now + BAT_ATTACK_INTERVAL_MS;
     }
+  }
+
+  /** Resolve flying enemies apart before committing any bat movement. */
+  private separateBat(bat: Hound, wanted: Point): Point {
+    let point = wanted;
+    for (const other of this.enemies) {
+      if (other.id === bat.id || other.kind !== "bat" || other.health <= 0) continue;
+      const at = this.at(other);
+      let dx = point.x - at.x;
+      let dy = point.y - at.y;
+      let gap = Math.hypot(dx, dy);
+      if (gap >= BAT_SEPARATION) continue;
+      if (gap < 0.001) {
+        const phase = bat.orbitAngle ?? bat.patrolAngle ?? 0;
+        dx = Math.cos(phase);
+        dy = Math.sin(phase);
+        gap = 1;
+      }
+      const separated = {
+        x: at.x + (dx / gap) * BAT_SEPARATION,
+        y: at.y + (dy / gap) * BAT_SEPARATION,
+      };
+      if (this.onFloor(separated)) point = separated;
+    }
+    return point;
   }
 
   private batAltitude(bat: Hound): number {
@@ -896,9 +934,7 @@ export class TacticsGame {
 
   /** Which region a cell belongs to, falling back to the board. */
   private regionOfCell(cell: Cell): Region {
-    if (inRegion(HALL_REGION, cell)) return HALL_REGION;
-    if (inRegion(FAR_REGION, cell)) return FAR_REGION;
-    return BOARD_REGION;
+    return REGIONS.find((region) => inRegion(region, cell)) ?? BOARD_REGION;
   }
 
   /**
@@ -912,19 +948,32 @@ export class TacticsGame {
     const enemyRegion = this.regionOfCell(enemy.cell);
     const playerRegion = this.regionOfCell(this.player.cell);
 
-    if (enemyRegion === BOARD_REGION) {
-      if (distance(from, BOARD_DOORWAY) > TILE_PX) return BOARD_DOORWAY;
-      return HALL_NORTH;
+    const fromIndex = REGIONS.indexOf(enemyRegion);
+    const toIndex = REGIONS.indexOf(playerRegion);
+    if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return null;
+    const direction = toIndex > fromIndex ? 1 : -1;
+    const next = REGIONS[fromIndex + direction]!;
+    let exitCell: Cell;
+    let entryCell: Cell;
+    if (next.col >= enemyRegion.col + enemyRegion.cols) {
+      const row = Math.floor((Math.max(enemyRegion.row, next.row) + Math.min(enemyRegion.row + enemyRegion.rows, next.row + next.rows) - 1) / 2);
+      exitCell = { col: enemyRegion.col + enemyRegion.cols - 1, row };
+      entryCell = { col: next.col, row };
+    } else if (enemyRegion.col >= next.col + next.cols) {
+      const row = Math.floor((Math.max(enemyRegion.row, next.row) + Math.min(enemyRegion.row + enemyRegion.rows, next.row + next.rows) - 1) / 2);
+      exitCell = { col: enemyRegion.col, row };
+      entryCell = { col: next.col + next.cols - 1, row };
+    } else if (next.row >= enemyRegion.row + enemyRegion.rows) {
+      const col = Math.floor((Math.max(enemyRegion.col, next.col) + Math.min(enemyRegion.col + enemyRegion.cols, next.col + next.cols) - 1) / 2);
+      exitCell = { col, row: enemyRegion.row + enemyRegion.rows - 1 };
+      entryCell = { col, row: next.row };
+    } else {
+      const col = Math.floor((Math.max(enemyRegion.col, next.col) + Math.min(enemyRegion.col + enemyRegion.cols, next.col + next.cols) - 1) / 2);
+      exitCell = { col, row: enemyRegion.row };
+      entryCell = { col, row: next.row + next.rows - 1 };
     }
-
-    if (enemyRegion === FAR_REGION) {
-      if (distance(from, FAR_DOORWAY) > TILE_PX) return FAR_DOORWAY;
-      return HALL_SOUTH;
-    }
-
-    // In the hall: head toward whichever end leads to the player.
-    if (playerRegion === BOARD_REGION) return BOARD_DOORWAY;
-    return FAR_DOORWAY;
+    const exit = cellCenter(exitCell);
+    return distance(from, exit) > TILE_PX ? exit : cellCenter(entryCell);
   }
 
   /**
@@ -1481,7 +1530,7 @@ export class TacticsGame {
       const dx = enemy.x - this.player.x;
       const dy = enemy.y - this.player.y;
       const gap = Math.hypot(dx, dy);
-      if (enemy.kind === "bat" && !this.batBodyContact(enemy)) continue;
+      if (enemy.kind === "bat" && !this.batBodyContact(enemy) && !this.playerHeadContact(enemy)) continue;
       if (!this.batAttackWindow(enemy)) continue;
       if (this.enemyInPlayerAttackCone(enemy) && gap < nearestGap) {
         nearest = enemy;
@@ -1496,8 +1545,8 @@ export class TacticsGame {
     let nearestGap = Infinity;
     for (const enemy of this.enemies) {
       const gap = distance(this.playerAt(), this.at(enemy));
-      if (enemy.kind === "bat" && !this.batBodyContact(enemy)) continue;
-      if (!this.batAttackWindow(enemy) || !this.enemyInPlayerAttackCone(enemy)) continue;
+      if (enemy.kind === "bat" && !this.batBodyContact(enemy) && !this.playerHeadContact(enemy)) continue;
+      if (!this.batAttackWindow(enemy) || (!this.enemyInPlayerAttackCone(enemy) && !this.playerHeadContact(enemy))) continue;
       const reach = MELEE_RANGE + (enemy.kind === "hellhound" ? HOUND_HITBOX_BONUS : 0);
       if (gap <= reach && gap < nearestGap) {
         nearest = enemy;
@@ -1517,7 +1566,34 @@ export class TacticsGame {
 
   private playerCanReach(enemy: Hound): boolean {
     const reach = MELEE_RANGE + (enemy.kind === "hellhound" ? HOUND_HITBOX_BONUS : 0);
-    return distance(this.playerAt(), this.at(enemy)) <= reach;
+    return distance(this.playerAt(), this.at(enemy)) <= reach || this.playerHeadContact(enemy);
+  }
+
+  /**
+   * Physical overlap at the muzzle wins over centre-point arithmetic. This is
+   * deliberately evaluated only when an attack is committed: it makes a head
+   * visibly passing through an enemy count without widening ordinary reach.
+   */
+  private playerHeadContact(enemy: Hound): boolean {
+    const headingLength = Math.max(0.001, Math.hypot(this.playerHeading.x, this.playerHeading.y));
+    const head = {
+      x: this.player.x + (this.playerHeading.x / headingLength) * PLAYER_HEAD_FORWARD,
+      y: this.player.y + (this.playerHeading.y / headingLength) * PLAYER_HEAD_FORWARD,
+    };
+    if (enemy.kind === "hellhound") {
+      return distance(head, this.at(enemy)) <= ENEMY_RADIUS + PLAYER_HEAD_RADIUS;
+    }
+    const enemyHeadingLength = Math.max(0.001, Math.hypot(enemy.heading.x, enemy.heading.y));
+    const hx = enemy.heading.x / enemyHeadingLength;
+    const hy = enemy.heading.y / enemyHeadingLength;
+    const dx = head.x - enemy.x;
+    const dy = head.y - enemy.y;
+    const along = dx * hx + dy * hy;
+    const across = dx * -hy + dy * hx;
+    const halfLength = BAT_BODY_HALF_LENGTH + PLAYER_HEAD_RADIUS;
+    const halfWidth = BAT_BODY_HALF_WIDTH + PLAYER_HEAD_RADIUS;
+    return (along * along) / (halfLength * halfLength)
+      + (across * across) / (halfWidth * halfWidth) <= 1;
   }
 
   private enemyInPlayerDirectAttackCone(enemy: Hound): boolean {

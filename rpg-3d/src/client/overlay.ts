@@ -110,6 +110,8 @@ export interface OverlayParams {
   showActionBar?: boolean;
   /** Allow front ends to suppress ambient edge labels without replacing the HUD. */
   showRoomLabel?: boolean;
+  /** Allow front ends to suppress player/enemy cursor-hover names. */
+  showHoverNames?: boolean;
   showGameClock?: boolean;
   /** Draw only health and mana in the corner, without portrait or labels. */
   compactPlayerHud?: boolean;
@@ -147,7 +149,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, params: OverlayParams
   ctx.setLineDash([]);
 
   if (params.showRoomLabel !== false) drawRoomLabel(ctx, snap);
-  drawWorldLabels(ctx, snap, groundCursor, toScreen, params.enemyHealthBars);
+  drawWorldLabels(ctx, snap, groundCursor, toScreen, params.enemyHealthBars, params.showHoverNames !== false);
   drawDamageNumbers(ctx, snap, toScreen);
 
   const hudStats = { name: snap.player.name, color: snap.player.color, ...snap.stats, dead: snap.dead };
@@ -243,6 +245,7 @@ function drawWorldLabels(
   groundCursor: Point | null,
   toScreen: ToScreen,
   healthBars?: OverlayParams["enemyHealthBars"],
+  showHoverNames = true,
 ): void {
   const near = (x: number, y: number) =>
     !!groundCursor && Math.hypot(groundCursor.x - x, groundCursor.y - y) <= NAME_REVEAL_DISTANCE;
@@ -290,7 +293,7 @@ function drawWorldLabels(
       );
     }
 
-    if (near(enemy.x, enemy.y)) {
+    if (showHoverNames && near(enemy.x, enemy.y)) {
       const at = toScreen(enemy.x, enemy.y, enemy.kind === "bat" ? (enemy.altitude ?? 4.2) + 1.65 : 1.9);
       ctx.font = NAME_FONT;
       ctx.fillStyle = "#ffffff";
@@ -298,7 +301,7 @@ function drawWorldLabels(
     }
   }
 
-  if (near(snap.player.x, snap.player.y)) {
+  if (showHoverNames && near(snap.player.x, snap.player.y)) {
     const at = toScreen(snap.player.x, snap.player.y, 2.25);
     ctx.font = NAME_FONT;
     ctx.fillStyle = "#ffffff";

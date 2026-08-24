@@ -128,18 +128,14 @@ export function drawHud(ctx: CanvasRenderingContext2D, origin: Point, stats: Hud
   ctx.fillText(label, origin.x, origin.y + PORTRAIT_SIZE + NAME_GAP);
 }
 
-/** Compact corner status: health and mana only, with no portrait or text. */
+/** Compact corner status: health only, with no portrait, mana, or name. */
 export function drawBarsOnlyHud(ctx: CanvasRenderingContext2D, origin: Point, stats: HudStats) {
   const width = 230;
-  const height = 48;
   const barHeight = 18;
-  const gap = 8;
   ctx.setLineDash([]);
-  drawPanelBacking(ctx, origin, width, height);
+  drawPanelBacking(ctx, origin, width, barHeight);
   drawBar(ctx, { x: origin.x, y: origin.y, width, height: barHeight },
     stats.health, stats.maxHealth, "#c0392b", true);
-  drawBar(ctx, { x: origin.x, y: origin.y + barHeight + gap, width, height: barHeight },
-    stats.mana, stats.maxMana, "#2a6fd6", true);
 }
 
 // ----------------------------------------------------------- enemy portrait

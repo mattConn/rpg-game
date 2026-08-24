@@ -16,7 +16,7 @@ import fastifyStatic from "@fastify/static";
 import { WebSocketServer } from "ws";
 
 import { TacticsGame } from "./game.js";
-import type { TacticsInput } from "../shared/tactics.js";
+import { configureDungeon, type TacticsInput } from "../shared/tactics.js";
 
 /** Its own port, so 3000 (2D) and 3200 (3D) can keep running alongside it. */
 const PORT = Number(process.env.PORT ?? 3300);
@@ -40,7 +40,8 @@ await fastify.register(fastifyStatic, {
   decorateReply: false,
 });
 
-const game = new TacticsGame();
+let game: TacticsGame | null = null;
+let activeSeed: number | null = null;
 
 // Use noServer mode so Fastify doesn't intercept the upgrade request.
 const wss = new WebSocketServer({ noServer: true });
@@ -51,7 +52,16 @@ fastify.server.on("upgrade", (request, socket, head) => {
   });
 });
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, request) => {
+  const rawSeed = new URL(request.url ?? "/", "http://localhost").searchParams.get("seed");
+  const seed = Number(rawSeed);
+  const validSeed = Number.isSafeInteger(seed) && seed >= 1 && seed <= 0xffffffff ? seed : 1;
+  if (!game || activeSeed !== validSeed) {
+    configureDungeon(validSeed);
+    game = new TacticsGame();
+    activeSeed = validSeed;
+    fastify.log.info({ seed: validSeed }, "generated dungeon");
+  }
   fastify.log.info("client connected");
 
   // Send the latest snapshot immediately so the client doesn't start blank.
@@ -59,7 +69,7 @@ wss.on("connection", (ws) => {
 
   ws.on("message", (data) => {
     try {
-      game.handleInput(JSON.parse(String(data)) as TacticsInput);
+      game?.handleInput(JSON.parse(String(data)) as TacticsInput);
     } catch {
       // Ignore malformed messages.
     }
@@ -71,6 +81,7 @@ wss.on("connection", (ws) => {
 });
 
 setInterval(() => {
+  if (!game) return;
   const now = Date.now();
   game.tick(now);
 

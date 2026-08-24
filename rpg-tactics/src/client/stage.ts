@@ -30,10 +30,13 @@ import {
   BAT_REGION,
   CHAMBER_MARGIN_PX,
   DOORWAY_WIDTH_PX,
+  DUNGEON_CONNECTIONS,
   type DoorId,
   type DoorStates,
   FAR_REGION,
   HALL_REGION,
+  HALL_REGIONS,
+  ROOM_REGIONS,
   SQUARE_PX,
   TILE_PX,
   WALL_THICKNESS_PX,
@@ -461,17 +464,19 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   // in from outside sees a dungeon continuing into the dark rather than a hole.
   // It has to cover both rooms and the hall between them, so it is sized from
   // the whole complex rather than from the board.
-  const westmost = Math.min(BOARD_CX - START_CHAMBER_W / 2, FAR_CX - FAR_CHAMBER_W / 2, BAT_CX - FAR_CHAMBER_W / 2);
-  const eastmost = Math.max(BOARD_CX + START_CHAMBER_W / 2, FAR_CX + FAR_CHAMBER_W / 2, BAT_CX + FAR_CHAMBER_W / 2);
-  const apronW = (eastmost - westmost) * 3;
-  const apronD = (BAT_CZ - BOARD_CZ) + START_CHAMBER_D + FAR_CHAMBER_D;
+  const westmost = Math.min(...ROOM_REGIONS.map((region) => toX(ARENA_X + region.col * TILE_PX) - MARGIN));
+  const eastmost = Math.max(...ROOM_REGIONS.map((region) => toX(ARENA_X + (region.col + region.cols) * TILE_PX) + MARGIN));
+  const northmost = Math.min(...ROOM_REGIONS.map((region) => toZ(ARENA_Y + region.row * TILE_PX) - MARGIN));
+  const southmost = Math.max(...ROOM_REGIONS.map((region) => toZ(ARENA_Y + (region.row + region.rows) * TILE_PX) + MARGIN));
+  const apronW = (eastmost - westmost) * 1.6;
+  const apronD = (southmost - northmost) * 1.6;
   const apronTex = floorTexture.clone();
   apronTex.repeat.set(apronW / TEXTURE_SCALE, apronD / TEXTURE_SCALE);
   const apron = new THREE.Mesh(
     new THREE.PlaneGeometry(apronW, apronD).rotateX(-Math.PI / 2),
     new THREE.MeshLambertMaterial({ map: apronTex, color: 0x606068, flatShading: true }),
   );
-  apron.position.set((westmost + eastmost) / 2, -0.06, (BOARD_CZ + BAT_CZ) / 2);
+  apron.position.set((westmost + eastmost) / 2, -0.06, (northmost + southmost) / 2);
   scene.add(apron);
 
   // -------------------------------------------------------------------- walls
@@ -502,17 +507,29 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     `,
   });
   const wallOccluders: THREE.Mesh[] = [];
-  const addWall = (w: number, d: number, x: number, z: number, height = WALL_H) => {
+  const addWall = (
+    w: number,
+    d: number,
+    x: number,
+    z: number,
+    height = WALL_H,
+    centreY = height / 2,
+    addUpperFog = true,
+  ) => {
     const tex = wallTexture.clone();
     tex.repeat.set(Math.max(w, d) / TEXTURE_SCALE, height / TEXTURE_SCALE);
     const mat = new THREE.MeshLambertMaterial({ map: tex, flatShading: true });
     const wall = new THREE.Mesh(new THREE.BoxGeometry(w, height, d), mat);
-    wall.position.set(x, height / 2, z);
+    wall.position.set(x, centreY, z);
     wall.castShadow = true;
     wall.receiveShadow = true;
     scene.add(wall);
     wall.updateMatrixWorld();
     wallOccluders.push(wall);
+    // Door jambs and lintels are much shorter than a full wall. Extending the
+    // wall-top fog down from those meshes creates a large black plane across
+    // the opening, so only full-height masonry receives this treatment.
+    if (!addUpperFog) return;
     // Vertical planes only: a closed box creates its own visible top lip. Two
     // faces cover either side of each wall while leaving no horizontal edge.
     const fogY = height - UPPER_WALL_FOG_HEIGHT / 2 + UPPER_WALL_FOG_OVERHANG;
@@ -601,7 +618,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     cz: number,
     width: number,
     depth: number,
-    doorway: "north" | "south" | "both",
+    openings: ReadonlySet<"north" | "east" | "south" | "west">,
   ) => {
     const floor = stoneFloor(width, depth);
     floor.position.set(cx, 0, cz);
@@ -612,31 +629,48 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     const north = cz - depth / 2;
     const south = cz + depth / 2;
 
-    addWall(WALL_T, depth + WALL_T * 2, west - WALL_T / 2, cz);
-    addWall(WALL_T, depth + WALL_T * 2, east + WALL_T / 2, cz);
-
-    // The pierced wall is the one the hallway leaves by; the other is solid.
     const northZ = north - WALL_T / 2;
     const southZ = south + WALL_T / 2;
-    if (doorway === "south") {
-      addWall(width + WALL_T * 2, WALL_T, cx, northZ);
-      addPiercedWall(southZ, west, east);
-      addDoorFrame(southZ);
-    } else if (doorway === "north") {
-      addPiercedWall(northZ, west, east);
-      addDoorFrame(northZ);
-      addWall(width + WALL_T * 2, WALL_T, cx, southZ);
-    } else {
-      addPiercedWall(northZ, west, east);
-      addDoorFrame(northZ);
-      addPiercedWall(southZ, west, east);
-      addDoorFrame(southZ);
-    }
+    const horizontalWall = (z: number, open: boolean) => {
+      if (!open) { addWall(width + WALL_T * 2, WALL_T, cx, z); return; }
+      const span = (width - DOOR_W) / 2 + WALL_T;
+      addWall(span, WALL_T, west - WALL_T + span / 2, z);
+      addWall(span, WALL_T, east + WALL_T - span / 2, z);
+      for (const x of [cx - DOOR_W / 2 + .17, cx + DOOR_W / 2 - .17])
+        addWall(.34, WALL_T + .3, x, z, WALL_H + .5, (WALL_H + .5) / 2, false);
+      addWall(DOOR_W + .5, WALL_T + .4, cx, z, .4, WALL_H + .3, false);
+    };
+    const verticalWall = (x: number, open: boolean) => {
+      if (!open) { addWall(WALL_T, depth + WALL_T * 2, x, cz); return; }
+      const span = (depth - DOOR_W) / 2 + WALL_T;
+      addWall(WALL_T, span, x, north - WALL_T + span / 2);
+      addWall(WALL_T, span, x, south + WALL_T - span / 2);
+      for (const z of [cz - DOOR_W / 2 + .17, cz + DOOR_W / 2 - .17])
+        addWall(WALL_T + .3, .34, x, z, WALL_H + .5, (WALL_H + .5) / 2, false);
+      addWall(WALL_T + .4, DOOR_W + .5, x, cz, .4, WALL_H + .3, false);
+    };
+    horizontalWall(northZ, openings.has("north"));
+    horizontalWall(southZ, openings.has("south"));
+    verticalWall(west - WALL_T / 2, openings.has("west"));
+    verticalWall(east + WALL_T / 2, openings.has("east"));
   };
 
-  buildChamber(BOARD_CX, BOARD_CZ, START_CHAMBER_W, START_CHAMBER_D, "south");
-  buildChamber(FAR_CX, FAR_CZ, FAR_CHAMBER_W, FAR_CHAMBER_D, "both");
-  buildChamber(BAT_CX, BAT_CZ, FAR_CHAMBER_W, FAR_CHAMBER_D, "north");
+  ROOM_REGIONS.forEach((region, index) => {
+    const centre = regionCentre(region);
+    const openings = new Set<"north" | "east" | "south" | "west">();
+    for (const connection of DUNGEON_CONNECTIONS) {
+      if (connection.from === index) openings.add(connection.side);
+      if (connection.to === index) openings.add(
+        connection.side === "north" ? "south" : connection.side === "south" ? "north" : connection.side === "east" ? "west" : "east",
+      );
+    }
+    buildChamber(
+      toX(centre.x), toZ(centre.y),
+      toX(region.cols * TILE_PX) + MARGIN * 2,
+      toZ(region.rows * TILE_PX) + MARGIN * 2,
+      openings,
+    );
+  });
 
   // --------------------------------------------------------------- doors
 
@@ -651,23 +685,24 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   // Between the two doorways: floor and two long walls a passage-width apart.
   // Nothing else — it is a distance to be crossed, and the room at the end of it
   // should be the thing you look at.
-  const hallZ0 = BOARD_CZ + START_CHAMBER_D / 2 + WALL_T;
-  const hallCZ = hallZ0 + HALL_LEN / 2;
-
-  const hallFloor = stoneFloor(HALL_W + WALL_T * 2, HALL_LEN);
-  hallFloor.position.set(ARCH_CENTRE, 0, hallCZ);
-  scene.add(hallFloor);
-
-  addWall(WALL_T, HALL_LEN, hallLeft - WALL_T / 2, hallCZ);
-  addWall(WALL_T, HALL_LEN, hallRight + WALL_T / 2, hallCZ);
-
-  const batHallNorth = FAR_CZ + FAR_CHAMBER_D / 2 + WALL_T;
-  const batHallCZ = batHallNorth + BAT_HALL_LEN / 2;
-  const batHallFloor = stoneFloor(HALL_W + WALL_T * 2, BAT_HALL_LEN);
-  batHallFloor.position.set(ARCH_CENTRE, 0, batHallCZ);
-  scene.add(batHallFloor);
-  addWall(WALL_T, BAT_HALL_LEN, hallLeft - WALL_T / 2, batHallCZ);
-  addWall(WALL_T, BAT_HALL_LEN, hallRight + WALL_T / 2, batHallCZ);
+  HALL_REGIONS.forEach((region) => {
+    const centre = regionCentre(region);
+    const cx = toX(centre.x);
+    const cz = toZ(centre.y);
+    const width = toX(region.cols * TILE_PX);
+    const depth = toZ(region.rows * TILE_PX);
+    if (region.rows > region.cols) {
+      const length = depth - MARGIN * 2 - WALL_T * 2;
+      const floor = stoneFloor(width + WALL_T * 2, length); floor.position.set(cx, 0, cz); scene.add(floor);
+      addWall(WALL_T, length, cx - width / 2 - WALL_T / 2, cz);
+      addWall(WALL_T, length, cx + width / 2 + WALL_T / 2, cz);
+    } else {
+      const length = width - MARGIN * 2 - WALL_T * 2;
+      const floor = stoneFloor(length, depth + WALL_T * 2); floor.position.set(cx, 0, cz); scene.add(floor);
+      addWall(length, WALL_T, cx, cz - depth / 2 - WALL_T / 2);
+      addWall(length, WALL_T, cx, cz + depth / 2 + WALL_T / 2);
+    }
+  });
 
   // --------------------------------------------------------------- the arch
 
@@ -679,9 +714,17 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   // ends", and the warm plane hanging in the opening was the light of somewhere
   // else. The old glowing curtain is still gone: the wooden slab now makes the
   // opening's state visible without pretending light itself is a barrier.
-  const southZ = BOARD_CZ + START_CHAMBER_D / 2 + WALL_T / 2;
-  const torchX = archLeft - 0.75;
-  const torchZ = southZ - WALL_T * 0.72;
+  const firstSide = DUNGEON_CONNECTIONS[0]!.side;
+  const torchX = firstSide === "west"
+    ? BOARD_CX - START_CHAMBER_W / 2 + WALL_T * .22
+    : firstSide === "east"
+      ? BOARD_CX + START_CHAMBER_W / 2 - WALL_T * .22
+      : BOARD_CX - DOOR_W / 2 - .75;
+  const torchZ = firstSide === "north"
+    ? BOARD_CZ - START_CHAMBER_D / 2 + WALL_T * .22
+    : firstSide === "south"
+      ? BOARD_CZ + START_CHAMBER_D / 2 - WALL_T * .22
+      : BOARD_CZ - DOOR_W / 2 - .75;
 
   const bracket = new THREE.Mesh(
     new THREE.CylinderGeometry(0.045, 0.055, 0.42, 7),

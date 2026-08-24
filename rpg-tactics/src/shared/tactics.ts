@@ -108,50 +108,155 @@ export interface Region {
   row: number;
   cols: number;
   rows: number;
+  size?: RoomSize;
 }
 
+export type RoomSize = "small" | "medium" | "large" | "jumbo";
+const ROOM_CELLS: Record<RoomSize, number> = {
+  small: 20,
+  medium: 30,
+  large: 40,
+  jumbo: 50,
+};
+
 /** The arena itself: the fight starts here and usually ends here. */
-export const BOARD_REGION: Region = { col: 0, row: 0, cols: GRID_COLS, rows: GRID_ROWS };
-
-/**
- * The corridor runs south from the arena's two southeastern bays. It is two
- * original squares wide and twice its former length.
- */
-export const HALL_ROWS = 40;
-export const HALL_REGION: Region = {
-  col: (SQUARES - 2) * SUBDIVISION,
-  row: GRID_ROWS,
-  cols: SUBDIVISION * 2,
-  rows: HALL_ROWS,
+export const BOARD_REGION: Region = {
+  col: 0, row: 0, cols: GRID_COLS, rows: GRID_ROWS, size: "medium",
 };
 
-/** The room at the end of it, the same size as the arena and empty. */
-export const FAR_REGION: Region = {
-  // This currently resolves to zero because both chambers share a width; keep
-  // it derived so their eastern edges stay aligned if either size changes.
-  col: GRID_COLS - FAR_GRID_COLS,
-  row: GRID_ROWS + HALL_ROWS,
-  cols: FAR_GRID_COLS,
-  rows: FAR_GRID_ROWS,
+/** Reproducible procedural dungeon shared verbatim by simulation and renderer. */
+export let DUNGEON_SEED = 0x574f4c46;
+const ROOM_COUNT = 6;
+const HALL_COLS = SUBDIVISION * 2;
+const seededRandom = (seed: number) => {
+  let state = seed >>> 0 || 1;
+  return () => {
+    state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+    return (state >>> 0) / 0x100000000;
+  };
 };
 
-/** A shorter passage continues south from the second chamber. */
-export const BAT_HALL_REGION: Region = {
-  col: HALL_REGION.col,
-  row: FAR_REGION.row + FAR_REGION.rows,
-  cols: HALL_REGION.cols,
-  rows: 22,
+export type ConnectionSide = "north" | "east" | "south" | "west";
+export interface DungeonConnection { from: number; to: number; side: ConnectionSide; hall: Region }
+
+const generateDungeon = (seed: number) => {
+  const dungeonRandom = seededRandom(seed);
+  const rooms: Region[] = [BOARD_REGION];
+  const connections: DungeonConnection[] = [];
+  const directions: readonly ConnectionSide[] = ["north", "east", "south", "west"];
+  // Six rooms are enough to guarantee visible variety without making any
+  // particular size correspond to a fixed location in the dungeon.
+  const remainingSizes: RoomSize[] = ["small", "medium", "medium", "large", "jumbo"];
+  for (let i = remainingSizes.length - 1; i > 0; i--) {
+    const j = Math.floor(dungeonRandom() * (i + 1));
+    [remainingSizes[i], remainingSizes[j]] = [remainingSizes[j]!, remainingSizes[i]!];
+  }
+  const overlaps = (a: Region, b: Region, padding = 2) =>
+    a.col < b.col + b.cols + padding && a.col + a.cols + padding > b.col &&
+    a.row < b.row + b.rows + padding && a.row + a.rows + padding > b.row;
+
+  for (let index = 1; index < ROOM_COUNT; index++) {
+    const current = rooms[index - 1]!;
+    const size = remainingSizes[index - 1]!;
+    const roomCells = ROOM_CELLS[size];
+    const corridorLength = [22, 28, 34, 40][Math.floor(dungeonRandom() * 4)]!;
+    const start = Math.floor(dungeonRandom() * directions.length);
+    let placed = false;
+    for (let attempt = 0; attempt < directions.length; attempt++) {
+      const side = directions[(start + attempt) % directions.length]!;
+      let room: Region;
+      let hall: Region;
+      if (side === "south") {
+        room = { col: current.col + (current.cols - roomCells) / 2, row: current.row + current.rows + corridorLength, cols: roomCells, rows: roomCells, size };
+        hall = { col: current.col + (current.cols - HALL_COLS) / 2, row: current.row + current.rows, cols: HALL_COLS, rows: corridorLength };
+      } else if (side === "north") {
+        room = { col: current.col + (current.cols - roomCells) / 2, row: current.row - corridorLength - roomCells, cols: roomCells, rows: roomCells, size };
+        hall = { col: current.col + (current.cols - HALL_COLS) / 2, row: current.row - corridorLength, cols: HALL_COLS, rows: corridorLength };
+      } else if (side === "east") {
+        room = { col: current.col + current.cols + corridorLength, row: current.row + (current.rows - roomCells) / 2, cols: roomCells, rows: roomCells, size };
+        hall = { col: current.col + current.cols, row: current.row + (current.rows - HALL_COLS) / 2, cols: corridorLength, rows: HALL_COLS };
+      } else {
+        room = { col: current.col - corridorLength - roomCells, row: current.row + (current.rows - roomCells) / 2, cols: roomCells, rows: roomCells, size };
+        hall = { col: current.col - corridorLength, row: current.row + (current.rows - HALL_COLS) / 2, cols: corridorLength, rows: HALL_COLS };
+      }
+      if (rooms.slice(0, -1).some((existing) => overlaps(room, existing)) ||
+          connections.some((existing) => overlaps(room, existing.hall))) continue;
+      rooms.push(room); connections.push({ from: index - 1, to: index, side, hall });
+      placed = true;
+      break;
+    }
+    if (!placed) {
+      const room: Region = { col: current.col + current.cols + corridorLength, row: current.row + (current.rows - roomCells) / 2, cols: roomCells, rows: roomCells, size };
+      const hall = { col: current.col + current.cols, row: current.row + (current.rows - HALL_COLS) / 2, cols: corridorLength, rows: HALL_COLS };
+      rooms.push(room); connections.push({ from: index - 1, to: index, side: "east", hall });
+    }
+  }
+  return { rooms, connections };
 };
 
-/** Third chamber housing the flying bat. */
-export const BAT_REGION: Region = {
-  col: FAR_REGION.col,
-  row: BAT_HALL_REGION.row + BAT_HALL_REGION.rows,
-  cols: FAR_GRID_COLS,
-  rows: FAR_GRID_ROWS,
+let GENERATED_DUNGEON = generateDungeon(DUNGEON_SEED);
+export let ROOM_REGIONS: readonly Region[] = GENERATED_DUNGEON.rooms;
+export let DUNGEON_CONNECTIONS: readonly DungeonConnection[] = GENERATED_DUNGEON.connections;
+export let HALL_REGIONS: readonly Region[] = DUNGEON_CONNECTIONS.map((connection) => connection.hall);
+
+// Compatibility names retained for the existing camera and door API.
+export let FAR_REGION = ROOM_REGIONS[1]!;
+export let BAT_REGION = ROOM_REGIONS.at(-1)!;
+export let HALL_REGION = HALL_REGIONS[0]!;
+export let BAT_HALL_REGION = HALL_REGIONS[1]!;
+export let HALL_ROWS = HALL_REGION.rows;
+export let REGIONS: readonly Region[] = ROOM_REGIONS.flatMap((room, index) =>
+  index < HALL_REGIONS.length ? [room, HALL_REGIONS[index]!] : [room]);
+
+export interface DungeonEnemySpawn { kind: "hellhound" | "bat"; cell: Cell; roomIndex: number }
+/** One to four enemies per room, with the first pair always sharing a kind. */
+const generateEnemies = (seed: number, rooms: readonly Region[]): readonly DungeonEnemySpawn[] => {
+  const enemyRandom = seededRandom(seed ^ 0x9e3779b9);
+  const result: DungeonEnemySpawn[] = [];
+  const spots = [[0.7, 0.7], [0.3, 0.7], [0.7, 0.3], [0.3, 0.3]] as const;
+  rooms.forEach((room, roomIndex) => {
+    const size = room.size ?? "medium";
+    const count = roomIndex === 0 ? 1
+      : size === "small" ? Math.floor(enemyRandom() * 2)
+        : size === "medium" ? 1 + Math.floor(enemyRandom() * 3)
+          : size === "large" ? 1 + Math.floor(enemyRandom() * 4)
+            : 4;
+    const primary: DungeonEnemySpawn["kind"] = roomIndex % 3 === 1 ? "bat" : "hellhound";
+    const secondPairKind: DungeonEnemySpawn["kind"] = enemyRandom() < 0.65
+      ? primary : primary === "bat" ? "hellhound" : "bat";
+    for (let index = 0; index < count; index++) {
+      const kind = index < 2 ? primary : secondPairKind;
+      const [across, down] = spots[index]!;
+      result.push({
+        kind, roomIndex,
+        cell: {
+          col: room.col + Math.floor(room.cols * across),
+          row: room.row + Math.floor(room.rows * down),
+        },
+      });
+    }
+  });
+  return result;
 };
 
-export const REGIONS: readonly Region[] = [BOARD_REGION, HALL_REGION, FAR_REGION, BAT_HALL_REGION, BAT_REGION];
+export let DUNGEON_ENEMIES: readonly DungeonEnemySpawn[] = generateEnemies(DUNGEON_SEED, ROOM_REGIONS);
+
+/** Rebuild every derived layout value before constructing the stage/game. */
+export function configureDungeon(seed: number): void {
+  DUNGEON_SEED = seed >>> 0 || 1;
+  GENERATED_DUNGEON = generateDungeon(DUNGEON_SEED);
+  ROOM_REGIONS = GENERATED_DUNGEON.rooms;
+  DUNGEON_CONNECTIONS = GENERATED_DUNGEON.connections;
+  HALL_REGIONS = DUNGEON_CONNECTIONS.map((connection) => connection.hall);
+  FAR_REGION = ROOM_REGIONS[1]!;
+  BAT_REGION = ROOM_REGIONS.at(-1)!;
+  HALL_REGION = HALL_REGIONS[0]!;
+  BAT_HALL_REGION = HALL_REGIONS[1]!;
+  HALL_ROWS = HALL_REGION.rows;
+  REGIONS = ROOM_REGIONS.flatMap((room, index) =>
+    index < HALL_REGIONS.length ? [room, HALL_REGIONS[index]!] : [room]);
+  DUNGEON_ENEMIES = generateEnemies(DUNGEON_SEED, ROOM_REGIONS);
+}
 
 export type DoorId = "arena" | "far";
 export type DoorStates = Record<DoorId, boolean>;
