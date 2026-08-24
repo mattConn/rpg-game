@@ -31,6 +31,7 @@ import {
   AGGRO_WARN_RANGE,
   ARENA_ROOM,
   ARENA_X,
+  ARENA_Y,
   ATTACK_MS,
   AUTO_RESTART_DELAY_MS,
   BAT_REGION,
@@ -38,6 +39,7 @@ import {
   DOOR_CLEARANCE_PX,
   DOORWAY_WIDTH_PX,
   DOOR_Y,
+  DUNGEON_CONNECTIONS,
   DUNGEON_ENEMIES,
   type DoorId,
   FAR_REGION,
@@ -52,6 +54,7 @@ import {
   PLAYER_MAX_HEALTH,
   PLAYER_MAX_MANA,
   PLAYER_START,
+  PRESSURE_PLATES,
   ROOM_REGIONS,
   REGIONS,
   RANGED_DAMAGE,
@@ -91,7 +94,7 @@ const SWORD_SIDE_DAMAGE = 20;
 const MAX_CORPSES = 8;
 
 /** Player walking speed in room pixels per second. */
-const PLAYER_SPEED = 200;
+const PLAYER_SPEED = 150;
 const PLAYER_RUN_MULTIPLIER = 1.6;
 /** Enemy chase speed in room pixels per second. */
 const ENEMY_SPEED = 140;
@@ -171,7 +174,7 @@ const JUMP_SPEED_MULTIPLIER = 1.8;
 const BAT_PATROL_RADIUS = SQUARE_PX * 1.35;
 const BAT_PATROL_ANGULAR_SPEED = 0.72;
 const BAT_PURSUIT_SPEED = 92;
-const BAT_STRIKE_AT_MS = 300;
+const BAT_STRIKE_AT_MS = 600;
 const BAT_DIVE_LINGER_MS = 500;
 const BAT_DIVE_RECOVERY_MS = 500;
 const BAT_DIVE_MS = BAT_STRIKE_AT_MS + BAT_DIVE_LINGER_MS + BAT_DIVE_RECOVERY_MS;
@@ -187,6 +190,23 @@ const BAT_SEPARATION = SQUARE_PX * 2;
 const BAT_CRUISE_ALTITUDE = 4.2;
 const BAT_AGGRO_ALTITUDE = 2.25;
 const BAT_DIVE_ALTITUDE = 0.9;
+const SPIDER_SPEED = 68;
+/** Deliberately ponderous rotation so players can read and evade its facing. */
+const SPIDER_TURN_SPEED = 1.1;
+const SPIDER_CLIMB_SPEED = 1.25;
+const SPIDER_MAX_WALL_HEIGHT = 4.6;
+/** Spiders notice movement from across even the larger generated rooms. */
+const SPIDER_AGGRO_RANGE = AGGRO_RANGE * 4;
+const SPIDER_CONTACT_RANGE = MELEE_RANGE * 0.703125;
+/** Personal space the oversized spider maintains by retreating without turning. */
+const SPIDER_BACKUP_DISTANCE = SPIDER_CONTACT_RANGE * 0.7;
+const SPIDER_CONTACT_COOLDOWN_MS = 1500;
+const SPIDER_MOVE_DURATION_MS = 3000;
+const SPIDER_PAUSE_DURATION_MS = 2000;
+const ENEMY_MOVEMENT_START_DELAY_MS = 3000;
+const POISON_DAMAGE = 10;
+const POISON_INTERVAL_MS = 2000;
+const POISON_TICKS = 5;
 
 // Corridor waypoints for cross-region navigation.
 const HALL_MID_COL = HALL_REGION.col + Math.floor(HALL_REGION.cols / 2);
@@ -218,8 +238,10 @@ interface Actor {
   maxHealth: number;
 }
 
+type SpiderSurface = "floor" | "north" | "east" | "south" | "west";
+
 interface Hound extends Actor {
-  kind: "hellhound" | "bat";
+  kind: "hellhound" | "bat" | "spider";
   glyph: string;
   color: string;
   aggro: boolean;
@@ -235,6 +257,14 @@ interface Hound extends Actor {
   diveOrigin?: Point;
   diveTarget?: Point;
   orbitAngle?: number;
+  surface?: SpiderSurface;
+  altitude?: number;
+  wanderTarget?: Point;
+  wanderHeight?: number;
+  wallGoal?: Exclude<SpiderSurface, "floor">;
+  nextSpiderPauseAt?: number;
+  spiderPauseUntil?: number;
+  movementStartsAt: number;
   roomIndex: number;
 }
 
@@ -273,10 +303,13 @@ export class TacticsGame {
 
   private thrown!: Thrown | null;
   private damageNumbers!: DamageNumber[];
-  private tombstones!: Array<{ x: number; y: number; gameElapsedMs: number }>;
+  /** Death markers survive game resets for as long as this dungeon instance lives. */
+  private tombstones: Array<{ x: number; y: number; gameElapsedMs: number }> = [];
   private inspectingId!: string | null;
   /** Doorway state stays open so connected dungeon regions always render. */
   private doors!: Record<DoorId, boolean>;
+  private plateGateStates = new Map<string, boolean>();
+  private occupiedPressurePlates = new Set<string>();
 
   private strikes!: Array<{ enemyId: string; seq: number }>;
   private strikeSeq = 0;
@@ -303,6 +336,9 @@ export class TacticsGame {
   private eatingUntil = 0;
   private eatingCorpseId: string | null = null;
   private eatenCorpseIds = new Set<string>();
+  private poisoned = false;
+  private poisonTicksRemaining = 0;
+  private nextPoisonAt = 0;
   /** Click-to-move destination, cleared on arrival or when WASD overrides. */
   private moveTarget: Point | null = null;
 
@@ -351,10 +387,14 @@ export class TacticsGame {
       health: PLAYER_MAX_HEALTH,
       maxHealth: PLAYER_MAX_HEALTH,
     };
+    this.plateGateStates.clear();
+    for (const plate of PRESSURE_PLATES) this.plateGateStates.set(plate.id, false);
+    this.occupiedPressurePlates.clear();
 
     this.enemies = DUNGEON_ENEMIES.map((spawn, spawnIndex) => {
       const cell = spawn.cell;
       const center = cellCenter(cell);
+      const movementStartsAt = this.simNow + Math.random() * ENEMY_MOVEMENT_START_DELAY_MS;
       if (spawn.kind === "bat") {
         const roomBats = DUNGEON_ENEMIES.filter(
           (candidate) => candidate.roomIndex === spawn.roomIndex && candidate.kind === "bat",
@@ -376,6 +416,20 @@ export class TacticsGame {
           heading: { x: -Math.sin(orbitPhase), y: Math.cos(orbitPhase) },
           patrolAngle: orbitPhase, diveAt: null,
           diveHit: false, diveOrigin: undefined, diveTarget: undefined, orbitAngle: orbitPhase,
+          movementStartsAt,
+          roomIndex: spawn.roomIndex,
+        };
+      }
+      if (spawn.kind === "spider") {
+        return {
+          id: `spider-${this.nextEnemySeq++}`, kind: "spider" as const,
+          name: "Dungeon Spider", glyph: "S", color: "#29252a",
+          cell: { ...cell }, pos: center, ...center, facing: -1 as const,
+          health: 60, maxHealth: 60, aggro: false, nextAttackAt: 0,
+          patrolLeft: center.x, patrolRight: center.x, patrolDir: 1 as const,
+          heading: { x: 1, y: 0 }, surface: "floor" as const, altitude: 0,
+          nextSpiderPauseAt: movementStartsAt + SPIDER_MOVE_DURATION_MS,
+          movementStartsAt,
           roomIndex: spawn.roomIndex,
         };
       }
@@ -395,6 +449,7 @@ export class TacticsGame {
         patrolRight: center.x,
         patrolDir: -1,
         heading: { x: -1, y: 0 },
+        movementStartsAt,
         roomIndex: spawn.roomIndex,
       };
       // Same seating a hound gets when it gives up on you, so a beat is laid
@@ -409,7 +464,6 @@ export class TacticsGame {
     this.targetDoor = null;
     this.thrown = null;
     this.damageNumbers = [];
-    this.tombstones = [];
     this.inspectingId = null;
     this.doors = { arena: true, far: true };
     this.strikes = [];
@@ -422,6 +476,9 @@ export class TacticsGame {
     this.eatingUntil = 0;
     this.eatingCorpseId = null;
     this.eatenCorpseIds.clear();
+    this.poisoned = false;
+    this.poisonTicksRemaining = 0;
+    this.nextPoisonAt = 0;
     this.nextAttackAt = 0;
     this.waiting = false;
     this.deathAt = 0;
@@ -450,18 +507,25 @@ export class TacticsGame {
     }
 
     this.completeEating();
+    this.updatePoison();
 
     if (isOver(this.phase)) return;
 
     // Player movement — continuous, every tick.
     this.movePlayer(dt);
+    this.updatePressurePlates();
 
     // Enemy AI — woken hounds chase and attack, others patrol. The pack picks
     // its line abreast first, off one board, before any of it moves.
     this.assignFlanks();
     for (const enemy of this.enemies) {
+      if (this.simNow < enemy.movementStartsAt) continue;
       if (enemy.kind === "bat") {
         this.updateBat(enemy, dt, this.simNow);
+        continue;
+      }
+      if (enemy.kind === "spider") {
+        this.updateSpider(enemy, dt);
         continue;
       }
       if (enemy.aggro) {
@@ -529,6 +593,7 @@ export class TacticsGame {
     // procedural north/south corridors can cross those planes away from the
     // original doorway X and were therefore stopped by an invisible wall.
     const target = clampPointToFloor(raw);
+    if (this.gateBlocksMove(from, target)) return false;
     if (distance(from, target) < 0.01) return false;
 
     if (turnToTravel) {
@@ -633,7 +698,10 @@ export class TacticsGame {
    * of bookkeeping twice with the rule in neither.
    */
   private place(enemy: Hound, raw: Point): Point {
-    const wanted = clampPointToFloor(raw);
+    let wanted = clampPointToFloor(raw);
+    if (this.gateBlocksMove(this.at(enemy), wanted)) {
+      wanted = this.at(enemy);
+    }
     let target = wanted;
 
     if (this.crowds(enemy, wanted)) {
@@ -644,6 +712,14 @@ export class TacticsGame {
       // place the pack cannot go side by side, and queueing is what a tunnel
       // ought to force.
       target = this.onFloor(clear) ? clear : this.at(enemy);
+    }
+
+    // Separation is allowed to change the requested point substantially. It
+    // therefore needs the same final barrier check as the original movement;
+    // otherwise a packmate beside a portcullis can push this enemy through it
+    // after the first collision test has already passed.
+    if (this.gateBlocksMove(this.at(enemy), target)) {
+      target = this.at(enemy);
     }
 
     enemy.pos = { ...target };
@@ -752,6 +828,10 @@ export class TacticsGame {
         }
       }
       if (now < bat.nextAttackAt || gap > BAT_DIVE_TRIGGER_RANGE) return;
+      if (this.gateBlocksMove(this.at(bat), player)) {
+        bat.nextAttackAt = now + BAT_ATTACK_INTERVAL_MS;
+        return;
+      }
       bat.diveAt = now;
       bat.diveHit = false;
       bat.diveOrigin = { x: bat.x, y: bat.y };
@@ -772,6 +852,14 @@ export class TacticsGame {
         x: origin.x + (diveTarget.x - origin.x) * t,
         y: origin.y + (diveTarget.y - origin.y) * t,
       };
+      if (this.gateBlocksMove(this.at(bat), wanted)) {
+        bat.diveAt = null;
+        bat.diveOrigin = undefined;
+        bat.diveTarget = undefined;
+        bat.diveHit = false;
+        bat.nextAttackAt = now + BAT_ATTACK_INTERVAL_MS;
+        return;
+      }
       const next = this.separateBat(bat, wanted);
       const cell = cellAtPoint(next);
       if (cell) {
@@ -822,7 +910,7 @@ export class TacticsGame {
       };
       if (this.onFloor(separated)) point = separated;
     }
-    return point;
+    return this.gateBlocksMove(this.at(bat), point) ? this.at(bat) : point;
   }
 
   private batAltitude(bat: Hound): number {
@@ -839,6 +927,218 @@ export class TacticsGame {
     const rise = Math.min(1,
       (age - BAT_STRIKE_AT_MS - BAT_DIVE_LINGER_MS) / BAT_DIVE_RECOVERY_MS);
     return BAT_DIVE_ALTITUDE + rise * (recoveryAltitude - BAT_DIVE_ALTITUDE);
+  }
+
+  /** Wander across the floor and occasionally climb a room wall, never its ceiling. */
+  private updateSpider(spider: Hound, dt: number): void {
+    const region = ROOM_REGIONS[spider.roomIndex]!;
+    const minX = ARENA_X + (region.col + 0.5) * TILE_PX;
+    const maxX = ARENA_X + (region.col + region.cols - 0.5) * TILE_PX;
+    const minY = ARENA_Y + (region.row + 0.5) * TILE_PX;
+    const maxY = ARENA_Y + (region.row + region.rows - 0.5) * TILE_PX;
+    const surface = spider.surface ?? "floor";
+
+    if (!spider.aggro && distance(this.at(spider), this.playerAt()) <= SPIDER_AGGRO_RANGE) {
+      this.wake(spider);
+    }
+
+    if (spider.spiderPauseUntil !== undefined) {
+      if (this.simNow < spider.spiderPauseUntil) {
+        this.spiderContact(spider);
+        return;
+      }
+      spider.spiderPauseUntil = undefined;
+      spider.nextSpiderPauseAt = this.simNow + SPIDER_MOVE_DURATION_MS;
+    } else if (this.simNow >= (spider.nextSpiderPauseAt ?? 0)) {
+      spider.spiderPauseUntil = this.simNow + SPIDER_PAUSE_DURATION_MS;
+      this.spiderContact(spider);
+      return;
+    }
+
+    if (spider.aggro && surface === "floor") {
+      // Use the same generated-dungeon doorway routing as the hounds, but keep
+      // the spider's deliberately slow movement speed.
+      const player = this.playerAt();
+      const playerGap = distance(this.at(spider), player);
+      if (playerGap < SPIDER_BACKUP_DISTANCE) {
+        const before = this.at(spider);
+        let awayX = before.x - player.x;
+        let awayY = before.y - player.y;
+        let awayLength = Math.hypot(awayX, awayY);
+        if (awayLength >= 0.001) {
+          // Keep using the spider's normal slow turn even while it backs out
+          // of an overlap, rather than snapping or accelerating its rotation.
+          this.turnSpiderToward(spider, player, dt);
+          spider.facing = spider.heading.x >= 0 ? 1 : -1;
+        }
+        if (awayLength < 0.001) {
+          // At an exact overlap, retreat opposite its current facing rather
+          // than choosing an arbitrary direction or snapping its rotation.
+          awayX = -spider.heading.x;
+          awayY = -spider.heading.y;
+          awayLength = Math.max(0.001, Math.hypot(awayX, awayY));
+        }
+        const step = Math.min(SPIDER_SPEED * dt, SPIDER_BACKUP_DISTANCE - playerGap);
+        this.place(spider, {
+          x: before.x + (awayX / awayLength) * step,
+          y: before.y + (awayY / awayLength) * step,
+        });
+        spider.wanderTarget = undefined;
+        spider.wallGoal = undefined;
+        this.spiderContact(spider);
+        return;
+      }
+      const target = this.nextWaypoint(spider) ?? player;
+      const before = this.at(spider);
+      const atPlayer = target === player;
+      const gap = distance(before, target);
+      const holdDistance = atPlayer ? SPIDER_BACKUP_DISTANCE : 0;
+      if (gap > holdDistance) {
+        const step = Math.min(SPIDER_SPEED * dt, gap - holdDistance);
+        this.turnSpiderToward(spider, target, dt);
+        // Travel along the direction it is actually facing. The deliberately
+        // slow turn therefore produces a forward-moving arc instead of a
+        // sideways slide toward the target.
+        const raw = {
+          x: before.x + spider.heading.x * step,
+          y: before.y + spider.heading.y * step,
+        };
+        const next = this.place(spider, raw);
+        const travel = distance(before, next);
+        if (travel > 0.001) {
+          spider.facing = spider.heading.x >= 0 ? 1 : -1;
+        }
+      }
+      spider.wanderTarget = undefined;
+      spider.wallGoal = undefined;
+      this.spiderContact(spider);
+      return;
+    }
+
+    if (spider.aggro) {
+      // A spider already on a wall climbs down before beginning its pursuit.
+      spider.wallGoal = undefined;
+      spider.wanderTarget = { ...this.at(spider) };
+      spider.wanderHeight = 0;
+    }
+
+    if (!spider.wanderTarget) {
+      if (surface === "floor") {
+        if (Math.random() < 0.32) {
+          const sides = ["north", "east", "south", "west"] as const;
+          const side = sides[Math.floor(Math.random() * sides.length)]!;
+          spider.wallGoal = side;
+          spider.wanderTarget = side === "north" || side === "south"
+            ? { x: minX + Math.random() * (maxX - minX), y: side === "north" ? minY : maxY }
+            : { x: side === "west" ? minX : maxX, y: minY + Math.random() * (maxY - minY) };
+        } else {
+          spider.wanderTarget = {
+            x: minX + Math.random() * (maxX - minX),
+            y: minY + Math.random() * (maxY - minY),
+          };
+        }
+      } else {
+        const stayOnWall = Math.random() < 0.72;
+        spider.wanderTarget = surface === "north" || surface === "south"
+          ? { x: minX + Math.random() * (maxX - minX), y: surface === "north" ? minY : maxY }
+          : { x: surface === "west" ? minX : maxX, y: minY + Math.random() * (maxY - minY) };
+        spider.wanderHeight = stayOnWall
+          ? 0.7 + Math.random() * (SPIDER_MAX_WALL_HEIGHT - 0.7)
+          : 0;
+      }
+    }
+
+    const target = spider.wanderTarget;
+    if (surface === "floor") {
+      const before = this.at(spider);
+      const wanted = stepToward(before, target, SPIDER_SPEED * dt);
+      const next = this.place(spider, wanted);
+      const travel = distance(before, next);
+      if (travel > 0.001) {
+        this.turnSpiderToward(spider, next, dt);
+        spider.facing = spider.heading.x >= 0 ? 1 : -1;
+      }
+      if (distance(next, target) < 1) {
+        spider.wanderTarget = undefined;
+        if (spider.wallGoal) {
+          spider.surface = spider.wallGoal;
+          spider.wallGoal = undefined;
+          spider.altitude = 0.05;
+          spider.wanderHeight = 0.8 + Math.random() * (SPIDER_MAX_WALL_HEIGHT - 0.8);
+        }
+      }
+      this.spiderContact(spider);
+      return;
+    }
+
+    const before = this.at(spider);
+    const next = stepToward(before, target, SPIDER_SPEED * 0.65 * dt);
+    const travel = distance(before, next);
+    if (travel > 0.001) this.turnSpiderToward(spider, next, dt);
+    spider.x = next.x; spider.y = next.y; spider.pos = next;
+    const wantedHeight = spider.wanderHeight ?? 0;
+    const heightDelta = wantedHeight - (spider.altitude ?? 0);
+    spider.altitude = (spider.altitude ?? 0)
+      + Math.sign(heightDelta) * Math.min(Math.abs(heightDelta), SPIDER_CLIMB_SPEED * dt);
+    if (distance(next, target) < 1 && Math.abs(heightDelta) < 0.02) {
+      spider.wanderTarget = undefined;
+      if (wantedHeight <= 0.01) {
+        spider.surface = "floor";
+        spider.altitude = 0;
+        spider.wanderHeight = undefined;
+      }
+    }
+    this.spiderContact(spider);
+  }
+
+  private turnSpiderToward(
+    spider: Hound,
+    target: Point,
+    dt: number,
+    turnSpeed = SPIDER_TURN_SPEED,
+  ): void {
+    const dx = target.x - spider.x;
+    const dy = target.y - spider.y;
+    if (Math.hypot(dx, dy) < 0.001) return;
+    const current = Math.atan2(spider.heading.y, spider.heading.x);
+    const wanted = Math.atan2(dy, dx);
+    const delta = Math.atan2(Math.sin(wanted - current), Math.cos(wanted - current));
+    const turn = Math.max(-turnSpeed * dt, Math.min(turnSpeed * dt, delta));
+    const angle = current + turn;
+    spider.heading = { x: Math.cos(angle), y: Math.sin(angle) };
+  }
+
+  /** A floor-level spider deals contact damage and may begin a poison course. */
+  private spiderContact(spider: Hound): void {
+    if ((spider.surface ?? "floor") !== "floor" || this.simNow < spider.nextAttackAt) return;
+    const dx = this.player.x - spider.x;
+    const dy = this.player.y - spider.y;
+    const gap = Math.hypot(dx, dy);
+    if (gap > SPIDER_CONTACT_RANGE) return;
+    const headingLength = Math.max(0.001, Math.hypot(spider.heading.x, spider.heading.y));
+    if (gap > 0.001 &&
+        (dx * spider.heading.x + dy * spider.heading.y) / (gap * headingLength) < HOUND_ATTACK_CONE_DOT) return;
+    this.player.health = Math.max(0, this.player.health - 10);
+    spider.nextAttackAt = this.simNow + SPIDER_CONTACT_COOLDOWN_MS;
+    this.strikes.push({ enemyId: spider.id, seq: ++this.strikeSeq });
+    if (!this.poisoned && this.player.health > 0 && Math.random() < 0.3) {
+      this.poisoned = true;
+      this.poisonTicksRemaining = POISON_TICKS;
+      this.nextPoisonAt = this.simNow + POISON_INTERVAL_MS;
+    }
+  }
+
+  private updatePoison(): void {
+    if (!this.poisoned || this.simNow < this.nextPoisonAt) return;
+    while (this.poisoned && this.simNow >= this.nextPoisonAt) {
+      this.player.health = Math.max(0, this.player.health - POISON_DAMAGE);
+      this.poisonTicksRemaining--;
+      this.nextPoisonAt += POISON_INTERVAL_MS;
+      if (this.poisonTicksRemaining <= 0 || this.player.health <= 0) {
+        this.poisoned = false;
+        this.poisonTicksRemaining = 0;
+      }
+    }
   }
 
   private patrolEnemy(enemy: Hound, dt: number): void {
@@ -935,6 +1235,78 @@ export class TacticsGame {
   /** Which region a cell belongs to, falling back to the board. */
   private regionOfCell(cell: Cell): Region {
     return REGIONS.find((region) => inRegion(region, cell)) ?? BOARD_REGION;
+  }
+
+  /** A closed room gate blocks the transition between that room and any adjoining hall. */
+  private gateBlocksMove(from: Point, to: Point): boolean {
+    const fromRegion = this.regionOfCell(clampToGrid(from));
+    const toRegion = this.regionOfCell(clampToGrid(to));
+    if (fromRegion === toRegion) return false;
+    return PRESSURE_PLATES.some((plate) => {
+      if (!this.plateGateStates.get(plate.id)) return false;
+      const room = ROOM_REGIONS[plate.roomIndex];
+      const connection = DUNGEON_CONNECTIONS[plate.connectionIndex];
+      return room !== undefined && connection !== undefined &&
+        (((fromRegion === room && toRegion === connection.hall) ||
+          (toRegion === room && fromRegion === connection.hall)) ||
+         this.segmentCrossesGate(from, to, plate.roomIndex, connection));
+    });
+  }
+
+  /**
+   * Test the complete movement segment against a gate plane. Fast bat dives
+   * interpolate from their original position and can skip an entire hallway
+   * cell between ticks, so endpoint-region comparison alone is insufficient.
+   */
+  private segmentCrossesGate(
+    from: Point,
+    to: Point,
+    roomIndex: number,
+    connection: (typeof DUNGEON_CONNECTIONS)[number],
+  ): boolean {
+    const room = ROOM_REGIONS[roomIndex]!;
+    const side = connection.from === roomIndex ? connection.side
+      : connection.side === "north" ? "south"
+        : connection.side === "south" ? "north"
+          : connection.side === "east" ? "west" : "east";
+    const vertical = side === "east" || side === "west";
+    const plane = vertical
+      ? ARENA_X + (side === "east" ? room.col + room.cols : room.col) * TILE_PX
+      : ARENA_Y + (side === "south" ? room.row + room.rows : room.row) * TILE_PX;
+    const fromAxis = vertical ? from.x : from.y;
+    const toAxis = vertical ? to.x : to.y;
+    const delta = toAxis - fromAxis;
+    if (Math.abs(delta) < 0.001) return false;
+    const t = (plane - fromAxis) / delta;
+    if (t < 0 || t > 1) return false;
+    const across = vertical
+      ? from.y + (to.y - from.y) * t
+      : from.x + (to.x - from.x) * t;
+    const hall = connection.hall;
+    const acrossMin = vertical
+      ? ARENA_Y + hall.row * TILE_PX
+      : ARENA_X + hall.col * TILE_PX;
+    const acrossMax = vertical
+      ? ARENA_Y + (hall.row + hall.rows) * TILE_PX
+      : ARENA_X + (hall.col + hall.cols) * TILE_PX;
+    return across >= acrossMin && across <= acrossMax;
+  }
+
+  /** Stepping onto a plate toggles its room once; the player must step off to press it again. */
+  private updatePressurePlates(): void {
+    const player = this.playerAt();
+    // Still extends well beyond the visible metal rim, but remains below half
+    // the minimum spacing between a room's two independently operated plates.
+    const radius = TILE_PX * 0.9;
+    for (const plate of PRESSURE_PLATES) {
+      const onPlate = distance(player, plate.position) <= radius;
+      if (onPlate && !this.occupiedPressurePlates.has(plate.id)) {
+        this.occupiedPressurePlates.add(plate.id);
+        this.plateGateStates.set(plate.id, !this.plateGateStates.get(plate.id));
+      } else if (!onPlate) {
+        this.occupiedPressurePlates.delete(plate.id);
+      }
+    }
   }
 
   /**
@@ -1104,7 +1476,7 @@ export class TacticsGame {
         y: enemy.y,
         facing: enemy.facing,
         kind: enemy.kind,
-        altitude: enemy.kind === "bat" ? this.batAltitude(enemy) : undefined,
+        altitude: enemy.kind === "bat" ? this.batAltitude(enemy) : enemy.altitude,
       }));
       if (this.corpses.length > MAX_CORPSES) this.corpses.shift();
 
@@ -1345,7 +1717,12 @@ export class TacticsGame {
     if (corpseIndex < 0) return;
     const corpse = this.corpses[corpseIndex]!;
     this.eatenCorpseIds.add(corpse.id);
-    const heal = corpse.kind === "bat" ? 15 : EAT_HEAL;
+    if (corpse.kind === "spider") {
+      this.poisoned = false;
+      this.poisonTicksRemaining = 0;
+      this.nextPoisonAt = 0;
+    }
+    const heal = corpse.kind === "bat" ? 15 : corpse.kind === "spider" ? 10 : EAT_HEAL;
     this.player.health = Math.min(this.player.maxHealth, this.player.health + heal);
     this.spawnDamageNumber(this.player.x, this.player.y, `+${heal}`, "#ffffff");
   }
@@ -1721,6 +2098,12 @@ export class TacticsGame {
         };
 
     return {
+      pressurePlates: PRESSURE_PLATES.map((plate) => ({
+        id: plate.id,
+        roomIndex: plate.roomIndex,
+        connectionIndex: plate.connectionIndex,
+        active: this.plateGateStates.get(plate.id) ?? false,
+      })),
       playerHeading: { ...this.playerHeading },
       playerRunning: this.playerRunning,
       playerEating: this.eating(),
@@ -1741,6 +2124,7 @@ export class TacticsGame {
         mana: PLAYER_MAX_MANA,
         maxMana: PLAYER_MAX_MANA,
       },
+      poisoned: this.poisoned,
       enemies: this.enemies.map((e) => ({
         id: e.id,
         kind: e.kind,
@@ -1756,7 +2140,12 @@ export class TacticsGame {
         aggro: e.aggro,
         facing: e.facing,
         heading: { ...e.heading },
-        altitude: e.kind === "bat" ? this.batAltitude(e) : undefined,
+        altitude: e.kind === "bat" ? this.batAltitude(e) : e.altitude,
+        surface: e.surface,
+        movementPaused: e.kind === "spider" && (
+          this.simNow < e.movementStartsAt
+          || (e.spiderPauseUntil !== undefined && this.simNow < e.spiderPauseUntil)
+        ),
       })),
       corpses: this.corpses.map((c) => ({
         id: c.id,

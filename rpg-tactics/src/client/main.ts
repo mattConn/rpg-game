@@ -596,11 +596,12 @@ function frame(now: number) {
   );
   actors.syncCorpses(snap, dt);
   actors.syncProjectiles(snap, elapsed);
-  actors.syncTombstones(snap);
+  actors.syncTombstones(snap, stage.yaw);
 
   stage.setCursorRing(null, null, "floor");
   stage.setDoorHoverRing(null);
   stage.setDoors(snap.doors);
+  stage.setPressurePlates(snap.pressurePlates);
   stage.setTargetRing(null, null, 0xffd633);
 
   // The board frames itself while you are standing on it; walk out through the
@@ -665,7 +666,8 @@ function frame(now: number) {
       stage.setAttackReticle(
         aimedEnemy.x,
         aimedEnemy.y,
-        aimedEnemy.kind === "bat" ? aimedEnemy.altitude ?? 2.25 : 1.35,
+        aimedEnemy.kind === "bat" ? aimedEnemy.altitude ?? 2.25
+          : aimedEnemy.kind === "spider" ? (aimedEnemy.altitude ?? 0) + 0.45 : 1.35,
       );
     } else {
       stage.setAttackReticle(null, null);

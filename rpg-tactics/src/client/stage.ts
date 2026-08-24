@@ -16,6 +16,7 @@
  */
 
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 import { WORLD_HEIGHT, WORLD_WIDTH } from "../../../src/shared/constants.js";
 import { clamp } from "../../../src/shared/movement.js";
@@ -31,11 +32,15 @@ import {
   CHAMBER_MARGIN_PX,
   DOORWAY_WIDTH_PX,
   DUNGEON_CONNECTIONS,
+  DUNGEON_ENEMIES,
+  DUNGEON_SEED,
   type DoorId,
   type DoorStates,
   FAR_REGION,
   HALL_REGION,
   HALL_REGIONS,
+  PRESSURE_PLATES,
+  PRESSURE_PLATE_ROOMS,
   ROOM_REGIONS,
   SQUARE_PX,
   TILE_PX,
@@ -197,6 +202,7 @@ export interface Stage {
   setDoorHoverRing(door: DoorId | null): void;
   doorAt(ndcX: number, ndcY: number): DoorId | null;
   setDoors(doors: DoorStates): void;
+  setPressurePlates(plates: Array<{ id: string; roomIndex: number; connectionIndex: number; active: boolean }>): void;
   animateScenery(elapsed: number): void;
   render(): void;
 }
@@ -672,6 +678,398 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     );
   });
 
+  // ---------------------------------------------------- pressure-plate gates
+
+  const plateTextureCanvas = document.createElement("canvas");
+  plateTextureCanvas.width = plateTextureCanvas.height = 128;
+  const plateTextureContext = plateTextureCanvas.getContext("2d")!;
+  plateTextureContext.fillStyle = "#34373b";
+  plateTextureContext.fillRect(0, 0, 128, 128);
+  // Blotchy oxidation and pitting keep the plate from reading as clean,
+  // freshly-machined metal. The dungeon seed makes the damage repeatable.
+  let plateDamageState = (DUNGEON_SEED ^ 0xbad51ab) >>> 0;
+  const plateDamageRandom = () => {
+    plateDamageState ^= plateDamageState << 13;
+    plateDamageState ^= plateDamageState >>> 17;
+    plateDamageState ^= plateDamageState << 5;
+    return (plateDamageState >>> 0) / 0x100000000;
+  };
+  for (let index = 0; index < 420; index++) {
+    const shade = Math.floor(20 + plateDamageRandom() * 45);
+    const alpha = 0.12 + plateDamageRandom() * 0.32;
+    plateTextureContext.fillStyle = `rgba(${shade},${shade + 2},${shade + 3},${alpha})`;
+    const radius = 0.4 + plateDamageRandom() * 2.8;
+    plateTextureContext.beginPath();
+    plateTextureContext.arc(plateDamageRandom() * 128, plateDamageRandom() * 128, radius, 0, Math.PI * 2);
+    plateTextureContext.fill();
+  }
+  plateTextureContext.lineCap = "round";
+  for (let index = 0; index < 24; index++) {
+    const x = plateDamageRandom() * 128;
+    const y = plateDamageRandom() * 128;
+    plateTextureContext.strokeStyle = `rgba(8,9,10,${0.28 + plateDamageRandom() * 0.42})`;
+    plateTextureContext.lineWidth = 0.7 + plateDamageRandom() * 1.5;
+    plateTextureContext.beginPath();
+    plateTextureContext.moveTo(x, y);
+    plateTextureContext.lineTo(x + (plateDamageRandom() - 0.5) * 30, y + (plateDamageRandom() - 0.5) * 30);
+    plateTextureContext.stroke();
+  }
+  const plateTexture = new THREE.CanvasTexture(plateTextureCanvas);
+  plateTexture.colorSpace = THREE.SRGBColorSpace;
+  plateTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  const plateMaterial = new THREE.MeshStandardMaterial({
+    map: plateTexture, color: 0x8b9094, metalness: 0.58, roughness: 0.82,
+  });
+  const plateActiveMaterial = new THREE.MeshStandardMaterial({
+    map: plateTexture, color: 0x505358, metalness: 0.66, roughness: 0.76,
+  });
+  const pressurePlates = new Map<string, THREE.Mesh>();
+  for (const definition of PRESSURE_PLATES) {
+    const plate = new THREE.Mesh(new THREE.CylinderGeometry(1.22, 1.36, 0.12, 11), plateMaterial);
+    plate.position.set(toX(definition.position.x), 0.07, toZ(definition.position.y));
+    plate.receiveShadow = true;
+    scene.add(plate);
+    pressurePlates.set(definition.id, plate);
+  }
+
+  const GATE_HEIGHT = 5.6;
+  const GATE_RAISED_Y = GATE_HEIGHT + 0.45;
+  interface GateVisual { group: THREE.Group; plateId: string; active: boolean }
+  const gateVisuals: GateVisual[] = [];
+  DUNGEON_CONNECTIONS.forEach((connection, connectionIndex) => {
+    const roomIndices = [connection.from, connection.to].filter((index) =>
+      PRESSURE_PLATE_ROOMS.includes(index));
+    for (const roomIndex of roomIndices) {
+    const room = ROOM_REGIONS[roomIndex]!;
+    const centre = regionCentre(room);
+    const side = connection.from === roomIndex ? connection.side
+      : connection.side === "north" ? "south"
+        : connection.side === "south" ? "north"
+          : connection.side === "east" ? "west" : "east";
+    const cx = toX(centre.x);
+    const cz = toZ(centre.y);
+    const halfW = toX(room.cols * TILE_PX) / 2 + MARGIN;
+    const halfD = toZ(room.rows * TILE_PX) / 2 + MARGIN;
+    const gate = new THREE.Group();
+    const steel = new THREE.MeshStandardMaterial({ color: 0x090b0e, metalness: 0.92, roughness: 0.3 });
+    const verticalCount = 7;
+    for (let index = 0; index < verticalCount; index++) {
+      const x = -DOOR_W / 2 + 0.22 + index * (DOOR_W - 0.44) / (verticalCount - 1);
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(0.16, GATE_HEIGHT, 0.18), steel);
+      bar.position.set(x, GATE_HEIGHT / 2, 0);
+      bar.castShadow = true;
+      gate.add(bar);
+    }
+    for (const y of [1.25, GATE_HEIGHT - 1.25]) {
+      const brace = new THREE.Mesh(new THREE.BoxGeometry(DOOR_W, 0.2, 0.22), steel);
+      brace.position.set(0, y, 0);
+      brace.castShadow = true;
+      gate.add(brace);
+    }
+    gate.position.set(
+      cx + (side === "east" ? halfW : side === "west" ? -halfW : 0),
+      GATE_RAISED_Y,
+      cz + (side === "south" ? halfD : side === "north" ? -halfD : 0),
+    );
+    if (side === "east" || side === "west") gate.rotation.y = Math.PI / 2;
+    scene.add(gate);
+    const plateId = PRESSURE_PLATES.find((plate) =>
+      plate.roomIndex === roomIndex && plate.connectionIndex === connectionIndex)!.id;
+    gateVisuals.push({ group: gate, plateId, active: false });
+    }
+  });
+
+  // ---------------------------------------------------------- angel statue
+
+  const jumboRoom = ROOM_REGIONS.find((region) => region.size === "jumbo");
+  if (jumboRoom) {
+    let statueState = (DUNGEON_SEED ^ 0xa63e15) >>> 0;
+    const statueRandom = () => {
+      statueState ^= statueState << 13;
+      statueState ^= statueState >>> 17;
+      statueState ^= statueState << 5;
+      return (statueState >>> 0) / 0x100000000;
+    };
+    const placementRoll = statueRandom();
+    // 0–70% centre, 70–90% corner, 90–100% absent.
+    if (placementRoll < 0.9) {
+      const centre = regionCentre(jumboRoom);
+      const cx = toX(centre.x);
+      const cz = toZ(centre.y);
+      const width = toX(jumboRoom.cols * TILE_PX) + MARGIN * 2;
+      const depth = toZ(jumboRoom.rows * TILE_PX) + MARGIN * 2;
+      let statueX = cx;
+      let statueZ = cz;
+      if (placementRoll >= 0.7) {
+        const corner = Math.floor(statueRandom() * 4);
+        const inset = 2.4;
+        statueX = cx + (corner === 0 || corner === 3 ? -1 : 1) * (width / 2 - inset);
+        statueZ = cz + (corner < 2 ? -1 : 1) * (depth / 2 - inset);
+      }
+
+      new GLTFLoader().load("/shared-models/angel-statue/scene-low.glb", (gltf) => {
+        const statue = gltf.scene;
+        statue.traverse((node) => {
+          if (!(node instanceof THREE.Mesh)) return;
+          node.castShadow = true;
+          node.receiveShadow = true;
+        });
+        statue.updateMatrixWorld(true);
+        let bounds = new THREE.Box3().setFromObject(statue);
+        const size = bounds.getSize(new THREE.Vector3());
+        statue.scale.setScalar(4.5 / Math.max(0.001, size.y));
+        statue.updateMatrixWorld(true);
+        bounds = new THREE.Box3().setFromObject(statue);
+        const modelCentre = bounds.getCenter(new THREE.Vector3());
+        statue.position.set(-modelCentre.x, -bounds.min.y, -modelCentre.z);
+        const statueRoot = new THREE.Group();
+        statueRoot.position.set(statueX, 0, statueZ);
+        statueRoot.rotation.y = statueRandom() * Math.PI * 2;
+        statueRoot.add(statue);
+        scene.add(statueRoot);
+      }, undefined, (error) => console.warn("Could not load angel statue", error));
+    }
+  }
+
+  // --------------------------------------------------------------- boulders
+
+  let boulderState = (DUNGEON_SEED ^ 0xb01d3e) >>> 0;
+  const boulderRandom = () => {
+    boulderState += 0x6d2b79f5;
+    let n = boulderState;
+    n = Math.imul(n ^ (n >>> 15), n | 1);
+    n ^= n + Math.imul(n ^ (n >>> 7), n | 61);
+    return ((n ^ (n >>> 14)) >>> 0) / 4294967296;
+  };
+  const boulderPlacements: Array<{
+    x: number;
+    z: number;
+    yaw: number;
+    size: number;
+  }> = [];
+
+  ROOM_REGIONS.forEach((region) => {
+    if (region.size !== "large" && region.size !== "jumbo") return;
+    const count = region.size === "large"
+      ? (boulderRandom() < 0.7 ? 2 : 1)
+      : Math.floor(boulderRandom() * 5);
+    if (!count) return;
+
+    const centre = regionCentre(region);
+    const cx = toX(centre.x);
+    const cz = toZ(centre.y);
+    const width = toX(region.cols * TILE_PX) + MARGIN * 2;
+    const depth = toZ(region.rows * TILE_PX) + MARGIN * 2;
+    const west = cx - width / 2;
+    const east = cx + width / 2;
+    const north = cz - depth / 2;
+    const south = cz + depth / 2;
+    const centreCount = region.size === "jumbo"
+      ? Math.min(count, 1 + Math.floor(boulderRandom() * 2))
+      : 0;
+    const centreAngle = boulderRandom() * Math.PI * 2;
+
+    for (let index = 0; index < count; index++) {
+      let x: number;
+      let z: number;
+      if (index < centreCount) {
+        // Keep the centre itself clear for a possible angel statue. One or two
+        // rocks occupy a loose inner orbit instead of overlapping the plinth.
+        const angle = centreAngle + index * Math.PI + (boulderRandom() - 0.5) * 0.45;
+        const radius = 3.2 + boulderRandom() * 2.4;
+        x = cx + Math.cos(angle) * radius;
+        z = cz + Math.sin(angle) * radius;
+      } else {
+        const inset = 1.4 + boulderRandom() * 1.5;
+        const inCorner = boulderRandom() < 0.62;
+        if (inCorner) {
+          x = boulderRandom() < 0.5 ? west + inset : east - inset;
+          z = boulderRandom() < 0.5 ? north + inset : south - inset;
+        } else {
+          const wall = Math.floor(boulderRandom() * 4);
+          if (wall === 0 || wall === 2) {
+            x = west + width * (0.15 + boulderRandom() * 0.7);
+            z = wall === 0 ? north + inset : south - inset;
+          } else {
+            x = wall === 1 ? east - inset : west + inset;
+            z = north + depth * (0.15 + boulderRandom() * 0.7);
+          }
+        }
+      }
+      boulderPlacements.push({
+        x,
+        z,
+        yaw: boulderRandom() * Math.PI * 2,
+        // Two deliberate silhouettes rather than continuously random scale.
+        size: boulderRandom() < 0.5 ? 2.4 : 3.2,
+      });
+    }
+  });
+
+  if (boulderPlacements.length) {
+    new GLTFLoader().load("/shared-models/simple-rock/scene.gltf", (gltf) => {
+      const source = gltf.scene;
+      const gritSize = 96;
+      const gritPixels = new Uint8Array(gritSize * gritSize * 4);
+      for (let y = 0; y < gritSize; y++) {
+        for (let x = 0; x < gritSize; x++) {
+          let noise = Math.imul(x + 17, 0x45d9f3b) ^ Math.imul(y + 31, 0x119de1f3);
+          noise ^= noise >>> 16;
+          const fine = noise & 63;
+          const coarse = ((Math.floor(x / 6) * 19 + Math.floor(y / 6) * 37) & 31);
+          const fleck = (noise & 255) < 12 ? -52 : (noise & 255) > 246 ? 34 : 0;
+          const shade = Math.max(60, Math.min(205, 125 + fine + coarse - 31 + fleck));
+          const offset = (y * gritSize + x) * 4;
+          gritPixels[offset] = shade;
+          gritPixels[offset + 1] = shade;
+          gritPixels[offset + 2] = shade;
+          gritPixels[offset + 3] = 255;
+        }
+      }
+      const gritTexture = new THREE.DataTexture(gritPixels, gritSize, gritSize, THREE.RGBAFormat);
+      gritTexture.colorSpace = THREE.SRGBColorSpace;
+      gritTexture.wrapS = THREE.RepeatWrapping;
+      gritTexture.wrapT = THREE.RepeatWrapping;
+      gritTexture.repeat.set(3, 3);
+      gritTexture.needsUpdate = true;
+      source.traverse((node) => {
+        if (!(node instanceof THREE.Mesh)) return;
+        node.castShadow = true;
+        node.receiveShadow = true;
+        const sourceMaterials = Array.isArray(node.material) ? node.material : [node.material];
+        const materials = sourceMaterials.map((sourceMaterial) => {
+          const material = sourceMaterial.clone();
+          if (material instanceof THREE.MeshStandardMaterial) {
+            // Keep the supplied normal map, but replace its stark black/cream
+            // diffuse pattern with a cheap, repeatable gritty dungeon texture.
+            material.map = gritTexture;
+            material.color.setHex(0x45474c);
+            material.metalness = 0;
+            material.roughness = 1;
+            if (material.normalMap) material.normalScale.set(1.3, 1.3);
+          }
+          return material;
+        });
+        node.material = Array.isArray(node.material) ? materials : materials[0]!;
+      });
+      source.updateMatrixWorld(true);
+      const sourceBounds = new THREE.Box3().setFromObject(source);
+      const sourceSize = sourceBounds.getSize(new THREE.Vector3());
+      const longestSide = Math.max(sourceSize.x, sourceSize.y, sourceSize.z, 0.001);
+
+      boulderPlacements.forEach((placement) => {
+        const visual = source.clone(true);
+        visual.scale.setScalar(placement.size / longestSide);
+        visual.updateMatrixWorld(true);
+        const bounds = new THREE.Box3().setFromObject(visual);
+        const centre = bounds.getCenter(new THREE.Vector3());
+        visual.position.set(-centre.x, -bounds.min.y, -centre.z);
+        const root = new THREE.Group();
+        // The authored underside is irregular: its single lowest vertex can
+        // touch while the broad base still looks suspended. Embed it slightly
+        // in proportion to the selected size so the whole mass reads grounded.
+        root.position.set(placement.x, -placement.size * 0.24, placement.z);
+        // Yaw only: varied horizontal facing without tipping the grounded rock.
+        root.rotation.y = placement.yaw;
+        root.add(visual);
+        scene.add(root);
+      });
+    }, undefined, (error) => console.warn("Could not load boulder decorations", error));
+  }
+
+  // --------------------------------------------------------------- cobwebs
+
+  /** Seeded independently from layout generation so dressing never changes it. */
+  let cobwebState = (DUNGEON_SEED ^ 0xc0b5e85) >>> 0;
+  const cobwebRandom = () => {
+    cobwebState += 0x6d2b79f5;
+    let n = cobwebState;
+    n = Math.imul(n ^ (n >>> 15), n | 1);
+    n ^= n + Math.imul(n ^ (n >>> 7), n | 61);
+    return ((n ^ (n >>> 14)) >>> 0) / 4294967296;
+  };
+  const spiderRooms = new Set(
+    DUNGEON_ENEMIES.filter((enemy) => enemy.kind === "spider").map((enemy) => enemy.roomIndex),
+  );
+
+  if (spiderRooms.size) {
+    new GLTFLoader().load("/shared-models/cobwebs/scene.gltf", (gltf) => {
+      // GLTFLoader sanitizes punctuation in node names, so looking up the
+      // authored `cobweb.001` names can return nothing. Gather the seven real
+      // renderable pieces instead; this is also resilient to renamed exports.
+      const variants: THREE.Mesh[] = [];
+      gltf.scene.traverse((node) => {
+        if (node instanceof THREE.Mesh) variants.push(node);
+      });
+      if (!variants.length) return;
+
+      spiderRooms.forEach((roomIndex) => {
+        const region = ROOM_REGIONS[roomIndex];
+        if (!region) return;
+        const centre = regionCentre(region);
+        const cx = toX(centre.x);
+        const cz = toZ(centre.y);
+        const width = toX(region.cols * TILE_PX) + MARGIN * 2;
+        const depth = toZ(region.rows * TILE_PX) + MARGIN * 2;
+        const west = cx - width / 2;
+        const east = cx + width / 2;
+        const north = cz - depth / 2;
+        const south = cz + depth / 2;
+        const count = 3 + Math.floor(cobwebRandom() * 4);
+
+        for (let i = 0; i < count; i++) {
+          const source = variants[Math.floor(cobwebRandom() * variants.length)]!;
+          const piece = source.clone(true);
+          piece.updateMatrixWorld(true);
+          let bounds = new THREE.Box3().setFromObject(piece);
+          const size = bounds.getSize(new THREE.Vector3());
+          const centreOffset = bounds.getCenter(new THREE.Vector3());
+          piece.position.sub(centreOffset);
+
+          // The supplied variants include their authoring transform. If one
+          // arrives lying flat, stand its thinnest plane upright before it is
+          // attached to dungeon masonry.
+          if (size.y < size.z && size.y < size.x) piece.rotation.x += Math.PI / 2;
+          else if (size.x < size.z && size.x < size.y) piece.rotation.y += Math.PI / 2;
+
+          const web = new THREE.Group();
+          web.add(piece);
+          web.updateMatrixWorld(true);
+          bounds = new THREE.Box3().setFromObject(web);
+          const uprightSize = bounds.getSize(new THREE.Vector3());
+          const targetSize = (1.25 + cobwebRandom() * 1.35) * 5;
+          web.scale.setScalar(targetSize / Math.max(uprightSize.x, uprightSize.y, uprightSize.z));
+          if (cobwebRandom() < 0.5) web.scale.x *= -1;
+
+          const wall = Math.floor(cobwebRandom() * 4);
+          // Always seed one corner web, then retain a strong corner bias for
+          // the rest while allowing occasional strands mid-wall.
+          const inCorner = i === 0 || cobwebRandom() < 0.62;
+          const firstEnd = cobwebRandom() < 0.5;
+          const inset = 0.3 + cobwebRandom() * 1.15;
+          const height = inCorner
+            ? 0.75 + cobwebRandom() * 3.2
+            : 1.0 + cobwebRandom() * 3.8;
+
+          if (wall === 0 || wall === 2) {
+            const along = inCorner
+              ? (firstEnd ? west + inset : east - inset)
+              : west + width * (0.18 + cobwebRandom() * 0.64);
+            web.position.set(along, height, wall === 0 ? north + 0.035 : south - 0.035);
+            web.rotation.y = wall === 0 ? 0 : Math.PI;
+          } else {
+            const along = inCorner
+              ? (firstEnd ? north + inset : south - inset)
+              : north + depth * (0.18 + cobwebRandom() * 0.64);
+            web.position.set(wall === 1 ? east - 0.035 : west + 0.035, height, along);
+            web.rotation.y = wall === 1 ? -Math.PI / 2 : Math.PI / 2;
+          }
+          scene.add(web);
+        }
+      });
+    }, undefined, (error) => console.warn("Could not load cobweb decorations", error));
+  }
+
   // --------------------------------------------------------------- doors
 
   const doors = new Map<DoorId, THREE.Group>();
@@ -704,43 +1102,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     }
   });
 
-  // --------------------------------------------------------------- the arch
-
-  // A wall torch beside the near doorway: enough warm light to reveal the
-  // wood, deliberately too dim to flatten the dungeon's blue-gray darkness.
-  //
-  // Both of the marks that used to be here are gone with the escape rule they
-  // belonged to: the amber ring on the floor said "stand here and the encounter
-  // ends", and the warm plane hanging in the opening was the light of somewhere
-  // else. The old glowing curtain is still gone: the wooden slab now makes the
-  // opening's state visible without pretending light itself is a barrier.
-  const firstSide = DUNGEON_CONNECTIONS[0]!.side;
-  const torchX = firstSide === "west"
-    ? BOARD_CX - START_CHAMBER_W / 2 + WALL_T * .22
-    : firstSide === "east"
-      ? BOARD_CX + START_CHAMBER_W / 2 - WALL_T * .22
-      : BOARD_CX - DOOR_W / 2 - .75;
-  const torchZ = firstSide === "north"
-    ? BOARD_CZ - START_CHAMBER_D / 2 + WALL_T * .22
-    : firstSide === "south"
-      ? BOARD_CZ + START_CHAMBER_D / 2 - WALL_T * .22
-      : BOARD_CZ - DOOR_W / 2 - .75;
-
-  const bracket = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.045, 0.055, 0.42, 7),
-    new THREE.MeshLambertMaterial({ color: 0x332d2a, flatShading: true }),
-  );
-  bracket.castShadow = true;
-  bracket.rotation.x = -0.42;
-  bracket.position.set(torchX, 1.73, torchZ - 0.08);
-  scene.add(bracket);
-  const ironCup = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.13, 0.075, 0.16, 7),
-    new THREE.MeshLambertMaterial({ color: 0x403a36, flatShading: true }),
-  );
-  ironCup.castShadow = true;
-  ironCup.position.set(torchX, 1.97, torchZ - 0.18);
-  scene.add(ironCup);
+  // -------------------------------------------------------------- wall torches
 
   const outerFlameMaterial = new THREE.MeshBasicMaterial({
     color: 0xf06a24,
@@ -756,32 +1118,95 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     blending: THREE.AdditiveBlending,
     depthWrite: false,
   });
-  const outerFlame = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.3, 7), outerFlameMaterial);
-  outerFlame.position.set(torchX, 2.17, torchZ - 0.18);
-  scene.add(outerFlame);
-  const innerFlame = new THREE.Mesh(new THREE.ConeGeometry(0.048, 0.18, 7), innerFlameMaterial);
-  innerFlame.position.set(torchX, 2.11, torchZ - 0.2);
-  scene.add(innerFlame);
+  const bracketGeometry = new THREE.CylinderGeometry(0.045, 0.055, 0.42, 7);
+  const cupGeometry = new THREE.CylinderGeometry(0.13, 0.075, 0.16, 7);
+  const outerFlameGeometry = new THREE.ConeGeometry(0.09, 0.3, 7);
+  const innerFlameGeometry = new THREE.ConeGeometry(0.048, 0.18, 7);
+  const bracketMaterial = new THREE.MeshLambertMaterial({ color: 0x332d2a, flatShading: true });
+  const cupMaterial = new THREE.MeshLambertMaterial({ color: 0x403a36, flatShading: true });
+  const torchFlames: Array<{ outer: THREE.Mesh; inner: THREE.Mesh; phase: number }> = [];
+  let torchState = (DUNGEON_SEED ^ 0x70ac4e5) >>> 0;
+  const torchRandom = () => {
+    torchState ^= torchState << 13; torchState ^= torchState >>> 17; torchState ^= torchState << 5;
+    return (torchState >>> 0) / 0x100000000;
+  };
+  const addTorch = (x: number, z: number, roomX: number, roomZ: number) => {
+    const fixture = new THREE.Group();
+    fixture.position.set(x, 0, z);
+    fixture.lookAt(roomX, 0, roomZ);
+    fixture.rotateY(Math.PI);
+    const bracket = new THREE.Mesh(bracketGeometry, bracketMaterial);
+    bracket.castShadow = true;
+    bracket.rotation.x = -0.42;
+    bracket.position.set(0, 1.73, -0.08);
+    fixture.add(bracket);
+    const cup = new THREE.Mesh(cupGeometry, cupMaterial);
+    cup.castShadow = true;
+    cup.position.set(0, 1.97, -0.18);
+    fixture.add(cup);
+    const outer = new THREE.Mesh(outerFlameGeometry, outerFlameMaterial);
+    outer.position.set(0, 2.17, -0.18);
+    fixture.add(outer);
+    const inner = new THREE.Mesh(innerFlameGeometry, innerFlameMaterial);
+    inner.position.set(0, 2.11, -0.2);
+    fixture.add(inner);
+    scene.add(fixture);
+    torchFlames.push({ outer, inner, phase: torchRandom() * Math.PI * 2 });
+  };
 
-  const torchLight = new THREE.PointLight(0xff8a3d, 0.85, STRIDE * 2.4, 2);
-  torchLight.position.set(torchX, 2.17, torchZ - 0.38);
-  scene.add(torchLight);
-
-  const EMBER_COUNT = 5;
-  const emberPositions = new Float32Array(EMBER_COUNT * 3);
-  const emberGeometry = new THREE.BufferGeometry();
-  emberGeometry.setAttribute("position", new THREE.BufferAttribute(emberPositions, 3));
-  const emberMaterial = new THREE.PointsMaterial({
-    color: 0xff9b47,
-    size: 0.035,
-    transparent: true,
-    opacity: 0.45,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    sizeAttenuation: true,
+  ROOM_REGIONS.forEach((room, roomIndex) => {
+    const centre = regionCentre(room);
+    const cx = toX(centre.x);
+    const cz = toZ(centre.y);
+    const width = toX(room.cols * TILE_PX) + MARGIN * 2;
+    const depth = toZ(room.rows * TILE_PX) + MARGIN * 2;
+    const west = cx - width / 2 + WALL_T * 0.22;
+    const east = cx + width / 2 - WALL_T * 0.22;
+    const north = cz - depth / 2 + WALL_T * 0.22;
+    const south = cz + depth / 2 - WALL_T * 0.22;
+    const openings = new Set<"north" | "east" | "south" | "west">();
+    for (const connection of DUNGEON_CONNECTIONS) {
+      if (connection.from === roomIndex) openings.add(connection.side);
+      if (connection.to === roomIndex) openings.add(
+        connection.side === "north" ? "south"
+          : connection.side === "south" ? "north"
+            : connection.side === "east" ? "west" : "east",
+      );
+    }
+    let roomTorchCount = 0;
+    for (const wall of ["north", "east", "south", "west"] as const) {
+      const count = room.size === "jumbo" ? 2 : 1 + Math.floor(torchRandom() * 3);
+      const span = wall === "north" || wall === "south" ? width : depth;
+      for (let index = 0; index < count; index++) {
+        const t = (index + 1) / (count + 1);
+        let along = -span / 2 + span * t
+          + (torchRandom() - 0.5) * Math.min(0.7, span / (count + 1) * 0.22);
+        if (openings.has(wall)) {
+          // Map the evenly-spaced position into the two solid wall sections,
+          // leaving the doorway and its arch clear. A fixture placed in that
+          // central opening has no wall behind it and appears to float.
+          const edgeInset = 0.65;
+          const doorwayClearance = DOOR_W / 2 + 0.55;
+          const sectionLength = Math.max(0.1, span / 2 - edgeInset - doorwayClearance);
+          const acrossSolidWall = t * sectionLength * 2;
+          along = acrossSolidWall <= sectionLength
+            ? -span / 2 + edgeInset + acrossSolidWall
+            : doorwayClearance + (acrossSolidWall - sectionLength);
+        }
+        addTorch(
+          wall === "west" ? west : wall === "east" ? east : cx + along,
+          wall === "north" ? north : wall === "south" ? south : cz + along,
+          cx, cz,
+        );
+        roomTorchCount++;
+      }
+    }
+    // One pooled light per chamber gives all its flames a warm contribution
+    // without compiling dozens of costly point lights into every material.
+    const roomLight = new THREE.PointLight(0xff8a3d, Math.min(1.65, 0.46 + roomTorchCount * 0.09), Math.max(width, depth) * 0.72, 2);
+    roomLight.position.set(cx, 2.25, cz);
+    scene.add(roomLight);
   });
-  const embers = new THREE.Points(emberGeometry, emberMaterial);
-  scene.add(embers);
 
   // ------------------------------------------------------------- highlights
 
@@ -1132,6 +1557,14 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       smoothed.distance = damp(smoothed.distance, distance, 12, dt);
       smoothed.x = damp(smoothed.x, focus.x, 14, dt);
       smoothed.z = damp(smoothed.z, focus.z, 14, dt);
+      for (const gate of gateVisuals) {
+        gate.group.position.y = damp(
+          gate.group.position.y,
+          gate.active ? 0 : GATE_RAISED_Y,
+          gate.active ? 25 : 18,
+          dt,
+        );
+      }
       applyCamera();
     },
 
@@ -1162,6 +1595,18 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
         door.rotation.y = states[id] ? door.userData.openAngle as number : 0;
       }
       applyCamera();
+    },
+
+    setPressurePlates(states) {
+      const activePlates = new Set(states.filter((state) => state.active).map((state) => state.id));
+      for (const gate of gateVisuals) {
+        gate.active = activePlates.has(gate.plateId);
+      }
+      for (const [plateId, plate] of pressurePlates) {
+        const active = activePlates.has(plateId);
+        plate.material = active ? plateActiveMaterial : plateMaterial;
+        plate.position.y = active ? 0.025 : 0.07;
+      }
     },
 
     project(point) {
@@ -1250,21 +1695,14 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     },
 
     animateScenery(elapsed) {
-      const flicker = Math.sin(elapsed * 9) * 0.025 + Math.sin(elapsed * 15.7) * 0.015;
-      outerFlame.scale.set(1 + flicker, 1 + Math.sin(elapsed * 10) * 0.045, 1 - flicker * 0.4);
-      innerFlame.scale.set(1 - flicker * 0.5, 1 + Math.sin(elapsed * 12 + 1.2) * 0.04, 1 + flicker);
-      outerFlame.rotation.y = elapsed * 0.55;
-      innerFlame.rotation.y = -elapsed * 0.7;
-      torchLight.intensity = 0.78 + Math.sin(elapsed * 8.3) * 0.035 + Math.sin(elapsed * 13.1) * 0.02;
-
-      for (let i = 0; i < EMBER_COUNT; i++) {
-        const age = (elapsed * 0.28 + i / EMBER_COUNT) % 1;
-        const idx = i * 3;
-        emberPositions[idx] = torchX + Math.sin(elapsed * 3.1 + i * 2.4) * 0.055 * age;
-        emberPositions[idx + 1] = 2.22 + age * 0.48;
-        emberPositions[idx + 2] = torchZ - 0.2 + Math.cos(elapsed * 2.7 + i * 1.9) * 0.04 * age;
+      for (const flame of torchFlames) {
+        const time = elapsed + flame.phase;
+        const flicker = Math.sin(time * 9) * 0.025 + Math.sin(time * 15.7) * 0.015;
+        flame.outer.scale.set(1 + flicker, 1 + Math.sin(time * 10) * 0.045, 1 - flicker * 0.4);
+        flame.inner.scale.set(1 - flicker * 0.5, 1 + Math.sin(time * 12 + 1.2) * 0.04, 1 + flicker);
+        flame.outer.rotation.y = time * 0.55;
+        flame.inner.rotation.y = -time * 0.7;
       }
-      (emberGeometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     },
 
     render() {

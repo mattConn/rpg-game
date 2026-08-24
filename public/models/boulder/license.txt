@@ -1,0 +1,11 @@
+Model Information:
+* title:	Boulder
+* source:	https://sketchfab.com/3d-models/boulder-1e4b32c2b4f04cb691484afca927148c
+* author:	vadler (https://sketchfab.com/vadler)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Boulder" (https://sketchfab.com/3d-models/boulder-1e4b32c2b4f04cb691484afca927148c) by vadler (https://sketchfab.com/vadler) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

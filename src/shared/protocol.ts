@@ -6,10 +6,12 @@ import type { RoomCoord } from "./constants.js";
 export interface GameSnapshot {
   player: { x: number; y: number; color: string; name: string; room: RoomCoord; facing: 1 | -1 };
   stats: { level: number; health: number; maxHealth: number; mana: number; maxMana: number };
+  /** Optional persistent poison status used by the procedural tactics game. */
+  poisoned?: boolean;
   enemies: Array<{
     id: string;
     /** Visual/behaviour family; absent means the original hellhound. */
-    kind?: "hellhound" | "bat";
+    kind?: "hellhound" | "bat" | "spider";
     name: string;
     glyph: string;
     color: string;
@@ -26,6 +28,10 @@ export interface GameSnapshot {
     heading?: { x: number; y: number };
     /** Height above the floor in scene units for flying enemies. */
     altitude?: number;
+    /** Surface occupied by a wall-crawling enemy. */
+    surface?: "floor" | "north" | "east" | "south" | "west";
+    /** True while a spider is in its stationary movement-cycle phase. */
+    movementPaused?: boolean;
   }>;
   /**
    * Dead enemies, left where they fell. Drawn dimmed, and targetable — but
@@ -40,7 +46,7 @@ export interface GameSnapshot {
     x: number;
     y: number;
     facing: 1 | -1;
-    kind?: "hellhound" | "bat";
+    kind?: "hellhound" | "bat" | "spider";
     altitude?: number;
   }>;
   /**

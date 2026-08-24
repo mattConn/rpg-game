@@ -24,7 +24,7 @@ export interface Corpse {
   x: number;
   y: number;
   facing: 1 | -1;
-  kind?: "hellhound" | "bat";
+  kind?: "hellhound" | "bat" | "spider";
   /** Scene-space flight height at death; only present for flying corpses. */
   altitude?: number;
   loot: LootItem[];

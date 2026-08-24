@@ -1065,6 +1065,97 @@ export interface BatRig {
   }>;
 }
 
+export interface SpiderRig {
+  model: THREE.Group;
+  mixer: THREE.AnimationMixer | null;
+  walkAction: THREE.AnimationAction | null;
+  limbRoots: THREE.Bone[];
+}
+
+let importedSpiderScene: Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }> | null = null;
+
+/** Imported dungeon spider with its authored walking cycle and a dark texture tint. */
+export function buildSpider(): SpiderRig {
+  const rig: SpiderRig = { model: new THREE.Group(), mixer: null, walkAction: null, limbRoots: [] };
+  importedSpiderScene ??= new Promise((resolve, reject) => {
+    new GLTFLoader().load(
+      "/shared-models/spider/scene.gltf",
+      (gltf) => resolve({ scene: gltf.scene, animations: gltf.animations }),
+      undefined,
+      reject,
+    );
+  });
+  importedSpiderScene.then(({ scene, animations }) => {
+    const visual = cloneSkeleton(scene);
+    // The authored model faces along its glTF Z axis; actors in this game face
+    // local +X before their world yaw is applied.
+    visual.rotation.y = Math.PI / 2;
+    visual.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(visual);
+    const size = bounds.getSize(new THREE.Vector3());
+    // Reduced another quarter from the prior 8.625-unit normalization.
+    visual.scale.setScalar(6.46875 / Math.max(size.x, size.y, size.z));
+    visual.updateMatrixWorld(true);
+    const scaled = new THREE.Box3().setFromObject(visual);
+    const centre = scaled.getCenter(new THREE.Vector3());
+    visual.position.set(-centre.x, -scaled.min.y, -centre.z);
+    visual.traverse((node) => {
+      if (node instanceof THREE.Bone && /_(?:L|R)$/.test(node.name)) {
+        rig.limbRoots.push(node);
+      }
+      if (!(node instanceof THREE.Mesh)) return;
+      node.castShadow = true;
+      node.receiveShadow = true;
+      const sources = Array.isArray(node.material) ? node.material : [node.material];
+      const materials = sources.map((source) => {
+        const material = source.clone();
+        if (material instanceof THREE.MeshStandardMaterial) {
+          const eye = material.name.toLowerCase().includes("eye") || node.name.toLowerCase().includes("eye");
+          if (eye) {
+            material.color.setHex(0x260202);
+            material.emissive.setHex(0xff0000);
+            material.emissiveIntensity = 2.2;
+            material.map = null;
+            // All eight authored eyes share one skinned mesh and one material.
+            // The four large upper eyes are separate connected components whose
+            // lowest vertices sit above Y=.562; every small lower eye ends below
+            // Y=.560. A hard component-safe cutoff lights each selected eye as
+            // a complete circle rather than feathering through its geometry.
+            material.onBeforeCompile = (shader) => {
+              shader.vertexShader = shader.vertexShader
+                .replace("void main() {", "varying float vGlowingSpiderEye;\nvoid main() {")
+                .replace(
+                  "#include <begin_vertex>",
+                  "#include <begin_vertex>\n  vGlowingSpiderEye = step(0.561, position.y);",
+                );
+              shader.fragmentShader = shader.fragmentShader
+                .replace("void main() {", "varying float vGlowingSpiderEye;\nvoid main() {")
+                .replace(
+                  "vec3 totalEmissiveRadiance = emissive;",
+                  "vec3 totalEmissiveRadiance = emissive * vGlowingSpiderEye;",
+                );
+            };
+            material.customProgramCacheKey = () => "upper-spider-eyes-v3";
+          } else {
+            material.color.multiplyScalar(0.1);
+          }
+          material.roughness = Math.max(material.roughness, 0.72);
+        }
+        return material;
+      });
+      node.material = Array.isArray(node.material) ? materials : materials[0]!;
+    });
+    rig.model.add(visual);
+    const walk = animations.find((clip) => /walk-cycle-basic/i.test(clip.name)) ?? animations[0];
+    if (walk) {
+      rig.mixer = new THREE.AnimationMixer(visual);
+      rig.walkAction = rig.mixer.clipAction(walk);
+      rig.walkAction.play();
+    }
+  }).catch((error: unknown) => console.warn("Could not load imported spider model", error));
+  return rig;
+}
+
 let importedBatScene: Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }> | null = null;
 
 /** Imported flying bat, normalized to game scale with bright red eyes. */
@@ -1154,7 +1245,7 @@ const importedBloodSplatterScene = new Promise<THREE.Group>((resolve, reject) =>
 });
 
 /** A short-lived imported 3D splash layered beneath the procedural droplets. */
-export function buildBloodSplatter(): THREE.Group {
+export function buildBloodSplatter(color = 0x520006): THREE.Group {
   const root = new THREE.Group();
   importedBloodSplatterScene.then((scene) => {
     if (root.userData["disposed"]) return;
@@ -1173,7 +1264,7 @@ export function buildBloodSplatter(): THREE.Group {
       node.receiveShadow = false;
       const materials = Array.isArray(node.material) ? node.material : [node.material];
       const replacements = materials.map(() => new THREE.MeshBasicMaterial({
-        color: 0x520006,
+        color,
         transparent: true,
         opacity: 0.82,
         depthWrite: false,
@@ -1225,14 +1316,49 @@ export function buildDagger(): THREE.Group {
  * it reads as a cross rather than as a post. Whatever places one should jitter
  * its yaw only slightly, for the same reason.
  */
+let importedCelticCrossScene: Promise<THREE.Group> | null = null;
+
 export function buildTombstone(): THREE.Group {
   const group = new THREE.Group();
 
-  group.add(at(box(0.15, 1.06, 0.15, STONE), 0, 0.53, 0)); // upright
-  group.add(at(box(0.62, 0.15, 0.15, STONE), 0, 0.78, 0)); // crossbar
-
-  group.add(at(box(0.44, 0.11, 0.44, 0x4e4e56), 0, 0.05, 0)); // plinth
-  group.rotation.z = 0.06; // nothing in a dungeon stands straight
+  importedCelticCrossScene ??= new Promise((resolve, reject) => {
+    new GLTFLoader().load(
+      "/shared-models/celtic-cross/scene-low.glb",
+      (gltf) => resolve(gltf.scene),
+      undefined,
+      reject,
+    );
+  });
+  importedCelticCrossScene.then((source) => {
+    const visual = source.clone(true);
+    visual.traverse((node) => {
+      if (!(node instanceof THREE.Mesh)) return;
+      node.castShadow = true;
+      node.receiveShadow = true;
+      const sources = Array.isArray(node.material) ? node.material : [node.material];
+      const materials = sources.map((sourceMaterial) => {
+        const material = sourceMaterial.clone();
+        if (material instanceof THREE.MeshStandardMaterial) {
+          material.color.setHex(0xc8cdd3);
+          material.metalness = 0.9;
+          material.roughness = 0.24;
+        }
+        return material;
+      });
+      node.material = Array.isArray(node.material) ? materials : materials[0]!;
+    });
+    visual.updateMatrixWorld(true);
+    let bounds = new THREE.Box3().setFromObject(visual);
+    const size = bounds.getSize(new THREE.Vector3());
+    visual.scale.setScalar(1.8 / Math.max(0.001, size.y));
+    visual.updateMatrixWorld(true);
+    bounds = new THREE.Box3().setFromObject(visual);
+    const centre = bounds.getCenter(new THREE.Vector3());
+    visual.position.x -= centre.x;
+    visual.position.y -= bounds.min.y;
+    visual.position.z -= centre.z;
+    group.add(visual);
+  }).catch((error: unknown) => console.warn("Could not load Celtic death cross", error));
 
   return group;
 }

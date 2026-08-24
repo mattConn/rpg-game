@@ -126,7 +126,8 @@ export const BOARD_REGION: Region = {
 
 /** Reproducible procedural dungeon shared verbatim by simulation and renderer. */
 export let DUNGEON_SEED = 0x574f4c46;
-const ROOM_COUNT = 6;
+/** One safe spawn chamber followed by six procedurally populated rooms. */
+const ROOM_COUNT = 7;
 const HALL_COLS = SUBDIVISION * 2;
 const seededRandom = (seed: number) => {
   let state = seed >>> 0 || 1;
@@ -144,9 +145,10 @@ const generateDungeon = (seed: number) => {
   const rooms: Region[] = [BOARD_REGION];
   const connections: DungeonConnection[] = [];
   const directions: readonly ConnectionSide[] = ["north", "east", "south", "west"];
-  // Six rooms are enough to guarantee visible variety without making any
-  // particular size correspond to a fixed location in the dungeon.
-  const remainingSizes: RoomSize[] = ["small", "medium", "medium", "large", "jumbo"];
+  // The fixed first chamber is reserved for player spawning. Six generated
+  // rooms follow it, preserving the previous combat-room count while adding a
+  // safe place to enter the dungeon.
+  const remainingSizes: RoomSize[] = ["small", "medium", "medium", "medium", "large", "jumbo"];
   for (let i = remainingSizes.length - 1; i > 0; i--) {
     const j = Math.floor(dungeonRandom() * (i + 1));
     [remainingSizes[i], remainingSizes[j]] = [remainingSizes[j]!, remainingSizes[i]!];
@@ -208,22 +210,24 @@ export let HALL_ROWS = HALL_REGION.rows;
 export let REGIONS: readonly Region[] = ROOM_REGIONS.flatMap((room, index) =>
   index < HALL_REGIONS.length ? [room, HALL_REGIONS[index]!] : [room]);
 
-export interface DungeonEnemySpawn { kind: "hellhound" | "bat"; cell: Cell; roomIndex: number }
-/** One to four enemies per room, with the first pair always sharing a kind. */
+export interface DungeonEnemySpawn { kind: "hellhound" | "bat" | "spider"; cell: Cell; roomIndex: number }
+/** One to four enemies per combat room; room zero is always the safe spawn. */
 const generateEnemies = (seed: number, rooms: readonly Region[]): readonly DungeonEnemySpawn[] => {
   const enemyRandom = seededRandom(seed ^ 0x9e3779b9);
   const result: DungeonEnemySpawn[] = [];
   const spots = [[0.7, 0.7], [0.3, 0.7], [0.7, 0.3], [0.3, 0.3]] as const;
   rooms.forEach((room, roomIndex) => {
+    // Room zero is the dedicated player spawn chamber and is always safe.
+    if (roomIndex === 0) return;
     const size = room.size ?? "medium";
-    const count = roomIndex === 0 ? 1
-      : size === "small" ? Math.floor(enemyRandom() * 2)
+    const count = size === "small" ? Math.floor(enemyRandom() * 2)
         : size === "medium" ? 1 + Math.floor(enemyRandom() * 3)
           : size === "large" ? 1 + Math.floor(enemyRandom() * 4)
             : 4;
-    const primary: DungeonEnemySpawn["kind"] = roomIndex % 3 === 1 ? "bat" : "hellhound";
+    const families: readonly DungeonEnemySpawn["kind"][] = ["hellhound", "bat", "spider"];
+    const primary = families[Math.floor(enemyRandom() * families.length)]!;
     const secondPairKind: DungeonEnemySpawn["kind"] = enemyRandom() < 0.65
-      ? primary : primary === "bat" ? "hellhound" : "bat";
+      ? primary : families[(families.indexOf(primary) + 1 + Math.floor(enemyRandom() * 2)) % families.length]!;
     for (let index = 0; index < count; index++) {
       const kind = index < 2 ? primary : secondPairKind;
       const [across, down] = spots[index]!;
@@ -241,6 +245,76 @@ const generateEnemies = (seed: number, rooms: readonly Region[]): readonly Dunge
 
 export let DUNGEON_ENEMIES: readonly DungeonEnemySpawn[] = generateEnemies(DUNGEON_SEED, ROOM_REGIONS);
 
+/** Seventy percent of dungeons contain exactly two trapped, non-jumbo combat rooms. */
+const generatePressurePlateRooms = (seed: number, rooms: readonly Region[]): readonly number[] => {
+  const random = seededRandom(seed ^ 0x51a7e5);
+  // Warm the tiny xorshift generator so adjacent numeric seeds do not share
+  // the same high-level feature roll.
+  random(); random(); random();
+  if (random() >= 0.7) return [];
+  const eligible = rooms.map((_, index) => index).filter(
+    (index) => index !== 0 && rooms[index]!.size !== "jumbo",
+  );
+  for (let index = eligible.length - 1; index > 0; index--) {
+    const swap = Math.floor(random() * (index + 1));
+    [eligible[index], eligible[swap]] = [eligible[swap]!, eligible[index]!];
+  }
+  return eligible.slice(0, 2);
+};
+
+export let PRESSURE_PLATE_ROOMS: readonly number[] = generatePressurePlateRooms(DUNGEON_SEED, ROOM_REGIONS);
+
+export interface PressurePlateDefinition {
+  id: string;
+  roomIndex: number;
+  connectionIndex: number;
+  position: Point;
+}
+
+const generatePressurePlates = (): readonly PressurePlateDefinition[] =>
+  PRESSURE_PLATE_ROOMS.flatMap((roomIndex) => {
+    const room = ROOM_REGIONS[roomIndex]!;
+    const centre = regionCentre(room);
+    const offset = Math.min(room.cols, room.rows) * TILE_PX * 0.2;
+    return DUNGEON_CONNECTIONS.flatMap((connection, connectionIndex) => {
+      if (connection.from !== roomIndex && connection.to !== roomIndex) return [];
+      const toward = regionCentre(connection.hall);
+      const dx = toward.x - centre.x;
+      const dy = toward.y - centre.y;
+      const length = Math.max(0.001, Math.hypot(dx, dy));
+      return [{
+        id: `${roomIndex}:${connectionIndex}`,
+        roomIndex,
+        connectionIndex,
+        position: {
+          x: centre.x + (dx / length) * offset,
+          y: centre.y + (dy / length) * offset,
+        },
+      }];
+    });
+  });
+
+export let PRESSURE_PLATES: readonly PressurePlateDefinition[] = generatePressurePlates();
+
+/** The one exit a room's plate may bar: always the doorway farther from spawn. */
+export function pressurePlateClosedConnection(roomIndex: number): DungeonConnection | undefined {
+  const spawn = cellCenter(PLAYER_START);
+  return DUNGEON_CONNECTIONS
+    .filter((connection) => connection.from === roomIndex || connection.to === roomIndex)
+    .sort((left, right) => {
+      const leftCentre = regionCentre(left.hall);
+      const rightCentre = regionCentre(right.hall);
+      return distance(rightCentre, spawn) - distance(leftCentre, spawn);
+    })[0];
+}
+
+/** The doorway nearer spawn, which closes when the far doorway is opened. */
+export function pressurePlateNearConnection(roomIndex: number): DungeonConnection | undefined {
+  const far = pressurePlateClosedConnection(roomIndex);
+  return DUNGEON_CONNECTIONS.find((connection) =>
+    connection !== far && (connection.from === roomIndex || connection.to === roomIndex));
+}
+
 /** Rebuild every derived layout value before constructing the stage/game. */
 export function configureDungeon(seed: number): void {
   DUNGEON_SEED = seed >>> 0 || 1;
@@ -256,6 +330,8 @@ export function configureDungeon(seed: number): void {
   REGIONS = ROOM_REGIONS.flatMap((room, index) =>
     index < HALL_REGIONS.length ? [room, HALL_REGIONS[index]!] : [room]);
   DUNGEON_ENEMIES = generateEnemies(DUNGEON_SEED, ROOM_REGIONS);
+  PRESSURE_PLATE_ROOMS = generatePressurePlateRooms(DUNGEON_SEED, ROOM_REGIONS);
+  PRESSURE_PLATES = generatePressurePlates();
 }
 
 export type DoorId = "arena" | "far";
@@ -596,6 +672,7 @@ export function isOver(phase: Phase): boolean {
  * fields they always read; the extra ones ride along untouched.
  */
 export interface TacticsSnapshot extends GameSnapshot {
+  pressurePlates: Array<{ id: string; roomIndex: number; connectionIndex: number; active: boolean }>;
   /** Full player heading, independent of the camera's orbit. */
   playerHeading: Point;
   /** Whether Shift sprint is currently held. */

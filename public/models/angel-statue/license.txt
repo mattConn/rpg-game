@@ -1,0 +1,11 @@
+Model Information:
+* title:	Angel Statue
+* source:	https://sketchfab.com/3d-models/angel-statue-2277c9884ccf42c6a049230a2b33dd12
+* author:	lightdatavision (https://sketchfab.com/lightdatavision)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Angel Statue" (https://sketchfab.com/3d-models/angel-statue-2277c9884ccf42c6a049230a2b33dd12) by lightdatavision (https://sketchfab.com/lightdatavision) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

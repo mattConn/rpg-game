@@ -18,6 +18,7 @@ import type { GameSnapshot } from "../../../src/shared/protocol.js";
 import {
   buildDagger,
   buildBat,
+  buildSpider,
   buildBloodSplatter,
   buildHuman,
   buildPlayerWolf,
@@ -28,6 +29,7 @@ import {
   tintObject,
   type HumanRig,
   type BatRig,
+  type SpiderRig,
   type PlayerWolfRig,
   type WolfRig,
 } from "./models.js";
@@ -47,6 +49,10 @@ const COLLAPSE_MS = 450;
 const FALL_MS = 600;
 const JUMP_MS = 620;
 const JUMP_HEIGHT = 1.4;
+const RED_BLOOD = 0x490006;
+const SPIDER_BLOOD = 0x78168f;
+const SPIDER_SPLATTER = 0x280032;
+const BLOOD_SHOCKWAVE = 0xb20b13;
 
 /** Quick launch, long fall: peak at 28% of the jump, then gather downward speed. */
 function jumpArc(age: number): number {
@@ -403,6 +409,7 @@ interface BloodBurst {
   flash: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial> | null;
   velocities: THREE.Vector3[];
   age: number;
+  splatterScale: number;
 }
 
 class WolfActor {
@@ -595,6 +602,55 @@ class BatActor {
   dispose(): void { disposeObject(this.root); }
 }
 
+class SpiderActor {
+  readonly root = new THREE.Group();
+  private readonly rig: SpiderRig;
+  private readonly hitbox: THREE.LineLoop;
+  private hurt = 0;
+
+  constructor(id: string) {
+    this.rig = buildSpider();
+    this.root.add(this.rig.model);
+    this.hitbox = hitboxOutline(3.375, 3.375);
+    this.hitbox.visible = false;
+    this.root.add(this.hitbox);
+    this.root.userData["entityId"] = id;
+  }
+
+  flinch(): void { this.hurt = 1; }
+  lunge(_now: number): void {}
+  setHitboxVisible(visible: boolean): void { this.hitbox.visible = visible; }
+
+  update(enemy: GameSnapshot["enemies"][number], dt: number): void {
+    if (this.rig.walkAction) this.rig.walkAction.paused = enemy.movementPaused === true;
+    this.rig.mixer?.update(dt);
+    const heading = enemy.heading ?? { x: enemy.facing, y: 0 };
+    const surface = enemy.surface ?? "floor";
+    this.root.position.set(toX(enemy.x), enemy.altitude ?? 0, toZ(enemy.y));
+    this.root.rotation.set(0, 0, 0);
+    if (surface === "floor") {
+      this.root.rotation.y = yawFor(heading.x, heading.y);
+    } else if (surface === "north") {
+      this.root.rotation.x = Math.PI / 2;
+      this.rig.model.rotation.y = heading.x >= 0 ? -Math.PI / 2 : Math.PI / 2;
+    } else if (surface === "south") {
+      this.root.rotation.x = -Math.PI / 2;
+      this.rig.model.rotation.y = heading.x >= 0 ? Math.PI / 2 : -Math.PI / 2;
+    } else if (surface === "west") {
+      this.root.rotation.z = -Math.PI / 2;
+      this.rig.model.rotation.y = heading.y >= 0 ? 0 : Math.PI;
+    } else {
+      this.root.rotation.z = Math.PI / 2;
+      this.rig.model.rotation.y = heading.y >= 0 ? Math.PI : 0;
+    }
+    if (surface === "floor") this.rig.model.rotation.y = 0;
+    this.hurt = Math.max(0, this.hurt - dt * 5);
+    this.rig.model.position.x = -this.hurt * 0.08;
+  }
+
+  dispose(): void { disposeObject(this.root); }
+}
+
 /** A body: the same wolf, toppled onto its side and dimmed where it fell. */
 class CorpseActor {
   readonly root = new THREE.Group();
@@ -735,13 +791,69 @@ class BatCorpseActor {
   dispose(): void { disposeObject(this.root); }
 }
 
+class SpiderCorpseActor {
+  readonly root = new THREE.Group();
+  private readonly rig = buildSpider();
+  private age = 0;
+  private limbRest: THREE.Quaternion[] | null = null;
+
+  constructor(id: string, corpse: GameSnapshot["corpses"][number]) {
+    this.root.add(this.rig.model);
+    this.root.userData["entityId"] = id;
+    this.root.position.set(toX(corpse.x), corpse.altitude ?? 0, toZ(corpse.y));
+    this.root.rotation.y = yawFor(corpse.facing, 0);
+  }
+
+  update(dt: number): void {
+    this.age += dt;
+    this.rig.walkAction?.stop();
+    this.rig.mixer?.stopAllAction();
+    this.root.position.y = Math.max(0, this.root.position.y - dt * 5);
+
+    const fall = Math.min(1, this.age / 0.72);
+    const easedFall = 1 - Math.pow(1 - fall, 3);
+    // A complete half-turn leaves the spider visibly upside down rather than
+    // merely toppled on its side.
+    this.rig.model.rotation.z = easedFall * Math.PI;
+
+    if (this.rig.limbRoots.length && this.limbRest === null) {
+      this.limbRest = this.rig.limbRoots.map((bone) => bone.quaternion.clone());
+    }
+    if (this.limbRest) {
+      const looseEnergy = Math.exp(-this.age * 3.1);
+      this.rig.limbRoots.forEach((bone, index) => {
+        const side = bone.name.endsWith("_L") ? 1 : -1;
+        const stagger = index * 0.73;
+        const fold = easedFall * side * (0.42 + (index % 4) * 0.055);
+        const flop = Math.sin(this.age * (9.5 + (index % 3)) + stagger) * looseEnergy * 0.5;
+        const twist = Math.cos(this.age * 8.2 + stagger) * looseEnergy * 0.24;
+        const ragdoll = new THREE.Quaternion().setFromEuler(
+          new THREE.Euler(flop * 0.45, twist, fold + flop, "XYZ"),
+        );
+        bone.quaternion.copy(this.limbRest![index]!).multiply(ragdoll);
+      });
+    }
+
+    // Once it has landed, settle the transformed skeleton exactly onto the
+    // floor so neither the abdomen nor loose legs remain floating.
+    if (this.root.position.y <= 0 && fall >= 1) {
+      this.rig.model.position.y = 0;
+      this.root.updateMatrixWorld(true);
+      const bounds = new THREE.Box3().setFromObject(this.rig.model);
+      if (Number.isFinite(bounds.min.y)) this.rig.model.position.y = 0.02 - bounds.min.y;
+    }
+  }
+
+  dispose(): void { disposeObject(this.root); }
+}
+
 // ------------------------------------------------------------------ manager
 
 /** Everything the snapshot owns, kept in step with it. */
 export class Actors {
   readonly player: PlayerActor | PlayerWolfActor;
-  private readonly enemies = new Map<string, WolfActor | BatActor>();
-  private readonly corpses = new Map<string, CorpseActor | BatCorpseActor>();
+  private readonly enemies = new Map<string, WolfActor | BatActor | SpiderActor>();
+  private readonly corpses = new Map<string, CorpseActor | BatCorpseActor | SpiderCorpseActor>();
   private readonly projectiles: THREE.Group[] = [];
   private readonly tombstones = new Map<string, THREE.Group>();
   private readonly bloodBursts: BloodBurst[] = [];
@@ -749,6 +861,7 @@ export class Actors {
     delay: number;
     target: THREE.Object3D;
     source: THREE.Object3D;
+    color: number;
   }> = [];
 
   constructor(
@@ -773,7 +886,8 @@ export class Actors {
   bloodOnEnemy(id: string): void {
     const enemy = this.enemies.get(id);
     if (!enemy) return;
-    this.spawnBlood(enemy.root, this.player.root, true);
+    this.spawnBlood(enemy.root, this.player.root, true,
+      enemy instanceof SpiderActor ? SPIDER_BLOOD : RED_BLOOD);
   }
 
   bloodOnPlayer(attackerId: string | null): void {
@@ -781,7 +895,7 @@ export class Actors {
   }
 
   bloodOnNearestCorpse(): void {
-    let nearest: CorpseActor | BatCorpseActor | null = null;
+    let nearest: CorpseActor | BatCorpseActor | SpiderCorpseActor | null = null;
     let nearestDistance = Infinity;
     for (const corpse of this.corpses.values()) {
       const distance = corpse.root.position.distanceTo(this.player.root.position);
@@ -791,42 +905,53 @@ export class Actors {
       }
     }
     if (!nearest) return;
-    this.spawnBlood(nearest.root, this.player.root);
+    const color = nearest instanceof SpiderCorpseActor ? SPIDER_BLOOD : RED_BLOOD;
+    this.spawnBlood(nearest.root, this.player.root, false, color);
     this.pendingBloodBursts.push({
       delay: 0.16,
       target: nearest.root,
       source: this.player.root,
+      color,
     });
   }
 
-  private spawnBlood(target: THREE.Object3D, source?: THREE.Object3D, showImpactFlash = false): void {
+  private spawnBlood(
+    target: THREE.Object3D,
+    source?: THREE.Object3D,
+    showImpactFlash = false,
+    color = RED_BLOOD,
+  ): void {
     const targetWorld = target.getWorldPosition(new THREE.Vector3());
     const sourceWorld = source?.getWorldPosition(new THREE.Vector3());
     const towardSource = sourceWorld
       ? sourceWorld.sub(targetWorld).setY(0).normalize()
       : new THREE.Vector3(1, 0, 0);
     if (towardSource.lengthSq() < 0.0001) towardSource.set(1, 0, 0);
-    const isBat = target.position.y > 1.5;
+    const isSpider = color === SPIDER_BLOOD;
+    const isBat = !isSpider && target.position.y > 1.5;
     const origin = targetWorld.clone()
-      .addScaledVector(towardSource, isBat ? 0.5 : 0.38)
-      .add(new THREE.Vector3(0, isBat ? 0.05 : 0.82, 0));
-    const positions = new Float32Array(14 * 3);
+      .addScaledVector(towardSource, isBat ? 0.5 : isSpider ? 0.7 : 0.38)
+      .add(new THREE.Vector3(0, isBat ? 0.05 : isSpider ? 1.25 : 0.82, 0));
+    const particleCount = isSpider ? 24 : 14;
+    const particleSpread = isSpider ? 1.65 : 1;
+    const splatterScale = isSpider ? 1.8 : 1;
+    const positions = new Float32Array(particleCount * 3);
     const velocities: THREE.Vector3[] = [];
-    for (let i = 0; i < 14; i++) {
+    for (let i = 0; i < particleCount; i++) {
       positions[i * 3] = origin.x;
       positions[i * 3 + 1] = origin.y;
       positions[i * 3 + 2] = origin.z;
-      velocities.push(towardSource.clone().multiplyScalar(0.7 + Math.random() * 1.1).add(new THREE.Vector3(
-        (Math.random() - 0.5) * 1.2,
-        0.45 + Math.random() * 1.25,
-        (Math.random() - 0.5) * 1.2,
+      velocities.push(towardSource.clone().multiplyScalar((0.7 + Math.random() * 1.1) * particleSpread).add(new THREE.Vector3(
+        (Math.random() - 0.5) * 1.2 * particleSpread,
+        (0.45 + Math.random() * 1.25) * particleSpread,
+        (Math.random() - 0.5) * 1.2 * particleSpread,
       )));
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
     const material = new THREE.PointsMaterial({
-      color: 0x490006,
-      size: 0.13,
+      color,
+      size: isSpider ? 0.22 : 0.13,
       transparent: true,
       opacity: 1,
       depthWrite: false,
@@ -834,7 +959,7 @@ export class Actors {
     });
     const points = new THREE.Points(geometry, material);
     this.scene.add(points);
-    const splatter = buildBloodSplatter();
+    const splatter = buildBloodSplatter(color === SPIDER_BLOOD ? SPIDER_SPLATTER : 0x520006);
     splatter.position.copy(origin);
     // The source asset is a floor splash. Turn its broad face toward the blow
     // so it reads at the actual bite/sword contact point instead of lying flat
@@ -843,14 +968,14 @@ export class Actors {
       new THREE.Vector3(0, 1, 0),
       towardSource.clone().normalize(),
     );
-    splatter.scale.setScalar(0.82);
+    splatter.scale.setScalar(0.82 * splatterScale);
     this.scene.add(splatter);
     let flash: BloodBurst["flash"] = null;
     if (showImpactFlash) {
       flash = new THREE.Mesh(
         new THREE.SphereGeometry(0.18, 12, 8),
         new THREE.MeshBasicMaterial({
-          color: 0xb20b13,
+          color: BLOOD_SHOCKWAVE,
           transparent: true,
           opacity: 0.3,
           depthWrite: false,
@@ -860,7 +985,7 @@ export class Actors {
       flash.position.copy(origin);
       this.scene.add(flash);
     }
-    this.bloodBursts.push({ points, splatter, flash, velocities, age: 0 });
+    this.bloodBursts.push({ points, splatter, flash, velocities, age: 0, splatterScale });
   }
 
   private updateBlood(dt: number): void {
@@ -868,7 +993,7 @@ export class Actors {
       const pending = this.pendingBloodBursts[i]!;
       pending.delay -= dt;
       if (pending.delay > 0) continue;
-      this.spawnBlood(pending.target, pending.source);
+      this.spawnBlood(pending.target, pending.source, false, pending.color);
       this.pendingBloodBursts.splice(i, 1);
     }
     for (let i = this.bloodBursts.length - 1; i >= 0; i--) {
@@ -888,7 +1013,7 @@ export class Actors {
       positions.needsUpdate = true;
       burst.points.material.opacity = Math.max(0, 1 - burst.age / 0.56);
       const splatterT = Math.min(1, burst.age / 0.5);
-      burst.splatter.scale.setScalar(0.82 + splatterT * 1.78);
+      burst.splatter.scale.setScalar((0.82 + splatterT * 1.78) * burst.splatterScale);
       burst.splatter.traverse((node) => {
         if (!(node instanceof THREE.Mesh)) return;
         const materials = Array.isArray(node.material) ? node.material : [node.material];
@@ -946,7 +1071,9 @@ export class Actors {
       snap.enemies.map((e) => e.id),
       (id) => {
         const enemy = snap.enemies.find((e) => e.id === id)!;
-        const actor = enemy.kind === "bat" ? new BatActor(id) : new WolfActor(id, enemy.color);
+        const actor = enemy.kind === "bat" ? new BatActor(id)
+          : enemy.kind === "spider" ? new SpiderActor(id)
+            : new WolfActor(id, enemy.color);
         this.scene.add(actor.root);
         this.pickables.push(actor.root);
         return actor;
@@ -965,7 +1092,9 @@ export class Actors {
       snap.corpses.map((c) => c.id),
       (id) => {
         const corpse = snap.corpses.find((c) => c.id === id)!;
-        const actor = corpse.kind === "bat" ? new BatCorpseActor(id, corpse) : new CorpseActor(id, corpse);
+        const actor = corpse.kind === "bat" ? new BatCorpseActor(id, corpse)
+          : corpse.kind === "spider" ? new SpiderCorpseActor(id, corpse)
+            : new CorpseActor(id, corpse);
         this.scene.add(actor.root);
         this.pickables.push(actor.root);
         return actor;
@@ -1002,7 +1131,7 @@ export class Actors {
     });
   }
 
-  syncTombstones(snap: GameSnapshot): void {
+  syncTombstones(snap: GameSnapshot, cameraYaw = 0): void {
     const stones = snap.tombstones ?? [];
     syncKeys(
       this.tombstones,
@@ -1010,11 +1139,11 @@ export class Actors {
       (key) => {
         const stone = stones.find((t) => tombstoneKey(t) === key)!;
         const group = buildTombstone();
-        group.position.set(toX(stone.x), 0, toZ(stone.y));
-        // A slight turn so a row of crosses isn't identical, but only slight:
-        // edge-on, a cross reads as a post. Derived from the position so it is
-        // stable frame to frame rather than twitching.
-        group.rotation.y = (((stone.x * 7919 + stone.y * 104729) % 100) / 100 - 0.5) * 0.5;
+        group.position.set(toX(stone.x), -0.12, toZ(stone.y));
+        // The imported cross is broad on local Z and thin on local X. Capture
+        // the view angle only when this death first appears; syncKeys retains
+        // the same group (and yaw) across subsequent game resets.
+        group.rotation.y = cameraYaw - Math.PI / 2;
         this.scene.add(group);
         return group;
       },

@@ -38,6 +38,7 @@ export interface HudStats {
   mana: number;
   maxMana: number;
   dead?: boolean;
+  healthColor?: string;
 }
 
 /** The two bars sit to the right of the portrait, vertically centred against it. */
@@ -118,7 +119,7 @@ export function drawHud(ctx: CanvasRenderingContext2D, origin: Point, stats: Hud
   ctx.fillStyle = portraitColor;
   ctx.fillText("@", centerX, centerY);
 
-  drawBar(ctx, barRect(origin, 0), stats.health, stats.maxHealth, "#c0392b");
+  drawBar(ctx, barRect(origin, 0), stats.health, stats.maxHealth, stats.healthColor ?? "#c0392b");
   drawBar(ctx, barRect(origin, 1), stats.mana, stats.maxMana, "#2a6fd6");
 
   ctx.font = NAME_FONT;
@@ -135,7 +136,7 @@ export function drawBarsOnlyHud(ctx: CanvasRenderingContext2D, origin: Point, st
   ctx.setLineDash([]);
   drawPanelBacking(ctx, origin, width, barHeight);
   drawBar(ctx, { x: origin.x, y: origin.y, width, height: barHeight },
-    stats.health, stats.maxHealth, "#c0392b", true);
+    stats.health, stats.maxHealth, stats.healthColor ?? "#c0392b", true);
 }
 
 // ----------------------------------------------------------- enemy portrait

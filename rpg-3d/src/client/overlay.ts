@@ -152,7 +152,13 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, params: OverlayParams
   drawWorldLabels(ctx, snap, groundCursor, toScreen, params.enemyHealthBars, params.showHoverNames !== false);
   drawDamageNumbers(ctx, snap, toScreen);
 
-  const hudStats = { name: snap.player.name, color: snap.player.color, ...snap.stats, dead: snap.dead };
+  const hudStats = {
+    name: snap.player.name,
+    color: snap.player.color,
+    ...snap.stats,
+    dead: snap.dead,
+    healthColor: snap.poisoned ? "#7e2ca8" : undefined,
+  };
   if (params.compactPlayerHud) drawBarsOnlyHud(ctx, hudOrigin, hudStats);
   else drawHud(ctx, hudOrigin, hudStats);
 
@@ -278,8 +284,8 @@ function drawWorldLabels(
       ? enemy.aggro
       : healthBars?.always || enemy.health < enemy.maxHealth);
     if (showHealth) {
-      const barHeight = enemy.kind === "bat"
-        ? (enemy.altitude ?? 4.2) + 1.3
+      const barHeight = enemy.kind === "bat" || enemy.kind === "spider" && enemy.surface !== "floor"
+        ? (enemy.altitude ?? 0) + (enemy.kind === "bat" ? 1.3 : 0.8)
         : healthBars?.worldHeight ?? 1.55;
       const bar = toScreen(enemy.x, enemy.y, barHeight);
       drawHealthBar(
@@ -294,7 +300,9 @@ function drawWorldLabels(
     }
 
     if (showHoverNames && near(enemy.x, enemy.y)) {
-      const at = toScreen(enemy.x, enemy.y, enemy.kind === "bat" ? (enemy.altitude ?? 4.2) + 1.65 : 1.9);
+      const at = toScreen(enemy.x, enemy.y,
+        enemy.kind === "bat" ? (enemy.altitude ?? 4.2) + 1.65
+          : enemy.kind === "spider" ? (enemy.altitude ?? 0) + 0.9 : 1.9);
       ctx.font = NAME_FONT;
       ctx.fillStyle = "#ffffff";
       ctx.fillText(enemy.name, at.x, at.y);
