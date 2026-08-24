@@ -41,6 +41,7 @@ import {
   DOOR_Y,
   DUNGEON_CONNECTIONS,
   DUNGEON_ENEMIES,
+  DUNGEON_PORTAL,
   type DoorId,
   FAR_REGION,
   HALL_REGION,
@@ -55,6 +56,7 @@ import {
   PLAYER_MAX_MANA,
   PLAYER_START,
   PRESSURE_PLATES,
+  PURPLE_GEM,
   ROOM_REGIONS,
   REGIONS,
   RANGED_DAMAGE,
@@ -313,6 +315,10 @@ export class TacticsGame {
   private occupiedPressurePlates = new Set<string>();
   private spikeTrapActive = false;
   private spikePlateOccupied = false;
+  private purpleGemDestroyed = false;
+  private nextDungeonSeed: number | null = null;
+  private dungeonFallStartedAt: number | null = null;
+  private fallenEnemyIds = new Set<string>();
 
   private strikes!: Array<{ enemyId: string; seq: number }>;
   private strikeSeq = 0;
@@ -373,13 +379,13 @@ export class TacticsGame {
    */
   private simNow = 0;
 
-  constructor(now: number = Date.now()) {
-    this.reset(now);
+  constructor(now: number = Date.now(), initialHealth: number = PLAYER_MAX_HEALTH) {
+    this.reset(now, initialHealth);
   }
 
   // ------------------------------------------------------------------ setup
 
-  private reset(now: number): void {
+  private reset(now: number, initialHealth: number = PLAYER_MAX_HEALTH): void {
     this.player = {
       id: "player",
       name: this.playerName,
@@ -387,7 +393,7 @@ export class TacticsGame {
       pos: cellCenter(PLAYER_START),
       ...cellCenter(PLAYER_START),
       facing: 1,
-      health: PLAYER_MAX_HEALTH,
+      health: Math.max(1, Math.min(PLAYER_MAX_HEALTH, Math.round(initialHealth))),
       maxHealth: PLAYER_MAX_HEALTH,
     };
     this.plateGateStates.clear();
@@ -395,6 +401,10 @@ export class TacticsGame {
     this.occupiedPressurePlates.clear();
     this.spikeTrapActive = false;
     this.spikePlateOccupied = false;
+    this.purpleGemDestroyed = false;
+    this.nextDungeonSeed = null;
+    this.dungeonFallStartedAt = null;
+    this.fallenEnemyIds.clear();
 
     this.enemies = DUNGEON_ENEMIES.map((spawn, spawnIndex) => {
       const cell = spawn.cell;
@@ -516,6 +526,13 @@ export class TacticsGame {
 
     if (isOver(this.phase)) return;
 
+    if (this.dungeonFallStartedAt !== null) {
+      if (this.simNow - this.dungeonFallStartedAt >= 1100) {
+        this.nextDungeonSeed ??= (Math.floor(Math.random() * 0xffffffff) >>> 0) || 1;
+      }
+      return;
+    }
+
     // Player movement — continuous, every tick.
     this.movePlayer(dt);
     this.updatePressurePlates();
@@ -602,6 +619,20 @@ export class TacticsGame {
     const target = clampPointToFloor(raw);
     if (this.gateBlocksMove(from, target)) return false;
     if (this.spikeFieldBlocksMove(from, target)) return false;
+    const fromRegion = this.regionOfCell(clampToGrid(from));
+    const targetRegion = this.regionOfCell(clampToGrid(target));
+    const portalRoom = ROOM_REGIONS[DUNGEON_PORTAL.roomIndex]!;
+    if (!this.purpleGemDestroyed &&
+        ((fromRegion === DUNGEON_PORTAL.exitRegion && targetRegion === portalRoom) ||
+         (fromRegion === portalRoom && targetRegion === DUNGEON_PORTAL.exitRegion))) return false;
+    if (targetRegion === portalRoom && this.purpleGemDestroyed) {
+      if (this.insideDungeonHole(target)) {
+        this.dungeonFallStartedAt = this.simNow;
+        this.moveTarget = null;
+        this.moveDir = { x: 0, y: 0 };
+        this.playerRunning = false;
+      }
+    }
     if (distance(from, target) < 0.01) return false;
 
     if (turnToTravel) {
@@ -707,6 +738,10 @@ export class TacticsGame {
    */
   private place(enemy: Hound, raw: Point): Point {
     let wanted = clampPointToFloor(raw);
+    if (this.insideDungeonHole(wanted)) {
+      enemy.health = 0;
+      this.fallenEnemyIds.add(enemy.id);
+    }
     if (enemy.kind !== "bat" && this.spikeFieldBlocksMove(this.at(enemy), wanted)) wanted = this.at(enemy);
     if (this.gateBlocksMove(this.at(enemy), wanted)) {
       wanted = this.at(enemy);
@@ -918,6 +953,11 @@ export class TacticsGame {
         y: at.y + (dy / gap) * BAT_SEPARATION,
       };
       if (this.onFloor(separated)) point = separated;
+    }
+    if (this.insideDungeonHole(point)) {
+      bat.health = 0;
+      this.fallenEnemyIds.add(bat.id);
+      return point;
     }
     return this.gateBlocksMove(this.at(bat), point) ? this.at(bat) : point;
   }
@@ -1347,6 +1387,16 @@ export class TacticsGame {
     return distance(to, centre) > safeRadius;
   }
 
+  /** Square test matching the visible shaft opening; crossing its ledge begins a fall. */
+  private insideDungeonHole(point: Point): boolean {
+    // Trigger slightly before the actor's centre reaches the geometric lip:
+    // the wolf has a footprint, and otherwise its front half can visibly walk
+    // over empty space while its origin is still supported by the floor.
+    const halfSize = TILE_PX * 2.1;
+    return Math.abs(point.x - DUNGEON_PORTAL.holePosition.x) <= halfSize
+      && Math.abs(point.y - DUNGEON_PORTAL.holePosition.y) <= halfSize;
+  }
+
   /**
    * When enemy and player are in different regions, return the next waypoint
    * on the path through the corridor that connects them. From a wide room
@@ -1504,6 +1554,12 @@ export class TacticsGame {
 
       if (this.targetId === enemy.id) this.targetId = null;
 
+      if (this.fallenEnemyIds.delete(enemy.id)) {
+        this.enemies.splice(i, 1);
+        this.killCount++;
+        continue;
+      }
+
       this.corpses.push(corpseOf({
         id: enemy.id,
         name: enemy.name,
@@ -1548,6 +1604,10 @@ export class TacticsGame {
     const action = TACTICS_ACTIONS[this.activeSlot];
     if (action?.kind === "interact") {
       this.say("Use Interact on a targeted door.");
+      return;
+    }
+    if (action?.kind === "melee" && this.tryDestroyPurpleGem()) {
+      this.startCooldown(MELEE_COOLDOWN_MS);
       return;
     }
     const target = action?.kind === "melee"
@@ -1614,6 +1674,19 @@ export class TacticsGame {
     this.cooldownSlot = this.activeSlot;
     this.cooldownStart = this.simNow;
     this.cooldownTotal = totalMs;
+  }
+
+  private tryDestroyPurpleGem(): boolean {
+    if (this.purpleGemDestroyed) return false;
+    const dx = PURPLE_GEM.position.x - this.player.x;
+    const dy = PURPLE_GEM.position.y - this.player.y;
+    const gap = Math.hypot(dx, dy);
+    if (gap > MELEE_RANGE * 1.15) return false;
+    const headingLength = Math.max(0.001, Math.hypot(this.playerHeading.x, this.playerHeading.y));
+    if (gap > 0.001 && (dx * this.playerHeading.x + dy * this.playerHeading.y) / (gap * headingLength) < ATTACK_CONE_DOT) return false;
+    this.purpleGemDestroyed = true;
+    this.say("The purple gem shatters. Somewhere, the barrier dissolves.");
+    return true;
   }
 
   private wound(enemy: Hound, amount: number): void {
@@ -2136,6 +2209,19 @@ export class TacticsGame {
         };
 
     return {
+      dungeonPortal: {
+        roomIndex: DUNGEON_PORTAL.roomIndex,
+        side: DUNGEON_PORTAL.side,
+        unlocked: this.purpleGemDestroyed,
+        fallProgress: this.dungeonFallStartedAt === null
+          ? 0 : Math.min(1, (this.simNow - this.dungeonFallStartedAt) / 1100),
+      },
+      purpleGem: {
+        x: PURPLE_GEM.position.x,
+        y: PURPLE_GEM.position.y,
+        destroyed: this.purpleGemDestroyed,
+      },
+      nextDungeonSeed: this.nextDungeonSeed,
       spikeTrap: SPIKE_TRAP_ROOM === null ? null : {
         roomIndex: SPIKE_TRAP_ROOM,
         active: this.spikeTrapActive,

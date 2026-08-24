@@ -33,6 +33,7 @@ import {
   DOORWAY_WIDTH_PX,
   DUNGEON_CONNECTIONS,
   DUNGEON_ENEMIES,
+  DUNGEON_PORTAL,
   DUNGEON_SEED,
   type DoorId,
   type DoorStates,
@@ -41,6 +42,7 @@ import {
   HALL_REGIONS,
   PRESSURE_PLATES,
   PRESSURE_PLATE_ROOMS,
+  PURPLE_GEM,
   ROOM_REGIONS,
   SQUARE_PX,
   SPIKE_TRAP_ROOM,
@@ -205,6 +207,7 @@ export interface Stage {
   setDoors(doors: DoorStates): void;
   setPressurePlates(plates: Array<{ id: string; roomIndex: number; connectionIndex: number; active: boolean }>): void;
   setSpikeTrap(trap: { roomIndex: number; active: boolean } | null): void;
+  setDungeonPortal(state: { unlocked: boolean; fallProgress: number }, gem: { destroyed: boolean }): void;
   animateScenery(elapsed: number): void;
   render(): void;
 }
@@ -480,12 +483,33 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   const apronD = (southmost - northmost) * 1.6;
   const apronTex = floorTexture.clone();
   apronTex.repeat.set(apronW / TEXTURE_SCALE, apronD / TEXTURE_SCALE);
-  const apron = new THREE.Mesh(
-    new THREE.PlaneGeometry(apronW, apronD).rotateX(-Math.PI / 2),
-    new THREE.MeshLambertMaterial({ map: apronTex, color: 0x606068, flatShading: true }),
-  );
-  apron.position.set((westmost + eastmost) / 2, -0.06, (northmost + southmost) / 2);
-  scene.add(apron);
+  const apronMaterial = new THREE.MeshLambertMaterial({ map: apronTex, color: 0x606068, flatShading: true });
+  const apronCx = (westmost + eastmost) / 2;
+  const apronCz = (northmost + southmost) / 2;
+  const apronWest = apronCx - apronW / 2;
+  const apronEast = apronCx + apronW / 2;
+  const apronNorth = apronCz - apronD / 2;
+  const apronSouth = apronCz + apronD / 2;
+  const apronHoleCx = toX(DUNGEON_PORTAL.holePosition.x);
+  const apronHoleCz = toZ(DUNGEON_PORTAL.holePosition.y);
+  const apronHoleSize = 10.8;
+  const addApron = (width: number, depth: number, x: number, z: number) => {
+    const slab = new THREE.Mesh(
+      new THREE.PlaneGeometry(width, depth).rotateX(-Math.PI / 2),
+      apronMaterial,
+    );
+    slab.position.set(x, -0.06, z);
+    slab.receiveShadow = true;
+    scene.add(slab);
+  };
+  const holeWest = apronHoleCx - apronHoleSize / 2;
+  const holeEast = apronHoleCx + apronHoleSize / 2;
+  const holeNorth = apronHoleCz - apronHoleSize / 2;
+  const holeSouth = apronHoleCz + apronHoleSize / 2;
+  addApron(holeWest - apronWest, apronD, (apronWest + holeWest) / 2, apronCz);
+  addApron(apronEast - holeEast, apronD, (holeEast + apronEast) / 2, apronCz);
+  addApron(apronHoleSize, holeNorth - apronNorth, apronHoleCx, (apronNorth + holeNorth) / 2);
+  addApron(apronHoleSize, apronSouth - holeSouth, apronHoleCx, (holeSouth + apronSouth) / 2);
 
   // -------------------------------------------------------------------- walls
 
@@ -627,10 +651,23 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     width: number,
     depth: number,
     openings: ReadonlySet<"north" | "east" | "south" | "west">,
+    centralHole = false,
   ) => {
-    const floor = stoneFloor(width, depth);
-    floor.position.set(cx, 0, cz);
-    scene.add(floor);
+    if (!centralHole) {
+      const floor = stoneFloor(width, depth);
+      floor.position.set(cx, 0, cz);
+      scene.add(floor);
+    } else {
+      const holeSize = Math.min(10.5, width * 0.34, depth * 0.34);
+      const sideWidth = (width - holeSize) / 2;
+      const endDepth = (depth - holeSize) / 2;
+      for (const x of [cx - (holeSize + sideWidth) / 2, cx + (holeSize + sideWidth) / 2]) {
+        const slab = stoneFloor(sideWidth, depth); slab.position.set(x, 0, cz); scene.add(slab);
+      }
+      for (const z of [cz - (holeSize + endDepth) / 2, cz + (holeSize + endDepth) / 2]) {
+        const slab = stoneFloor(holeSize, endDepth); slab.position.set(cx, 0, z); scene.add(slab);
+      }
+    }
 
     const west = cx - width / 2;
     const east = cx + width / 2;
@@ -677,6 +714,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       toX(region.cols * TILE_PX) + MARGIN * 2,
       toZ(region.rows * TILE_PX) + MARGIN * 2,
       openings,
+      index === DUNGEON_PORTAL.roomIndex,
     );
   });
 
@@ -823,6 +861,54 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     plate.receiveShadow = true;
     scene.add(plate);
   }
+
+  // ------------------------------------------------------ purple fog portal
+
+  const portalRoom = ROOM_REGIONS[DUNGEON_PORTAL.roomIndex]!;
+  const portalCentre = regionCentre(portalRoom);
+  const portalCx = toX(portalCentre.x);
+  const portalCz = toZ(portalCentre.y);
+  const portalHalfW = toX(portalRoom.cols * TILE_PX) / 2 + MARGIN;
+  const portalHalfD = toZ(portalRoom.rows * TILE_PX) / 2 + MARGIN;
+  const portalSide = DUNGEON_PORTAL.side;
+  const portalX = portalCx + (portalSide === "east" ? portalHalfW : portalSide === "west" ? -portalHalfW : 0);
+  const portalZ = portalCz + (portalSide === "south" ? portalHalfD : portalSide === "north" ? -portalHalfD : 0);
+  const portalRotation = portalSide === "east" || portalSide === "west" ? Math.PI / 2 : 0;
+  const barrierMaterial = new THREE.MeshBasicMaterial({
+    color: 0xa02cff, transparent: true, opacity: 0.5,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  });
+  const portalBarrier = new THREE.Mesh(new THREE.PlaneGeometry(DOOR_W * 0.94, 5.15, 10, 14), barrierMaterial);
+  portalBarrier.position.set(portalX, 2.7, portalZ);
+  portalBarrier.rotation.y = portalRotation;
+  scene.add(portalBarrier);
+
+  const gemMaterial = new THREE.MeshStandardMaterial({
+    color: 0x9d36ff, emissive: 0x6d10c8, emissiveIntensity: 2.2,
+    metalness: 0.2, roughness: 0.24,
+  });
+  const purpleGem = new THREE.Mesh(new THREE.OctahedronGeometry(0.72, 1), gemMaterial);
+  purpleGem.position.set(toX(PURPLE_GEM.position.x), 0.9, toZ(PURPLE_GEM.position.y));
+  purpleGem.castShadow = true;
+  scene.add(purpleGem);
+  const gemLight = new THREE.PointLight(0xa335ff, 0.8, 5.5, 2);
+  purpleGem.add(gemLight);
+
+  const shaftCx = toX(DUNGEON_PORTAL.holePosition.x);
+  const shaftCz = toZ(DUNGEON_PORTAL.holePosition.y);
+  const shaftSize = 10.3;
+  const shaftDepth = 7;
+  addWall(0.35, shaftSize, shaftCx - shaftSize / 2, shaftCz, shaftDepth, -shaftDepth / 2, false);
+  addWall(0.35, shaftSize, shaftCx + shaftSize / 2, shaftCz, shaftDepth, -shaftDepth / 2, false);
+  addWall(shaftSize, 0.35, shaftCx, shaftCz - shaftSize / 2, shaftDepth, -shaftDepth / 2, false);
+  addWall(shaftSize, 0.35, shaftCx, shaftCz + shaftSize / 2, shaftDepth, -shaftDepth / 2, false);
+  const shaftBottom = new THREE.Mesh(
+    new THREE.PlaneGeometry(shaftSize, shaftSize),
+    new THREE.MeshBasicMaterial({ color: 0x000000 }),
+  );
+  shaftBottom.rotation.x = -Math.PI / 2;
+  shaftBottom.position.set(shaftCx, -shaftDepth, shaftCz);
+  scene.add(shaftBottom);
 
   // ---------------------------------------------------------- angel statue
 
@@ -1664,6 +1750,11 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       spikeTrapRaised = trap?.active === true;
     },
 
+    setDungeonPortal(state, gem) {
+      portalBarrier.visible = !state.unlocked;
+      purpleGem.visible = !gem.destroyed;
+    },
+
     project(point) {
       const projected = point.clone().project(camera);
       // A point behind the camera comes back through the projection mirrored,
@@ -1758,6 +1849,10 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
         flame.outer.rotation.y = time * 0.55;
         flame.inner.rotation.y = -time * 0.7;
       }
+      barrierMaterial.opacity = 0.43 + Math.sin(elapsed * 4.7) * 0.1 + Math.sin(elapsed * 9.1) * 0.04;
+      portalBarrier.scale.x = 1 + Math.sin(elapsed * 3.2) * 0.025;
+      purpleGem.rotation.y = elapsed * 1.35;
+      purpleGem.position.y = 0.9 + Math.sin(elapsed * 2.8) * 0.08;
     },
 
     render() {

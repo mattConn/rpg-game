@@ -56,6 +56,12 @@ const uiCanvas = document.getElementById("ui") as HTMLCanvasElement;
 const ctx = uiCanvas.getContext("2d")!;
 
 const stage = createStage(sceneCanvas);
+const dungeonFade = document.createElement("div");
+Object.assign(dungeonFade.style, {
+  position: "fixed", inset: "0", background: "#000", opacity: "0",
+  pointerEvents: "none", zIndex: "10000",
+});
+document.body.appendChild(dungeonFade);
 
 /**
  * How many room units wide the canvas currently is. The room's *height* is
@@ -117,7 +123,10 @@ let swingStartTime = -Infinity;
 let hurt = 0;
 
 const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
-const wsUrl = `${wsProtocol}//${location.host}/?seed=${dungeonSeed}`;
+const carriedHealth = pageUrl.searchParams.get("health");
+const wsParams = new URLSearchParams({ seed: String(dungeonSeed) });
+if (carriedHealth !== null) wsParams.set("health", carriedHealth);
+const wsUrl = `${wsProtocol}//${location.host}/?${wsParams.toString()}`;
 
 function connectWebSocket() {
   const ws = new WebSocket(wsUrl);
@@ -125,6 +134,13 @@ function connectWebSocket() {
   ws.addEventListener("message", (event) => {
     try {
       const snap = JSON.parse(event.data as string) as TacticsSnapshot;
+      if (snap.nextDungeonSeed !== null) {
+        const next = new URL(location.href);
+        next.searchParams.set("seed", String(snap.nextDungeonSeed));
+        next.searchParams.set("health", String(Math.max(1, Math.round(snap.stats.health))));
+        location.replace(next.toString());
+        return;
+      }
       const now = performance.now();
       // Keep local interaction facing aligned with the authoritative model
       // whenever direct movement is not actively choosing a new direction.
@@ -586,6 +602,12 @@ function frame(now: number) {
   actors.player.setWeapon(actingKind === "ranged" ? "ranged" : "melee");
 
   actors.player.update(snap, null, dt, now, elapsed);
+  if (snap.dungeonPortal.fallProgress > 0) {
+    actors.player.root.position.y -= snap.dungeonPortal.fallProgress * 6.5;
+  }
+  dungeonFade.style.opacity = String(Math.max(0, Math.min(1,
+    (snap.dungeonPortal.fallProgress - 0.4) / 0.55,
+  )));
   // Behind your own eyes you are the inside of a cloak. The rig still runs —
   // it is what the camera is riding — it just isn't drawn.
   actors.player.root.visible = !stage.firstPerson;
@@ -603,6 +625,7 @@ function frame(now: number) {
   stage.setDoors(snap.doors);
   stage.setPressurePlates(snap.pressurePlates);
   stage.setSpikeTrap(snap.spikeTrap);
+  stage.setDungeonPortal(snap.dungeonPortal, snap.purpleGem);
   stage.setTargetRing(null, null, 0xffd633);
 
   // The board frames itself while you are standing on it; walk out through the

@@ -128,6 +128,7 @@ export const BOARD_REGION: Region = {
 export let DUNGEON_SEED = 0x574f4c46;
 /** One safe spawn chamber followed by six procedurally populated rooms. */
 const ROOM_COUNT = 7;
+const PORTAL_ROOM_INDEX = ROOM_COUNT - 1;
 const HALL_COLS = SUBDIVISION * 2;
 const seededRandom = (seed: number) => {
   let state = seed >>> 0 || 1;
@@ -218,7 +219,7 @@ const generateEnemies = (seed: number, rooms: readonly Region[]): readonly Dunge
   const spots = [[0.7, 0.7], [0.3, 0.7], [0.7, 0.3], [0.3, 0.3]] as const;
   rooms.forEach((room, roomIndex) => {
     // Room zero is the dedicated player spawn chamber and is always safe.
-    if (roomIndex === 0) return;
+    if (roomIndex === 0 || roomIndex === PORTAL_ROOM_INDEX) return;
     const size = room.size ?? "medium";
     const count = size === "small" ? Math.floor(enemyRandom() * 2)
         : size === "medium" ? 1 + Math.floor(enemyRandom() * 3)
@@ -253,7 +254,7 @@ const generatePressurePlateRooms = (seed: number, rooms: readonly Region[]): rea
   random(); random(); random();
   if (random() >= 0.7) return [];
   const eligible = rooms.map((_, index) => index).filter(
-    (index) => index !== 0 && rooms[index]!.size !== "jumbo",
+    (index) => index !== 0 && index !== PORTAL_ROOM_INDEX && rooms[index]!.size !== "jumbo",
   );
   for (let index = eligible.length - 1; index > 0; index--) {
     const swap = Math.floor(random() * (index + 1));
@@ -301,7 +302,7 @@ const generateSpikeTrapRoom = (seed: number): number | null => {
   random(); random(); random();
   if (random() >= 0.7) return null;
   const eligible = ROOM_REGIONS.map((_, index) => index).filter(
-    (index) => index !== 0
+    (index) => index !== 0 && index !== PORTAL_ROOM_INDEX
       && ROOM_REGIONS[index]!.size !== "jumbo"
       && !PRESSURE_PLATE_ROOMS.includes(index),
   );
@@ -309,6 +310,51 @@ const generateSpikeTrapRoom = (seed: number): number | null => {
 };
 
 export let SPIKE_TRAP_ROOM: number | null = generateSpikeTrapRoom(DUNGEON_SEED);
+
+export interface DungeonPortalDefinition {
+  roomIndex: number;
+  side: ConnectionSide;
+  exitRegion: Region;
+  position: Point;
+  holePosition: Point;
+}
+export interface PurpleGemDefinition { roomIndex: number; position: Point }
+
+const generatePortalAndGem = (seed: number): { portal: DungeonPortalDefinition; gem: PurpleGemDefinition } => {
+  const random = seededRandom(seed ^ 0x9a7e6d31);
+  random(); random(); random();
+  // The final chamber is reserved as a quiet, single-entrance portal dead end.
+  const portalRoomIndex = PORTAL_ROOM_INDEX;
+  const room = ROOM_REGIONS[portalRoomIndex]!;
+  const entrance = DUNGEON_CONNECTIONS.find((connection) => connection.to === portalRoomIndex)!;
+  const side: ConnectionSide = entrance.side === "north" ? "south"
+    : entrance.side === "south" ? "north"
+      : entrance.side === "east" ? "west" : "east";
+  const exitRegion = entrance.hall;
+  const portalPosition = regionCentre(exitRegion);
+  const holePosition = regionCentre(room);
+
+  const gemRooms = ROOM_REGIONS.map((_, index) => index).filter((index) =>
+    index !== 0 && index !== portalRoomIndex && ROOM_REGIONS[index]!.size !== "jumbo"
+      && index !== SPIKE_TRAP_ROOM);
+  const gemRoomIndex = gemRooms[Math.floor(random() * gemRooms.length)]!;
+  const gemRoom = ROOM_REGIONS[gemRoomIndex]!;
+  const gemCentre = regionCentre(gemRoom);
+  let gemPosition = gemCentre;
+  if (random() >= 0.5) {
+    const corner = Math.floor(random() * 4);
+    const inset = TILE_PX * 2.2;
+    gemPosition = {
+      x: ARENA_X + (corner === 0 || corner === 3 ? gemRoom.col * TILE_PX + inset : (gemRoom.col + gemRoom.cols) * TILE_PX - inset),
+      y: ARENA_Y + (corner < 2 ? gemRoom.row * TILE_PX + inset : (gemRoom.row + gemRoom.rows) * TILE_PX - inset),
+    };
+  }
+  return { portal: { roomIndex: portalRoomIndex, side, exitRegion, position: portalPosition, holePosition }, gem: { roomIndex: gemRoomIndex, position: gemPosition } };
+};
+
+let GENERATED_PORTAL = generatePortalAndGem(DUNGEON_SEED);
+export let DUNGEON_PORTAL = GENERATED_PORTAL.portal;
+export let PURPLE_GEM = GENERATED_PORTAL.gem;
 
 /** The one exit a room's plate may bar: always the doorway farther from spawn. */
 export function pressurePlateClosedConnection(roomIndex: number): DungeonConnection | undefined {
@@ -347,6 +393,9 @@ export function configureDungeon(seed: number): void {
   PRESSURE_PLATE_ROOMS = generatePressurePlateRooms(DUNGEON_SEED, ROOM_REGIONS);
   PRESSURE_PLATES = generatePressurePlates();
   SPIKE_TRAP_ROOM = generateSpikeTrapRoom(DUNGEON_SEED);
+  GENERATED_PORTAL = generatePortalAndGem(DUNGEON_SEED);
+  DUNGEON_PORTAL = GENERATED_PORTAL.portal;
+  PURPLE_GEM = GENERATED_PORTAL.gem;
 }
 
 export type DoorId = "arena" | "far";
@@ -689,6 +738,9 @@ export function isOver(phase: Phase): boolean {
 export interface TacticsSnapshot extends GameSnapshot {
   pressurePlates: Array<{ id: string; roomIndex: number; connectionIndex: number; active: boolean }>;
   spikeTrap: { roomIndex: number; active: boolean } | null;
+  dungeonPortal: { roomIndex: number; side: ConnectionSide; unlocked: boolean; fallProgress: number };
+  purpleGem: { x: number; y: number; destroyed: boolean };
+  nextDungeonSeed: number | null;
   /** Full player heading, independent of the camera's orbit. */
   playerHeading: Point;
   /** Whether Shift sprint is currently held. */

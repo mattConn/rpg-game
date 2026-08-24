@@ -16,7 +16,7 @@ import fastifyStatic from "@fastify/static";
 import { WebSocketServer } from "ws";
 
 import { TacticsGame } from "./game.js";
-import { configureDungeon, type TacticsInput } from "../shared/tactics.js";
+import { configureDungeon, PLAYER_MAX_HEALTH, type TacticsInput } from "../shared/tactics.js";
 
 /** Its own port, so 3000 (2D) and 3200 (3D) can keep running alongside it. */
 const PORT = Number(process.env.PORT ?? 3300);
@@ -53,12 +53,17 @@ fastify.server.on("upgrade", (request, socket, head) => {
 });
 
 wss.on("connection", (ws, request) => {
-  const rawSeed = new URL(request.url ?? "/", "http://localhost").searchParams.get("seed");
+  const requestUrl = new URL(request.url ?? "/", "http://localhost");
+  const rawSeed = requestUrl.searchParams.get("seed");
   const seed = Number(rawSeed);
   const validSeed = Number.isSafeInteger(seed) && seed >= 1 && seed <= 0xffffffff ? seed : 1;
+  const requestedHealth = Number(requestUrl.searchParams.get("health"));
+  const initialHealth = Number.isFinite(requestedHealth) && requestedHealth > 0
+    ? Math.min(PLAYER_MAX_HEALTH, Math.round(requestedHealth))
+    : PLAYER_MAX_HEALTH;
   if (!game || activeSeed !== validSeed) {
     configureDungeon(validSeed);
-    game = new TacticsGame();
+    game = new TacticsGame(Date.now(), initialHealth);
     activeSeed = validSeed;
     fastify.log.info({ seed: validSeed }, "generated dungeon");
   }
