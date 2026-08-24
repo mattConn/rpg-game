@@ -81,6 +81,26 @@ function syncKeys<T>(
   }
 }
 
+/** Fade one actor without mutating model materials shared by another actor. */
+function setActorOpacity(root: THREE.Object3D, opacity: number): void {
+  root.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) return;
+    if (!object.userData["fadeMaterialsCloned"]) {
+      object.material = Array.isArray(object.material)
+        ? object.material.map((material) => material.clone())
+        : object.material.clone();
+      object.userData["fadeMaterialsCloned"] = true;
+    }
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      material.transparent = opacity < 0.999;
+      material.opacity = opacity;
+      material.depthWrite = opacity > 0.45;
+    }
+  });
+  root.visible = opacity > 0.01;
+}
+
 /** The entity a picked mesh belongs to — rigs tag their root, meshes don't. */
 export function entityIdOf(object: THREE.Object3D | null): string | null {
   let node: THREE.Object3D | null = object;
@@ -854,6 +874,7 @@ export class Actors {
   readonly player: PlayerActor | PlayerWolfActor;
   private readonly enemies = new Map<string, WolfActor | BatActor | SpiderActor>();
   private readonly corpses = new Map<string, CorpseActor | BatCorpseActor | SpiderCorpseActor>();
+  private readonly corpseOpacity = new Map<string, number>();
   private readonly projectiles: THREE.Group[] = [];
   private readonly tombstones = new Map<string, THREE.Group>();
   private readonly bloodBursts: BloodBurst[] = [];
@@ -1102,7 +1123,19 @@ export class Actors {
       (actor) => this.remove(actor.root, () => actor.dispose()),
     );
 
-    for (const actor of this.corpses.values()) actor.update(dt);
+    const corpseStates = new Map(snap.corpses.map((corpse) => [corpse.id, corpse]));
+    for (const [id, actor] of this.corpses) {
+      actor.update(dt);
+      const eaten = corpseStates.get(id)?.eaten === true;
+      const opacity = eaten
+        ? Math.max(0, (this.corpseOpacity.get(id) ?? 1) - dt * 1.35)
+        : 1;
+      this.corpseOpacity.set(id, opacity);
+      setActorOpacity(actor.root, opacity);
+    }
+    for (const id of [...this.corpseOpacity.keys()]) {
+      if (!corpseStates.has(id)) this.corpseOpacity.delete(id);
+    }
   }
 
   /** Daggers are interchangeable, so they come from a pool rather than by id. */

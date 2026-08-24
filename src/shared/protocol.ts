@@ -48,6 +48,8 @@ export interface GameSnapshot {
     facing: 1 | -1;
     kind?: "hellhound" | "bat" | "spider";
     altitude?: number;
+    /** True after the player has consumed this corpse; clients fade it away. */
+    eaten?: boolean;
   }>;
   /**
    * The open inspect menu, or null. `title` is what both the menu header and

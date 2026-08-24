@@ -59,6 +59,7 @@ import {
   REGIONS,
   RANGED_DAMAGE,
   SQUARE_PX,
+  SPIKE_TRAP_ROOM,
   TILE_PX,
   TACTICS_ACTIONS,
   canReach,
@@ -310,6 +311,8 @@ export class TacticsGame {
   private doors!: Record<DoorId, boolean>;
   private plateGateStates = new Map<string, boolean>();
   private occupiedPressurePlates = new Set<string>();
+  private spikeTrapActive = false;
+  private spikePlateOccupied = false;
 
   private strikes!: Array<{ enemyId: string; seq: number }>;
   private strikeSeq = 0;
@@ -390,6 +393,8 @@ export class TacticsGame {
     this.plateGateStates.clear();
     for (const plate of PRESSURE_PLATES) this.plateGateStates.set(plate.id, false);
     this.occupiedPressurePlates.clear();
+    this.spikeTrapActive = false;
+    this.spikePlateOccupied = false;
 
     this.enemies = DUNGEON_ENEMIES.map((spawn, spawnIndex) => {
       const cell = spawn.cell;
@@ -514,11 +519,13 @@ export class TacticsGame {
     // Player movement — continuous, every tick.
     this.movePlayer(dt);
     this.updatePressurePlates();
+    this.updateSpikeTrap();
 
     // Enemy AI — woken hounds chase and attack, others patrol. The pack picks
     // its line abreast first, off one board, before any of it moves.
     this.assignFlanks();
     for (const enemy of this.enemies) {
+      if (enemy.health <= 0) continue;
       if (this.simNow < enemy.movementStartsAt) continue;
       if (enemy.kind === "bat") {
         this.updateBat(enemy, dt, this.simNow);
@@ -594,6 +601,7 @@ export class TacticsGame {
     // original doorway X and were therefore stopped by an invisible wall.
     const target = clampPointToFloor(raw);
     if (this.gateBlocksMove(from, target)) return false;
+    if (this.spikeFieldBlocksMove(from, target)) return false;
     if (distance(from, target) < 0.01) return false;
 
     if (turnToTravel) {
@@ -699,6 +707,7 @@ export class TacticsGame {
    */
   private place(enemy: Hound, raw: Point): Point {
     let wanted = clampPointToFloor(raw);
+    if (enemy.kind !== "bat" && this.spikeFieldBlocksMove(this.at(enemy), wanted)) wanted = this.at(enemy);
     if (this.gateBlocksMove(this.at(enemy), wanted)) {
       wanted = this.at(enemy);
     }
@@ -1307,6 +1316,35 @@ export class TacticsGame {
         this.occupiedPressurePlates.delete(plate.id);
       }
     }
+  }
+
+  private updateSpikeTrap(): void {
+    if (SPIKE_TRAP_ROOM === null) return;
+    const room = ROOM_REGIONS[SPIKE_TRAP_ROOM]!;
+    const centre = regionCentre(room);
+    const onPlate = distance(this.playerAt(), centre) <= TILE_PX * 0.9;
+    if (onPlate && !this.spikePlateOccupied) {
+      this.spikePlateOccupied = true;
+      this.spikeTrapActive = !this.spikeTrapActive;
+      if (this.spikeTrapActive) {
+        for (const enemy of this.enemies) {
+          if (enemy.kind !== "bat" && this.regionOfCell(enemy.cell) === room) enemy.health = 0;
+        }
+      }
+    } else if (!onPlate) {
+      this.spikePlateOccupied = false;
+    }
+  }
+
+  private spikeFieldBlocksMove(from: Point, to: Point): boolean {
+    if (!this.spikeTrapActive || SPIKE_TRAP_ROOM === null) return false;
+    const room = ROOM_REGIONS[SPIKE_TRAP_ROOM]!;
+    const centre = regionCentre(room);
+    const fromInRoom = this.regionOfCell(clampToGrid(from)) === room;
+    const toInRoom = this.regionOfCell(clampToGrid(to)) === room;
+    if (!fromInRoom && !toInRoom) return false;
+    const safeRadius = TILE_PX * 2.35;
+    return distance(to, centre) > safeRadius;
   }
 
   /**
@@ -2098,6 +2136,10 @@ export class TacticsGame {
         };
 
     return {
+      spikeTrap: SPIKE_TRAP_ROOM === null ? null : {
+        roomIndex: SPIKE_TRAP_ROOM,
+        active: this.spikeTrapActive,
+      },
       pressurePlates: PRESSURE_PLATES.map((plate) => ({
         id: plate.id,
         roomIndex: plate.roomIndex,
@@ -2158,6 +2200,7 @@ export class TacticsGame {
         facing: c.facing,
         kind: c.kind,
         altitude: c.altitude,
+        eaten: this.eatenCorpseIds.has(c.id),
       })),
       inspect: inspected
         ? {

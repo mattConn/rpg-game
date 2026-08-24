@@ -296,6 +296,20 @@ const generatePressurePlates = (): readonly PressurePlateDefinition[] =>
 
 export let PRESSURE_PLATES: readonly PressurePlateDefinition[] = generatePressurePlates();
 
+const generateSpikeTrapRoom = (seed: number): number | null => {
+  const random = seededRandom(seed ^ 0x5f1ce7a9);
+  random(); random(); random();
+  if (random() >= 0.7) return null;
+  const eligible = ROOM_REGIONS.map((_, index) => index).filter(
+    (index) => index !== 0
+      && ROOM_REGIONS[index]!.size !== "jumbo"
+      && !PRESSURE_PLATE_ROOMS.includes(index),
+  );
+  return eligible[Math.floor(random() * eligible.length)] ?? null;
+};
+
+export let SPIKE_TRAP_ROOM: number | null = generateSpikeTrapRoom(DUNGEON_SEED);
+
 /** The one exit a room's plate may bar: always the doorway farther from spawn. */
 export function pressurePlateClosedConnection(roomIndex: number): DungeonConnection | undefined {
   const spawn = cellCenter(PLAYER_START);
@@ -332,6 +346,7 @@ export function configureDungeon(seed: number): void {
   DUNGEON_ENEMIES = generateEnemies(DUNGEON_SEED, ROOM_REGIONS);
   PRESSURE_PLATE_ROOMS = generatePressurePlateRooms(DUNGEON_SEED, ROOM_REGIONS);
   PRESSURE_PLATES = generatePressurePlates();
+  SPIKE_TRAP_ROOM = generateSpikeTrapRoom(DUNGEON_SEED);
 }
 
 export type DoorId = "arena" | "far";
@@ -673,6 +688,7 @@ export function isOver(phase: Phase): boolean {
  */
 export interface TacticsSnapshot extends GameSnapshot {
   pressurePlates: Array<{ id: string; roomIndex: number; connectionIndex: number; active: boolean }>;
+  spikeTrap: { roomIndex: number; active: boolean } | null;
   /** Full player heading, independent of the camera's orbit. */
   playerHeading: Point;
   /** Whether Shift sprint is currently held. */

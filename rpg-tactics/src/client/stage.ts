@@ -43,6 +43,7 @@ import {
   PRESSURE_PLATE_ROOMS,
   ROOM_REGIONS,
   SQUARE_PX,
+  SPIKE_TRAP_ROOM,
   TILE_PX,
   WALL_THICKNESS_PX,
   cellAtPoint,
@@ -203,6 +204,7 @@ export interface Stage {
   doorAt(ndcX: number, ndcY: number): DoorId | null;
   setDoors(doors: DoorStates): void;
   setPressurePlates(plates: Array<{ id: string; roomIndex: number; connectionIndex: number; active: boolean }>): void;
+  setSpikeTrap(trap: { roomIndex: number; active: boolean } | null): void;
   animateScenery(elapsed: number): void;
   render(): void;
 }
@@ -778,6 +780,49 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     gateVisuals.push({ group: gate, plateId, active: false });
     }
   });
+
+  // ---------------------------------------------------------- spike killzone
+
+  const spikeTrapGroup = new THREE.Group();
+  let spikeTrapRaised = false;
+  const SPIKE_HEIGHT = 2.9;
+  if (SPIKE_TRAP_ROOM !== null) {
+    const room = ROOM_REGIONS[SPIKE_TRAP_ROOM]!;
+    const centre = regionCentre(room);
+    const cx = toX(centre.x);
+    const cz = toZ(centre.y);
+    const width = toX(room.cols * TILE_PX);
+    const depth = toZ(room.rows * TILE_PX);
+    const safeRadius = toX(TILE_PX * 2.35);
+    const spikeGeometry = new THREE.ConeGeometry(0.22, SPIKE_HEIGHT, 6);
+    const spikeMaterial = new THREE.MeshStandardMaterial({
+      color: 0x101216, metalness: 0.88, roughness: 0.38,
+    });
+    const positions: Array<[number, number]> = [];
+    const spacing = 1.85;
+    for (let x = -width / 2 + spacing; x <= width / 2 - spacing; x += spacing) {
+      for (let z = -depth / 2 + spacing; z <= depth / 2 - spacing; z += spacing) {
+        if (Math.hypot(x, z) <= safeRadius) continue;
+        positions.push([x, z]);
+      }
+    }
+    const spikes = new THREE.InstancedMesh(spikeGeometry, spikeMaterial, positions.length);
+    const matrix = new THREE.Matrix4();
+    positions.forEach(([x, z], index) => {
+      matrix.makeTranslation(x, SPIKE_HEIGHT / 2, z);
+      spikes.setMatrixAt(index, matrix);
+    });
+    spikes.castShadow = true;
+    spikes.receiveShadow = true;
+    spikeTrapGroup.add(spikes);
+    spikeTrapGroup.position.set(cx, -SPIKE_HEIGHT - 0.12, cz);
+    scene.add(spikeTrapGroup);
+
+    const plate = new THREE.Mesh(new THREE.CylinderGeometry(1.28, 1.42, 0.13, 11), plateMaterial);
+    plate.position.set(cx, 0.075, cz);
+    plate.receiveShadow = true;
+    scene.add(plate);
+  }
 
   // ---------------------------------------------------------- angel statue
 
@@ -1565,6 +1610,12 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
           dt,
         );
       }
+      spikeTrapGroup.position.y = damp(
+        spikeTrapGroup.position.y,
+        spikeTrapRaised ? 0 : -SPIKE_HEIGHT - 0.12,
+        spikeTrapRaised ? 28 : 18,
+        dt,
+      );
       applyCamera();
     },
 
@@ -1607,6 +1658,10 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
         plate.material = active ? plateActiveMaterial : plateMaterial;
         plate.position.y = active ? 0.025 : 0.07;
       }
+    },
+
+    setSpikeTrap(trap) {
+      spikeTrapRaised = trap?.active === true;
     },
 
     project(point) {

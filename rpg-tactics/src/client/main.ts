@@ -602,6 +602,7 @@ function frame(now: number) {
   stage.setDoorHoverRing(null);
   stage.setDoors(snap.doors);
   stage.setPressurePlates(snap.pressurePlates);
+  stage.setSpikeTrap(snap.spikeTrap);
   stage.setTargetRing(null, null, 0xffd633);
 
   // The board frames itself while you are standing on it; walk out through the
