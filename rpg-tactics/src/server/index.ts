@@ -16,7 +16,13 @@ import fastifyStatic from "@fastify/static";
 import { WebSocketServer } from "ws";
 
 import { TacticsGame } from "./game.js";
-import { configureDungeon, PLAYER_MAX_HEALTH, type TacticsInput } from "../shared/tactics.js";
+import {
+  configureDungeon,
+  configureEditorDungeon,
+  PLAYER_MAX_HEALTH,
+  type EditorDungeonConfig,
+  type TacticsInput,
+} from "../shared/tactics.js";
 
 /** Its own port, so 3000 (2D) and 3200 (3D) can keep running alongside it. */
 const PORT = Number(process.env.PORT ?? 3300);
@@ -42,6 +48,18 @@ await fastify.register(fastifyStatic, {
 
 let game: TacticsGame | null = null;
 let activeSeed: number | null = null;
+let activeEditorLevel: string | null = null;
+const editorLevels = new Map<string, EditorDungeonConfig>();
+
+fastify.post<{ Body: EditorDungeonConfig }>("/api/editor-level", async (request, reply) => {
+  const level = request.body;
+  if (!level || level.version !== 1 || !Array.isArray(level.tiles) || !Array.isArray(level.entities)) {
+    return reply.code(400).send({ error: "Invalid editor level" });
+  }
+  const id = Math.random().toString(36).slice(2, 10);
+  editorLevels.set(id, level);
+  return { id };
+});
 
 // Use noServer mode so Fastify doesn't intercept the upgrade request.
 const wss = new WebSocketServer({ noServer: true });
@@ -54,18 +72,25 @@ fastify.server.on("upgrade", (request, socket, head) => {
 
 wss.on("connection", (ws, request) => {
   const requestUrl = new URL(request.url ?? "/", "http://localhost");
+  const editorLevelId = requestUrl.searchParams.get("editor");
+  const editorLevel = editorLevelId ? editorLevels.get(editorLevelId) : undefined;
   const rawSeed = requestUrl.searchParams.get("seed");
   const seed = Number(rawSeed);
   const validSeed = Number.isSafeInteger(seed) && seed >= 1 && seed <= 0xffffffff ? seed : 1;
-  const requestedHealth = Number(requestUrl.searchParams.get("health"));
+  const healthProtocol = request.headers["sec-websocket-protocol"]?.split(",")
+    .map((protocol) => protocol.trim())
+    .find((protocol) => /^health-\d+$/.test(protocol));
+  const requestedHealth = Number(healthProtocol?.slice("health-".length));
   const initialHealth = Number.isFinite(requestedHealth) && requestedHealth > 0
     ? Math.min(PLAYER_MAX_HEALTH, Math.round(requestedHealth))
     : PLAYER_MAX_HEALTH;
-  if (!game || activeSeed !== validSeed) {
-    configureDungeon(validSeed);
+  if (!game || activeSeed !== validSeed || activeEditorLevel !== editorLevelId) {
+    if (editorLevel) configureEditorDungeon(editorLevel);
+    else configureDungeon(validSeed);
     game = new TacticsGame(Date.now(), initialHealth);
     activeSeed = validSeed;
-    fastify.log.info({ seed: validSeed }, "generated dungeon");
+    activeEditorLevel = editorLevel ? editorLevelId : null;
+    fastify.log.info(editorLevel ? { editorLevelId } : { seed: validSeed }, editorLevel ? "loaded editor dungeon" : "generated dungeon");
   }
   fastify.log.info("client connected");
 

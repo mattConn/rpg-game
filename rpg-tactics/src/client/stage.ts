@@ -35,6 +35,8 @@ import {
   DUNGEON_ENEMIES,
   DUNGEON_PORTAL,
   DUNGEON_SEED,
+  EDITOR_DUNGEON,
+  EDITOR_TILE_CELLS,
   type DoorId,
   type DoorStates,
   FAR_REGION,
@@ -49,6 +51,7 @@ import {
   TILE_PX,
   WALL_THICKNESS_PX,
   cellAtPoint,
+  cellCenter,
   inRegion,
   regionCentre,
 } from "../shared/tactics.js";
@@ -453,13 +456,15 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
    * shading has something to catch — a perfectly flat plane reads as a void
    * rather than as a floor — and one shade per vertex on top of that.
    */
-  const stoneFloor = (w: number, d: number) => {
+  const stoneFloor = (w: number, d: number, level = false) => {
     const geometry = new THREE.PlaneGeometry(w, d, Math.ceil(w), Math.ceil(d));
     geometry.rotateX(-Math.PI / 2);
 
     const position = geometry.attributes.position as THREE.BufferAttribute;
-    for (let i = 0; i < position.count; i++) {
-      position.setY(i, (Math.random() - 0.5) * 0.05);
+    if (!level) {
+      for (let i = 0; i < position.count; i++) {
+        position.setY(i, (Math.random() - 0.5) * 0.05);
+      }
     }
     geometry.computeVertexNormals();
 
@@ -485,7 +490,9 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   const apronD = (southmost - northmost) * 1.6;
   const apronTex = floorTexture.clone();
   apronTex.repeat.set(apronW / TEXTURE_SCALE, apronD / TEXTURE_SCALE);
-  const apronMaterial = new THREE.MeshLambertMaterial({ map: apronTex, color: 0x606068, flatShading: true });
+  const apronMaterial = EDITOR_DUNGEON
+    ? new THREE.MeshBasicMaterial({ color: DUNGEON_SKY_COLOR })
+    : new THREE.MeshLambertMaterial({ map: apronTex, color: 0x606068, flatShading: true });
   const apronCx = (westmost + eastmost) / 2;
   const apronCz = (northmost + southmost) / 2;
   const apronWest = apronCx - apronW / 2;
@@ -702,7 +709,24 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     verticalWall(east + WALL_T / 2, openings.has("east"));
   };
 
-  ROOM_REGIONS.forEach((region, index) => {
+  if (EDITOR_DUNGEON) {
+    for (const tile of EDITOR_DUNGEON.tiles) {
+      const centre = cellCenter({
+        col: tile.x * EDITOR_TILE_CELLS + Math.floor(EDITOR_TILE_CELLS / 2),
+        row: tile.y * EDITOR_TILE_CELLS + Math.floor(EDITOR_TILE_CELLS / 2),
+      });
+      const x = toX(centre.x);
+      const z = toZ(centre.y);
+      const size = toX(TILE_PX * EDITOR_TILE_CELLS);
+      if (tile.type === "floor" || tile.type === "doorway") {
+        const floor = stoneFloor(size, size, true);
+        floor.position.set(x, 0, z);
+        scene.add(floor);
+      } else {
+        addWall(size, size, x, z);
+      }
+    }
+  } else ROOM_REGIONS.forEach((region, index) => {
     const centre = regionCentre(region);
     const openings = new Set<"north" | "east" | "south" | "west">();
     for (const connection of DUNGEON_CONNECTIONS) {
@@ -889,12 +913,104 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     color: 0x9d36ff, emissive: 0x6d10c8, emissiveIntensity: 2.2,
     metalness: 0.2, roughness: 0.24,
   });
-  const purpleGem = new THREE.Mesh(new THREE.OctahedronGeometry(0.72, 1), gemMaterial);
+  const purpleGem = new THREE.Group();
   purpleGem.position.set(toX(PURPLE_GEM.position.x), 0.9, toZ(PURPLE_GEM.position.y));
-  purpleGem.castShadow = true;
+  const fallbackGem = new THREE.Mesh(new THREE.OctahedronGeometry(0.72, 1), gemMaterial);
+  fallbackGem.castShadow = true;
+  purpleGem.add(fallbackGem);
   scene.add(purpleGem);
   const gemLight = new THREE.PointLight(0xa335ff, 0.8, 5.5, 2);
   purpleGem.add(gemLight);
+
+  new GLTFLoader().load("/shared-models/purple-gem/scene.gltf", (gltf) => {
+    const visual = gltf.scene;
+    visual.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(visual);
+    const size = bounds.getSize(new THREE.Vector3());
+    visual.scale.setScalar(1.55 / Math.max(0.001, size.y));
+    visual.updateMatrixWorld(true);
+    const scaled = new THREE.Box3().setFromObject(visual);
+    const centre = scaled.getCenter(new THREE.Vector3());
+    visual.position.set(-centre.x, -centre.y, -centre.z);
+    visual.traverse((node) => {
+      if (!(node instanceof THREE.Mesh)) return;
+      node.castShadow = true;
+      const sources = Array.isArray(node.material) ? node.material : [node.material];
+      const materials = sources.map((source) => {
+        const material = source.clone();
+        if (material instanceof THREE.MeshStandardMaterial) {
+          // The authored albedo has its own hue; remove it so the requested
+          // purple is exact while retaining the normal, emissive, and
+          // metallic/roughness maps that give the imported gem its detail.
+          material.map = null;
+          material.color.setHex(0xa92fff);
+          material.emissive.setHex(0x7114cc);
+          material.emissiveIntensity = 1.55;
+          material.metalness = Math.max(0.28, material.metalness);
+          material.roughness = Math.min(0.3, material.roughness);
+        }
+        return material;
+      });
+      node.material = Array.isArray(node.material) ? materials : materials[0]!;
+    });
+    purpleGem.remove(fallbackGem);
+    fallbackGem.geometry.dispose();
+    gemMaterial.dispose();
+    purpleGem.add(visual);
+  }, undefined, (error) => console.warn("Could not load purple gem model", error));
+
+  const shardGeometry = new THREE.BufferGeometry();
+  shardGeometry.setAttribute("position", new THREE.Float32BufferAttribute([
+    0, 0.15, 0, -0.11, -0.09, 0, 0.11, -0.09, 0,
+  ], 3));
+  const shardMaterials = [0xb12cff, 0xf4e9ff].map((color) => new THREE.MeshBasicMaterial({
+    color, transparent: true, opacity: 0.95, side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  const gemShatters: Array<{
+    age: number;
+    purpleFlash: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
+    whiteFlash: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
+    shards: Array<{ mesh: THREE.Mesh; velocity: THREE.Vector3; spin: THREE.Vector3; baseScale: number }>;
+  }> = [];
+  let gemDestroyedVisualState = false;
+  let lastShatterElapsed = 0;
+
+  const spawnGemShatter = () => {
+    const origin = purpleGem.position.clone();
+    const flash = (color: number, opacity: number) => {
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.24, 12, 8),
+        new THREE.MeshBasicMaterial({
+          color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false,
+        }),
+      );
+      mesh.position.copy(origin);
+      scene.add(mesh);
+      return mesh;
+    };
+    const purpleFlash = flash(0x9d20ff, 0.78);
+    const whiteFlash = flash(0xffffff, 0.9);
+    const shards = Array.from({ length: 24 }, (_, index) => {
+      const mesh = new THREE.Mesh(shardGeometry, shardMaterials[index % 3 === 0 ? 1 : 0]!);
+      mesh.position.copy(origin);
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 1.6 + Math.random() * 2.7;
+      const baseScale = 0.7 + Math.random() * 1.15;
+      mesh.scale.setScalar(baseScale);
+      scene.add(mesh);
+      return {
+        mesh, baseScale,
+        velocity: new THREE.Vector3(Math.cos(angle) * speed, 1.1 + Math.random() * 2.8, Math.sin(angle) * speed),
+        spin: new THREE.Vector3(
+          (Math.random() - 0.5) * 15,
+          (Math.random() - 0.5) * 15,
+          (Math.random() - 0.5) * 15,
+        ),
+      };
+    });
+    gemShatters.push({ age: 0, purpleFlash, whiteFlash, shards });
+  };
 
   const shaftCx = toX(DUNGEON_PORTAL.holePosition.x);
   const shaftCz = toZ(DUNGEON_PORTAL.holePosition.y);
@@ -914,7 +1030,31 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   // ---------------------------------------------------------- angel statue
 
-  const jumboRoom = ROOM_REGIONS.find((region) => region.size === "jumbo");
+  const addAngelStatue = (statueX: number, statueZ: number, yaw: number) => {
+    new GLTFLoader().load("/shared-models/angel-statue/scene-low.glb", (gltf) => {
+      const statue = gltf.scene;
+      statue.traverse((node) => {
+        if (!(node instanceof THREE.Mesh)) return;
+        node.castShadow = true;
+        node.receiveShadow = true;
+      });
+      statue.updateMatrixWorld(true);
+      let bounds = new THREE.Box3().setFromObject(statue);
+      const size = bounds.getSize(new THREE.Vector3());
+      statue.scale.setScalar(4.5 / Math.max(0.001, size.y));
+      statue.updateMatrixWorld(true);
+      bounds = new THREE.Box3().setFromObject(statue);
+      const modelCentre = bounds.getCenter(new THREE.Vector3());
+      statue.position.set(-modelCentre.x, -bounds.min.y, -modelCentre.z);
+      const statueRoot = new THREE.Group();
+      statueRoot.position.set(statueX, 0, statueZ);
+      statueRoot.rotation.y = yaw;
+      statueRoot.add(statue);
+      scene.add(statueRoot);
+    }, undefined, (error) => console.warn("Could not load angel statue", error));
+  };
+
+  const jumboRoom = EDITOR_DUNGEON ? undefined : ROOM_REGIONS.find((region) => region.size === "jumbo");
   if (jumboRoom) {
     let statueState = (DUNGEON_SEED ^ 0xa63e15) >>> 0;
     const statueRandom = () => {
@@ -940,27 +1080,16 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
         statueZ = cz + (corner < 2 ? -1 : 1) * (depth / 2 - inset);
       }
 
-      new GLTFLoader().load("/shared-models/angel-statue/scene-low.glb", (gltf) => {
-        const statue = gltf.scene;
-        statue.traverse((node) => {
-          if (!(node instanceof THREE.Mesh)) return;
-          node.castShadow = true;
-          node.receiveShadow = true;
-        });
-        statue.updateMatrixWorld(true);
-        let bounds = new THREE.Box3().setFromObject(statue);
-        const size = bounds.getSize(new THREE.Vector3());
-        statue.scale.setScalar(4.5 / Math.max(0.001, size.y));
-        statue.updateMatrixWorld(true);
-        bounds = new THREE.Box3().setFromObject(statue);
-        const modelCentre = bounds.getCenter(new THREE.Vector3());
-        statue.position.set(-modelCentre.x, -bounds.min.y, -modelCentre.z);
-        const statueRoot = new THREE.Group();
-        statueRoot.position.set(statueX, 0, statueZ);
-        statueRoot.rotation.y = statueRandom() * Math.PI * 2;
-        statueRoot.add(statue);
-        scene.add(statueRoot);
-      }, undefined, (error) => console.warn("Could not load angel statue", error));
+      addAngelStatue(statueX, statueZ, statueRandom() * Math.PI * 2);
+    }
+  }
+  if (EDITOR_DUNGEON) {
+    for (const entity of EDITOR_DUNGEON.entities.filter((candidate) => candidate.type === "angel-statue")) {
+      const centre = cellCenter({
+        col: entity.x * EDITOR_TILE_CELLS + Math.floor(EDITOR_TILE_CELLS / 2),
+        row: entity.y * EDITOR_TILE_CELLS + Math.floor(EDITOR_TILE_CELLS / 2),
+      });
+      addAngelStatue(toX(centre.x), toZ(centre.y), entity.facing);
     }
   }
 
@@ -1038,6 +1167,17 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       });
     }
   });
+  if (EDITOR_DUNGEON) {
+    for (const entity of EDITOR_DUNGEON.entities.filter((candidate) => candidate.type === "boulder")) {
+      const centre = cellCenter({
+        col: entity.x * EDITOR_TILE_CELLS + Math.floor(EDITOR_TILE_CELLS / 2),
+        row: entity.y * EDITOR_TILE_CELLS + Math.floor(EDITOR_TILE_CELLS / 2),
+      });
+      boulderPlacements.push({
+        x: toX(centre.x), z: toZ(centre.y), yaw: entity.facing, size: 2.4,
+      });
+    }
+  }
 
   if (boulderPlacements.length) {
     new GLTFLoader().load("/shared-models/simple-rock/scene.gltf", (gltf) => {
@@ -1287,7 +1427,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     torchFlames.push({ outer, inner, phase: torchRandom() * Math.PI * 2 });
   };
 
-  ROOM_REGIONS.forEach((room, roomIndex) => {
+  (EDITOR_DUNGEON ? [] : ROOM_REGIONS).forEach((room, roomIndex) => {
     const centre = regionCentre(room);
     const cx = toX(centre.x);
     const cz = toZ(centre.y);
@@ -1340,6 +1480,17 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     roomLight.position.set(cx, 2.25, cz);
     scene.add(roomLight);
   });
+  if (EDITOR_DUNGEON) {
+    for (const entity of EDITOR_DUNGEON.entities.filter((candidate) => candidate.type === "torch")) {
+      const centre = cellCenter({
+        col: entity.x * EDITOR_TILE_CELLS + Math.floor(EDITOR_TILE_CELLS / 2),
+        row: entity.y * EDITOR_TILE_CELLS + Math.floor(EDITOR_TILE_CELLS / 2),
+      });
+      const x = toX(centre.x);
+      const z = toZ(centre.y);
+      addTorch(x, z, x + Math.sin(entity.facing), z + Math.cos(entity.facing));
+    }
+  }
 
   // ------------------------------------------------------------- highlights
 
@@ -1754,6 +1905,8 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
     setDungeonPortal(state, gem) {
       portalBarrier.visible = !state.unlocked;
+      if (gem.destroyed && !gemDestroyedVisualState) spawnGemShatter();
+      gemDestroyedVisualState = gem.destroyed;
       purpleGem.visible = !gem.destroyed;
     },
 
@@ -1867,8 +2020,37 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
       }
       barrierMaterial.opacity = 0.43 + Math.sin(elapsed * 4.7) * 0.1 + Math.sin(elapsed * 9.1) * 0.04;
       portalBarrier.scale.x = 1 + Math.sin(elapsed * 3.2) * 0.025;
-      purpleGem.rotation.y = elapsed * 1.35;
+      // A steady, readable turn rather than a frantic pickup-icon spin.
+      purpleGem.rotation.y = elapsed * 0.9;
       purpleGem.position.y = 0.9 + Math.sin(elapsed * 2.8) * 0.08;
+      const shatterDt = lastShatterElapsed === 0
+        ? 1 / 60 : Math.min(0.05, Math.max(0, elapsed - lastShatterElapsed));
+      lastShatterElapsed = elapsed;
+      for (let index = gemShatters.length - 1; index >= 0; index--) {
+        const shatter = gemShatters[index]!;
+        shatter.age += shatterDt;
+        const t = Math.min(1, shatter.age / 0.72);
+        shatter.purpleFlash.scale.setScalar(1 + t * 9);
+        shatter.whiteFlash.scale.setScalar(1 + t * 5.5);
+        shatter.purpleFlash.material.opacity = 0.78 * (1 - t);
+        shatter.whiteFlash.material.opacity = 0.9 * Math.max(0, 1 - t * 1.65);
+        for (const shard of shatter.shards) {
+          shard.velocity.y -= 5.8 * shatterDt;
+          shard.mesh.position.addScaledVector(shard.velocity, shatterDt);
+          shard.mesh.rotation.x += shard.spin.x * shatterDt;
+          shard.mesh.rotation.y += shard.spin.y * shatterDt;
+          shard.mesh.rotation.z += shard.spin.z * shatterDt;
+          shard.mesh.scale.setScalar(shard.baseScale * Math.max(0, 1 - t));
+        }
+        if (t < 1) continue;
+        scene.remove(shatter.purpleFlash, shatter.whiteFlash);
+        shatter.purpleFlash.geometry.dispose();
+        shatter.whiteFlash.geometry.dispose();
+        shatter.purpleFlash.material.dispose();
+        shatter.whiteFlash.material.dispose();
+        for (const shard of shatter.shards) scene.remove(shard.mesh);
+        gemShatters.splice(index, 1);
+      }
     },
 
     render() {

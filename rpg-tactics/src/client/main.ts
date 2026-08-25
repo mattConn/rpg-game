@@ -30,10 +30,12 @@ import { interpolateSnapshot } from "../../../rpg-3d/src/client/playback.js";
 import { toX, toZ } from "../../../rpg-3d/src/client/world.js";
 import {
   configureDungeon,
+  configureEditorDungeon,
   isOver,
   TACTICS_ACTIONS,
   type TacticsInput,
   type TacticsSnapshot,
+  type EditorDungeonConfig,
 } from "../shared/tactics.js";
 import { BAR_LAYOUT, drawTacticsChrome } from "./chrome.js";
 import { createStage } from "./stage.js";
@@ -42,14 +44,34 @@ import { drawHeldWeapon } from "./viewmodel.js";
 // ------------------------------------------------------------------ canvases
 
 const pageUrl = new URL(location.href);
+const carriedHealthStorageKey = "rpg-next-dungeon-health";
+const carriedHealth = sessionStorage.getItem(carriedHealthStorageKey)
+  ?? pageUrl.searchParams.get("health"); // Migrate links produced by older builds once.
+sessionStorage.removeItem(carriedHealthStorageKey);
+let pageUrlChanged = false;
+if (pageUrl.searchParams.has("health")) {
+  pageUrl.searchParams.delete("health");
+  pageUrlChanged = true;
+}
 const requestedSeed = pageUrl.searchParams.get("seed");
 let dungeonSeed = requestedSeed === null ? NaN : Number(requestedSeed);
 if (!Number.isSafeInteger(dungeonSeed) || dungeonSeed < 1 || dungeonSeed > 0xffffffff) {
   dungeonSeed = crypto.getRandomValues(new Uint32Array(1))[0]! || 1;
   pageUrl.searchParams.set("seed", String(dungeonSeed));
-  history.replaceState(null, "", pageUrl);
+  pageUrlChanged = true;
 }
-configureDungeon(dungeonSeed);
+if (pageUrlChanged) history.replaceState(null, "", pageUrl);
+const editorLevelId = pageUrl.searchParams.get("editor");
+const editorLevelRaw = editorLevelId ? localStorage.getItem(`rpg-editor-level:${editorLevelId}`) : null;
+if (editorLevelRaw) {
+  try {
+    configureEditorDungeon(JSON.parse(editorLevelRaw) as EditorDungeonConfig);
+  } catch {
+    configureDungeon(dungeonSeed);
+  }
+} else {
+  configureDungeon(dungeonSeed);
+}
 
 const sceneCanvas = document.getElementById("scene") as HTMLCanvasElement;
 const uiCanvas = document.getElementById("ui") as HTMLCanvasElement;
@@ -123,13 +145,17 @@ let swingStartTime = -Infinity;
 let hurt = 0;
 
 const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
-const carriedHealth = pageUrl.searchParams.get("health");
-const wsParams = new URLSearchParams({ seed: String(dungeonSeed) });
-if (carriedHealth !== null) wsParams.set("health", carriedHealth);
-const wsUrl = `${wsProtocol}//${location.host}/?${wsParams.toString()}`;
+const wsQuery = new URLSearchParams({ seed: String(dungeonSeed) });
+if (editorLevelId) wsQuery.set("editor", editorLevelId);
+const wsUrl = `${wsProtocol}//${location.host}/?${wsQuery}`;
+const carriedHealthNumber = Number(carriedHealth);
+const carriedHealthProtocol = Number.isFinite(carriedHealthNumber) && carriedHealthNumber > 0
+  ? `health-${Math.round(carriedHealthNumber)}` : null;
 
 function connectWebSocket() {
-  const ws = new WebSocket(wsUrl);
+  const ws = carriedHealthProtocol
+    ? new WebSocket(wsUrl, carriedHealthProtocol)
+    : new WebSocket(wsUrl);
 
   ws.addEventListener("message", (event) => {
     try {
@@ -137,7 +163,8 @@ function connectWebSocket() {
       if (snap.nextDungeonSeed !== null) {
         const next = new URL(location.href);
         next.searchParams.set("seed", String(snap.nextDungeonSeed));
-        next.searchParams.set("health", String(Math.max(1, Math.round(snap.stats.health))));
+        next.searchParams.delete("health");
+        sessionStorage.setItem(carriedHealthStorageKey, String(Math.max(1, Math.round(snap.stats.health))));
         location.replace(next.toString());
         return;
       }

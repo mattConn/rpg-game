@@ -42,6 +42,7 @@ import {
   DUNGEON_CONNECTIONS,
   DUNGEON_ENEMIES,
   DUNGEON_PORTAL,
+  EDITOR_DUNGEON,
   type DoorId,
   FAR_REGION,
   HALL_REGION,
@@ -413,7 +414,7 @@ export class TacticsGame {
     this.occupiedPressurePlates.clear();
     this.spikeTrapActive = false;
     this.spikePlateOccupied = false;
-    this.purpleGemDestroyed = false;
+    this.purpleGemDestroyed = EDITOR_DUNGEON !== null;
     this.nextDungeonSeed = null;
     this.dungeonFallStartedAt = null;
     this.fallenEnemyIds.clear();
@@ -651,10 +652,10 @@ export class TacticsGame {
     const fromRegion = this.regionOfCell(clampToGrid(from));
     const targetRegion = this.regionOfCell(clampToGrid(target));
     const portalRoom = ROOM_REGIONS[DUNGEON_PORTAL.roomIndex]!;
-    if (!this.purpleGemDestroyed &&
+    if (!EDITOR_DUNGEON && !this.purpleGemDestroyed &&
         ((fromRegion === DUNGEON_PORTAL.exitRegion && targetRegion === portalRoom) ||
          (fromRegion === portalRoom && targetRegion === DUNGEON_PORTAL.exitRegion))) return false;
-    if (targetRegion === portalRoom && this.purpleGemDestroyed) {
+    if (!EDITOR_DUNGEON && targetRegion === portalRoom && this.purpleGemDestroyed) {
       if (this.insideDungeonHole(target)) {
         this.dungeonFallStartedAt = this.simNow;
         this.moveTarget = null;
@@ -1371,6 +1372,11 @@ export class TacticsGame {
 
   /** Which region a cell belongs to, falling back to the board. */
   private regionOfCell(cell: Cell): Region {
+    // Authored maps are one continuous play space. REGIONS is split into
+    // horizontal floor runs only to preserve exact painted collision; treating
+    // those implementation strips as separate rooms sends AI through the
+    // procedural corridor waypoint algorithm and makes it stick at each row.
+    if (EDITOR_DUNGEON) return BOARD_REGION;
     return REGIONS.find((region) => inRegion(region, cell)) ?? BOARD_REGION;
   }
 
@@ -1477,6 +1483,7 @@ export class TacticsGame {
 
   /** Square test matching the visible shaft opening; crossing its ledge begins a fall. */
   private insideDungeonHole(point: Point): boolean {
+    if (EDITOR_DUNGEON) return false;
     // Trigger slightly before the actor's centre reaches the geometric lip:
     // the wolf has a footprint, and otherwise its front half can visibly walk
     // over empty space while its origin is still supported by the floor.

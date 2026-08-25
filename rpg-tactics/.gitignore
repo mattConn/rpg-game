@@ -1,3 +1,7 @@
 node_modules/
 public/tactics.js
 public/tactics.js.map
+public/editor.js
+public/editor.js.map
+public/editor-play.js
+public/editor-play.js.map

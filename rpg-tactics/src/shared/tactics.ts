@@ -43,6 +43,8 @@ export const TACTICS_ACTIONS: readonly (Action | null)[] = [
  * placement finer and changes nothing else — which is the entire point of it.
  */
 export const SUBDIVISION = 5;
+/** One editor tile represents one original gameplay square, not one fine nav cell. */
+export const EDITOR_TILE_CELLS = SUBDIVISION;
 
 /** The enlarged starting chamber: six original squares by six. */
 export const SQUARES = 6;
@@ -126,6 +128,24 @@ export const BOARD_REGION: Region = {
 
 /** Reproducible procedural dungeon shared verbatim by simulation and renderer. */
 export let DUNGEON_SEED = 0x574f4c46;
+export interface EditorDungeonEntity {
+  id: string;
+  type: "player" | "hellhound" | "bat" | "spider" | "gargoyle"
+    | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue";
+  x: number;
+  y: number;
+  facing: number;
+}
+export interface EditorDungeonConfig {
+  version: 1;
+  name: string;
+  width: number;
+  height: number;
+  tiles: Array<{ x: number; y: number; type: "floor" | "wall" | "doorway" }>;
+  entities: EditorDungeonEntity[];
+}
+/** Present only when the real game was launched from the level editor. */
+export let EDITOR_DUNGEON: EditorDungeonConfig | null = null;
 /** One safe spawn chamber followed by six procedurally populated rooms. */
 const ROOM_COUNT = 7;
 const PORTAL_ROOM_INDEX = ROOM_COUNT - 1;
@@ -403,6 +423,12 @@ export function pressurePlateNearConnection(roomIndex: number): DungeonConnectio
 
 /** Rebuild every derived layout value before constructing the stage/game. */
 export function configureDungeon(seed: number): void {
+  EDITOR_DUNGEON = null;
+  BOARD_REGION.col = 0;
+  BOARD_REGION.row = 0;
+  BOARD_REGION.cols = GRID_COLS;
+  BOARD_REGION.rows = GRID_ROWS;
+  BOARD_REGION.size = "medium";
   DUNGEON_SEED = seed >>> 0 || 1;
   GENERATED_DUNGEON = generateDungeon(DUNGEON_SEED);
   ROOM_REGIONS = GENERATED_DUNGEON.rooms;
@@ -422,6 +448,75 @@ export function configureDungeon(seed: number): void {
   GENERATED_PORTAL = generatePortalAndGem(DUNGEON_SEED);
   DUNGEON_PORTAL = GENERATED_PORTAL.portal;
   PURPLE_GEM = GENERATED_PORTAL.gem;
+}
+
+/** Configure the normal game simulation and renderer from an editor document. */
+export function configureEditorDungeon(config: EditorDungeonConfig): void {
+  EDITOR_DUNGEON = config;
+  DUNGEON_SEED = 1;
+  const walkable = config.tiles.filter((tile) => tile.type === "floor" || tile.type === "doorway");
+  BOARD_REGION.col = 0;
+  BOARD_REGION.row = 0;
+  BOARD_REGION.cols = config.width * EDITOR_TILE_CELLS;
+  BOARD_REGION.rows = config.height * EDITOR_TILE_CELLS;
+  BOARD_REGION.size = "medium";
+  ROOM_REGIONS = [BOARD_REGION];
+  DUNGEON_CONNECTIONS = [];
+  HALL_REGIONS = [];
+  FAR_REGION = BOARD_REGION;
+  BAT_REGION = BOARD_REGION;
+  HALL_REGION = BOARD_REGION;
+  BAT_HALL_REGION = BOARD_REGION;
+  HALL_ROWS = 0;
+
+  // Horizontal runs preserve arbitrary painted floor shapes without making
+  // every tile a separately walled chamber.
+  const rows = new Map<number, number[]>();
+  for (const tile of walkable) {
+    const values = rows.get(tile.y) ?? [];
+    values.push(tile.x);
+    rows.set(tile.y, values);
+  }
+  const floorRuns: Region[] = [];
+  for (const [row, values] of rows) {
+    values.sort((a, b) => a - b);
+    let start = values[0];
+    let previous = values[0];
+    if (start === undefined || previous === undefined) continue;
+    for (let index = 1; index <= values.length; index++) {
+      const value = values[index];
+      if (value === previous + 1) { previous = value; continue; }
+      floorRuns.push({
+        col: start * EDITOR_TILE_CELLS,
+        row: row * EDITOR_TILE_CELLS,
+        cols: (previous - start + 1) * EDITOR_TILE_CELLS,
+        rows: EDITOR_TILE_CELLS,
+      });
+      start = value!;
+      previous = value!;
+    }
+  }
+  REGIONS = floorRuns.length > 0 ? floorRuns : [BOARD_REGION];
+
+  const player = config.entities.find((entity) => entity.type === "player");
+  const fallback = walkable[0] ?? { x: 0, y: 0 };
+  const editorCell = (coordinate: number) => coordinate * EDITOR_TILE_CELLS + Math.floor(EDITOR_TILE_CELLS / 2);
+  PLAYER_START.col = editorCell(player?.x ?? fallback.x);
+  PLAYER_START.row = editorCell(player?.y ?? fallback.y);
+  const enemyKinds = new Set(["hellhound", "bat", "spider", "gargoyle"]);
+  DUNGEON_ENEMIES = config.entities.filter((entity) => enemyKinds.has(entity.type)).map((entity) => ({
+    kind: entity.type as DungeonEnemySpawn["kind"],
+    roomIndex: 0,
+    cell: { col: editorCell(entity.x), row: editorCell(entity.y) },
+  }));
+  PRESSURE_PLATE_ROOMS = [];
+  PRESSURE_PLATES = [];
+  SPIKE_TRAP_ROOM = null;
+  DUNGEON_PORTAL = {
+    roomIndex: 0, side: "south", exitRegion: BOARD_REGION,
+    position: regionCentre(BOARD_REGION), holePosition: regionCentre(BOARD_REGION),
+  };
+  PURPLE_GEM = { roomIndex: 0, position: regionCentre(BOARD_REGION) };
 }
 
 export type DoorId = "arena" | "far";
