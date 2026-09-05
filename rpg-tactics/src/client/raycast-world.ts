@@ -21,27 +21,35 @@ export class FloorGrid {
 }
 
 /** DDA visits each crossed cell exactly once; t is camera depth for unnormalized camera rays. */
-export function castRay(grid: FloorGrid, x: number, y: number, dx: number, dy: number, gates: readonly Gate[] = [], max = 6000): RayHit {
+export function castRay(grid: FloorGrid, x: number, y: number, dx: number, dy: number, gates: readonly Gate[] = [], max = 6000, skipInitialWalls = false): RayHit {
   let col = Math.floor((x - ARENA_X) / TILE_PX), row = Math.floor((y - ARENA_Y) / TILE_PX);
   const sx = dx < 0 ? -1 : 1, sy = dy < 0 ? -1 : 1;
   const deltaX = Math.abs(TILE_PX / dx), deltaY = Math.abs(TILE_PX / dy);
   let tx = dx === 0 ? Infinity : (ARENA_X + (col + (sx > 0 ? 1 : 0)) * TILE_PX - x) / dx;
   let ty = dy === 0 ? Infinity : (ARENA_Y + (row + (sy > 0 ? 1 : 0)) * TILE_PX - y) / dy;
   let distance = 0, side = 0;
+  let enteredFloor = !skipInitialWalls || !!grid.at(col, row);
+  let floorEntry = 0;
   if (dx === 0 && dy === 0) return { distance: max, x, y, side, material: 0 };
-  for (let steps = 0; steps < grid.width + grid.height + 2; steps++) {
+  const outsideSteps = Math.max(0, grid.minCol - col, col - (grid.minCol + grid.width - 1))
+    + Math.max(0, grid.minRow - row, row - (grid.minRow + grid.height - 1));
+  for (let steps = 0; steps < grid.width + grid.height + outsideSteps + 2; steps++) {
     if (tx < ty) { distance = tx; tx += deltaX; col += sx; side = 0; }
     else { distance = ty; ty += deltaY; row += sy; side = 1; }
-    if (distance >= max || !grid.at(col, row)) break;
+    if (distance >= max) break;
+    const floor = !!grid.at(col, row);
+    if (!enteredFloor) {
+      if (floor) { enteredFloor = true; floorEntry = distance; }
+    } else if (!floor) break;
   }
-  distance = Math.min(max, Math.max(.01, distance));
+  distance = enteredFloor ? Math.min(max, Math.max(.01, distance)) : max;
   let material = 0;
   for (const gate of gates) {
     const axis = gate.vertical ? dx : dy;
     if (Math.abs(axis) < 1e-9) continue;
     const t = ((gate.vertical ? gate.x : gate.y) - (gate.vertical ? x : y)) / axis;
     const across = gate.vertical ? y + dy * t : x + dx * t;
-    if (t > .01 && t < distance && across >= gate.min && across <= gate.max) {
+    if (t > Math.max(.01, floorEntry) && t < distance && across >= gate.min && across <= gate.max) {
       distance = t; side = gate.vertical ? 0 : 1; material = gate.material;
     }
   }
@@ -77,5 +85,45 @@ export class RaycastWorld {
       min: vertical ? ARENA_Y + hall.row * TILE_PX : ARENA_X + hall.col * TILE_PX,
       max: vertical ? ARENA_Y + (hall.row + hall.rows) * TILE_PX : ARENA_X + (hall.col + hall.cols) * TILE_PX });
   }
-  cast(x: number, y: number, dx: number, dy: number, max = 6000): RayHit { return castRay(this.grid, x, y, dx, dy, this.gates, max); }
+  cast(x: number, y: number, dx: number, dy: number, max = 6000, skipInitialWalls = false): RayHit { return castRay(this.grid, x, y, dx, dy, this.gates, max, skipInitialWalls); }
+}
+
+/** View-only wall cutaway: solid gameplay geometry remains unchanged. */
+export function castCameraRay(grid: FloorGrid, x: number, y: number, dx: number, dy: number,
+  gates: readonly Gate[], cutawayDepth: number, max = 6000): RayHit & { veils: RayHit[] } {
+  let col = Math.floor((x - ARENA_X) / TILE_PX), row = Math.floor((y - ARENA_Y) / TILE_PX);
+  const sx = dx < 0 ? -1 : 1, sy = dy < 0 ? -1 : 1;
+  const stepX = Math.abs(TILE_PX / dx), stepY = Math.abs(TILE_PX / dy);
+  let tx = dx === 0 ? Infinity : (ARENA_X + (col + (sx > 0 ? 1 : 0)) * TILE_PX - x) / dx;
+  let ty = dy === 0 ? Infinity : (ARENA_Y + (row + (sy > 0 ? 1 : 0)) * TILE_PX - y) / dy;
+  const hit = (distance: number, side: number, material = 0): RayHit => ({ distance, side, material, x: x + dx * distance, y: y + dy * distance });
+  let result = hit(max, 0), wasFloor = !!grid.at(col, row), recordedSolid = false;
+  const veils: RayHit[] = [];
+  const steps = Math.ceil(max * (Math.abs(dx) + Math.abs(dy)) / TILE_PX) + 2;
+  for (let i = 0; i < steps; i++) {
+    let distance: number, side: number;
+    if (tx < ty) { distance = tx; tx += stepX; col += sx; side = 0; }
+    else { distance = ty; ty += stepY; row += sy; side = 1; }
+    if (distance >= max) break;
+    const floor = !!grid.at(col, row);
+    if (wasFloor && !floor) {
+      if (distance >= cutawayDepth) { result = hit(distance, side); break; }
+      veils.push(hit(distance, side)); recordedSolid = true;
+    } else if (!wasFloor && floor) {
+      if (!recordedSolid && distance < cutawayDepth) veils.push(hit(distance, side));
+      recordedSolid = false;
+    }
+    wasFloor = floor;
+  }
+  for (const gate of gates) {
+    const axis = gate.vertical ? dx : dy;
+    if (Math.abs(axis) < 1e-9) continue;
+    const t = ((gate.vertical ? gate.x : gate.y) - (gate.vertical ? x : y)) / axis;
+    const across = gate.vertical ? y + dy * t : x + dx * t;
+    if (t > .01 && t < result.distance && across >= gate.min && across <= gate.max) {
+      const gateHit = hit(t, gate.vertical ? 0 : 1, gate.material);
+      if (t < cutawayDepth) veils.push(gateHit); else result = gateHit;
+    }
+  }
+  return { ...result, veils: veils.filter(v => v.distance < result.distance).sort((a, b) => b.distance - a.distance) };
 }

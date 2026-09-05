@@ -389,7 +389,7 @@ let uiCursor: Point | null = null;
 let groundCursor: Point | null = null;
 let cameraDrag: { startX: number; startY: number; x: number; y: number; moved: boolean } | null = null;
 document.getElementById("play-help")!.textContent =
-  "WASD move · right-drag look · left-click bite · scroll zoom · E eat · Shift run";
+  "WASD move · right-drag camera · V reset · left-click bite · scroll zoom · E eat · Shift run";
 uiCanvas.addEventListener("mousedown", (event) => {
   if (event.button !== 2) return;
   if (!currSnapshot || currSnapshot.dead || currSnapshot.inspect) return;

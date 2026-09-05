@@ -51,6 +51,8 @@ Run a separate test server with PowerShell: `$env:PORT='3301'; npx tsx src/serve
 
 The previous Three.js stage remains in `stage.ts` for reference. Shared models in `rpg-3d/` supply the offline sprite bake and the separate legacy 3D game. No simulation rules are copied into the renderer.
 
-The camera starts farther back with a slightly elevated view. Scroll out for a wider overhead view (up to 840 world units); scroll in to return close to the wolf. Camera height lowers automatically near walls. V restores the default distance.
+The camera starts farther back with a slightly elevated view. Scroll out for a wider overhead view (up to 840 world units); scroll in to return close to the wolf. The camera passes through walls and keeps its selected zoom distance. V restores the default distance.
 
 Floor stats appear below health: kills/total for the current floor, deaths on this floor, and deaths across saved floors. Resetting or resurrecting clears the current kill count; deaths accumulate. Records are saved in browser local storage by floor seed. Export stats downloads CSV with columns `seed,deaths,enemies killed/total`. The DEAD panel offers a central Resurrect button; R also resurrects.
+
+The camera uses a Diablo-style diagonal overhead follow view at a fixed 30-degree elevation, with the wolf centered slightly below mid-screen. Scroll zoom preserves that angle; right-drag rotates horizontally and adjusts elevation between 10 and 30 degrees; V restores the default 30-degree diagonal view. Existing sprites are reused.

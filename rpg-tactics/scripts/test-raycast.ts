@@ -44,16 +44,21 @@ console.log('PASS: bite timing, ranged exclusion, reticle range, player-facing a
 import { RaycastRenderer } from '../src/client/raycast-renderer.js';
 // Exercise camera input independently of canvas/asset construction.
 const camera = Object.create(RaycastRenderer.prototype) as RaycastRenderer;
-Reflect.set(camera, 'pitch', 0); camera.yaw = 0;
-camera.look(0, .1);
-assert(Reflect.get(camera, 'pitch') > 0, 'Mouse up raises the view');
-camera.look(0, -.2);
-assert(Reflect.get(camera, 'pitch') < 0, 'Mouse down lowers the view');
-camera.look(2, 0);
-assert(Math.abs(camera.yaw) > Math.PI * 2, 'Horizontal look is not clamped to one revolution');
 camera.resetView();
-assert.equal(Reflect.get(camera, 'pitch'), 0, 'Reset restores the reference angle');
-console.log('PASS: mouse-look pitch in both directions, unrestricted yaw, and view reset.');
+const defaultYaw = camera.yaw;
+camera.look(0, .5);
+assert.equal(camera.yaw, defaultYaw, 'Vertical drag only changes elevation');
+assert(Reflect.get(camera, 'cameraAngle') < Math.PI / 6, 'Camera can go shallower than 30 degrees');
+camera.look(0, -2);
+assert.equal(Reflect.get(camera, 'cameraAngle'), Math.PI * 30 / 180, 'Camera cannot go steeper than 30 degrees');
+camera.look(2, 0);
+assert(Math.abs(camera.yaw - defaultYaw) > Math.PI * 2, 'Horizontal orbit remains unrestricted');
+camera.zoom(120);
+camera.resetView();
+assert.equal(camera.yaw, defaultYaw, 'Reset restores the diagonal overhead view');
+assert.equal(Reflect.get(camera, 'cameraAngle'), Math.PI * 30 / 180, 'Reset restores 30 degrees');
+assert.equal(Reflect.get(camera, 'cameraDistance'), 600, 'Reset restores ARPG framing');
+console.log('PASS: adjustable camera angle, horizontal orbit, and overhead reset.');
 
 import { bloodHits } from '../src/client/blood-effects.js';
 const beforeHit = { player: { x: 0, y: 0 }, stats: { health: 100 }, corpses: [],
@@ -91,3 +96,24 @@ const restored = new FloorStats(statsStorage);
 assert.equal(restored.totalDeaths, 2, 'Floor records survive reload');
 assert.equal(restored.csv(), 'seed,deaths,enemies killed/total\r\n1,1,0/3\r\n2,1,0/3\r\n');
 console.log('PASS: floor stats, resets, death deduplication, persistence, CSV, and enemy totals.');
+
+const cameraRoom = new FloorGrid([{ col: 0, row: 0, cols: 10, rows: 10 }]);
+assert.equal(castRay(cameraRoom, ARENA_X - 1000, ARENA_Y + 90, 1, 0, [], 6000, true).distance, 1180,
+  'Camera outside walls sees the far room wall');
+assert.equal(castRay(cameraRoom, ARENA_X - 1000, ARENA_Y + 90, -1, 0, [], 6000, true).distance, 6000,
+  'Camera looking away from dungeon has no phantom nearby wall');
+console.log('PASS: camera rays outside dungeon walls.');
+
+import { castCameraRay } from '../src/client/raycast-world.js';
+const cutaway = castCameraRay(cameraRoom, ARENA_X - 90, ARENA_Y + 90, 1, 0, [], 180);
+assert.equal(cutaway.veils.length, 1, 'Near wall is translucent from outside');
+assert.equal(cutaway.veils[0]!.distance, 90);
+assert.equal(cutaway.distance, 270, 'Far wall remains opaque');
+const insideView = castCameraRay(cameraRoom, ARENA_X + 90, ARENA_Y + 90, 1, 0, [], 40);
+assert.equal(insideView.veils.length, 0, 'Wall past player remains solid');
+assert.equal(insideView.distance, 90);
+const twoRooms = new FloorGrid([{col:0,row:0,cols:10,rows:10},{col:15,row:0,cols:10,rows:10}]);
+const through = castCameraRay(twoRooms, ARENA_X + 90, ARENA_Y + 90, 1, 0, [], 270);
+assert.equal(through.veils.length, 1, 'Crossed solid region contributes one grey wall');
+assert.equal(through.distance, 360, 'Room beyond foreground wall is visible');
+console.log('PASS: translucent foreground walls and opaque background walls.');

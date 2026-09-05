@@ -49,7 +49,7 @@ export class BloodEffects {
       this.nextEatingBurst = now + 180;
     }
     for (const hit of hits) {
-      for (let i = 0; i < 40; i++) {
+      for (let i = 0; i < 80; i++) {
         const angle = Math.random() * Math.PI * 2;
         const speed = 24 + Math.random() * 90;
         this.drops.push({ x: hit.x, y: hit.y, z: hit.height,
@@ -60,7 +60,7 @@ export class BloodEffects {
       }
     }
     // Bound both overdraw and memory during a crowd fight.
-    this.drops = this.drops.filter(drop => now - drop.born < 350).slice(-320);
+    this.drops = this.drops.filter(drop => now - drop.born < 350).slice(-640);
   }
 
   draw(ctx: CanvasRenderingContext2D, now: number, viewWidth: number,

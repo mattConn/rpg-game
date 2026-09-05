@@ -1,15 +1,15 @@
 import { WORLD_HEIGHT } from '../../../src/shared/constants.js';
 import { ARENA_X, ARENA_Y, TILE_PX, DUNGEON_PORTAL, PRESSURE_PLATES, ROOM_REGIONS, HALL_REGIONS, DUNGEON_ENEMIES, EDITOR_DUNGEON, regionCentre, type TacticsSnapshot } from '../shared/tactics.js';
-import { RaycastWorld } from './raycast-world.js';
+import { RaycastWorld, castCameraRay, type RayHit } from './raycast-world.js';
 import { playerBiteFrame } from './attack-presentation.js';
 import { buildBarrierFrames, BARRIER_WIDTH, BARRIER_HEIGHT } from './barrier-texture.js';
 import { SPRITE_META } from './sprite-metadata.js';
 import { GRAPHICS_PRESETS, type GraphicsQuality } from './graphics.js';
 
-const FOV = Math.tan(Math.PI * 70 / 360), WALL_HEIGHT = 168, EYE_HEIGHT = 85;
-// Start at the reference angle, with free horizontal orbit and vertical mouse-look.
-const HORIZON_FRACTION = .11;
-const CAMERA_NEAR = 150, CAMERA_DEFAULT = 240, CAMERA_FAR = 840;
+// A narrower lens and distant, fixed-elevation camera give an overhead ARPG view.
+const FOV = Math.tan(Math.PI * 50 / 360), WALL_HEIGHT = 168;
+const CAMERA_YAW = -Math.PI / 4, CAMERA_ANGLE = Math.PI * 30 / 180;
+const CAMERA_NEAR = 320, CAMERA_DEFAULT = 600, CAMERA_FAR = 1200;
 const rgba = (r: number, g: number, b: number) => (0xff000000 | (b << 16) | (g << 8) | r) >>> 0;
 const shade = (color: number, amount: number) => rgba(Math.min(255, (color & 255) * amount), Math.min(255, ((color >>> 8) & 255) * amount), Math.min(255, ((color >>> 16) & 255) * amount));
 interface Pixels { width: number; height: number; data: Uint32Array; shades?: Uint32Array[]; bottomRows?: number[] }
@@ -18,14 +18,15 @@ interface Billboard { x: number; y: number; z: number; span: number; image: stri
 /** Entire play view is Canvas2D: no WebGL context, mesh, light, or animation mixer. */
 export class RaycastRenderer {
   readonly world = new RaycastWorld();
-  yaw = -Math.PI / 2;
-  private pitch = 0;
+  yaw = CAMERA_YAW;
+  private cameraAngle = CAMERA_ANGLE;
   private cameraDistance = CAMERA_DEFAULT;
   private width = 480; private height = 270; private viewWidth = 1600;
   private image!: ImageData; private pixels!: Uint32Array;
   private depths = new Float32Array(480);
+  private wallVeils: { x: number; hit: RayHit }[] = [];
   private wallBottoms = new Float32Array(480);
-  private cameraX = 0; private cameraY = 0; private eye = EYE_HEIGHT;
+  private cameraX = 0; private cameraY = 0; private eye = CAMERA_DEFAULT * Math.tan(CAMERA_ANGLE);
   private forwardX = 1; private forwardY = 0; private rightX = 0; private rightY = 1;
   private focal = 1; private horizon = 0;
   private readonly barrierFrames = buildBarrierFrames();
@@ -45,10 +46,6 @@ export class RaycastRenderer {
   constructor(private readonly canvas: HTMLCanvasElement, private quality: GraphicsQuality) {
     this.ctx = canvas.getContext('2d', { alpha: false })!;
     this.markers = new Uint8Array(this.world.grid.cells.length);
-    if (!EDITOR_DUNGEON && ROOM_REGIONS[0] && HALL_REGIONS[0]) {
-      const start = regionCentre(ROOM_REGIONS[0]), hall = regionCentre(HALL_REGIONS[0]);
-      this.yaw = Math.atan2(start.x - hall.x, start.y - hall.y);
-    }
     this.proceduralSprites();
     // Spawn-room decoration persists after its spiders die. Sample it on wall
     // surfaces, so webs share the wall perspective and never float across doors.
@@ -112,29 +109,28 @@ export class RaycastRenderer {
   }
   setQuality(quality: GraphicsQuality): void { this.quality = quality; }
   look(dx: number, dy: number): void {
-    this.yaw -= dx * 8;
-    this.pitch = Math.max(-1.1, Math.min(1.1, this.pitch + dy * 2));
+    this.yaw -= dx * 4;
+    this.cameraAngle = Math.max(Math.PI * 10 / 180, Math.min(CAMERA_ANGLE,
+      this.cameraAngle - dy * 1.5));
   }
   zoom(delta: number): void {
     this.cameraDistance = Math.max(CAMERA_NEAR, Math.min(CAMERA_FAR, this.cameraDistance + Math.max(-120, Math.min(120, delta)) * .3));
   }
   flip(): void { this.yaw += Math.PI; }
-  resetView(): void { this.yaw = -Math.PI / 2; this.pitch = 0; this.cameraDistance = CAMERA_DEFAULT; }
+  resetView(): void { this.yaw = CAMERA_YAW; this.cameraAngle = CAMERA_ANGLE; this.cameraDistance = CAMERA_DEFAULT; }
 
   private updateCamera(snap: TacticsSnapshot) {
     this.forwardX = -Math.sin(this.yaw); this.forwardY = -Math.cos(this.yaw);
     this.rightX = Math.cos(this.yaw); this.rightY = -Math.sin(this.yaw);
-    // Camera is a physical point behind the wolf, never beyond the nearest wall/gate.
-    const back = this.world.cast(snap.player.x, snap.player.y, -this.forwardX, -this.forwardY, this.cameraDistance + 8);
-    const distance = Math.max(0, Math.min(this.cameraDistance, back.distance - 7));
+    // Camera freely passes through geometry; player collision remains server-controlled.
+    const distance = this.cameraDistance;
     this.cameraX = snap.player.x - this.forwardX * distance;
     this.cameraY = snap.player.y - this.forwardY * distance;
-    // Rise as the camera pulls back, staying beneath the walls. Use the actual
-    // collision-limited distance so close walls also bring the camera down.
-    const overheadLift = Math.min(65, Math.max(0, distance - CAMERA_NEAR) * .3);
-    this.eye = EYE_HEIGHT + overheadLift - snap.dungeonPortal.fallProgress * 65;
+    // Preserve the selected viewing angle across zoom levels.
+    const slope = Math.tan(this.cameraAngle);
+    this.eye = distance * slope + 25 - snap.dungeonPortal.fallProgress * 65;
     this.focal = this.width / (2 * FOV);
-    this.horizon = this.height * HORIZON_FRACTION + Math.tan(this.pitch) * this.focal;
+    this.horizon = this.height * .58 - slope * this.focal;
   }
   project(x: number, y: number, height: number): { x: number; y: number } {
     const dx = x - this.cameraX, dy = y - this.cameraY;
@@ -148,7 +144,8 @@ export class RaycastRenderer {
     const depth = dx * this.forwardX + dy * this.forwardY;
     if (depth < 1 || Math.abs(dx * this.rightX + dy * this.rightY) > depth * FOV) return false;
     const distance = Math.hypot(dx, dy);
-    return this.world.cast(this.cameraX, this.cameraY, dx / distance, dy / distance, distance + 1).distance >= distance - 2;
+    return castCameraRay(this.world.grid, this.cameraX, this.cameraY, dx / distance, dy / distance,
+      this.world.gates, this.cameraDistance * distance / depth, distance + 1).distance >= distance - 2;
   }
   private updateMarkers(snap: TacticsSnapshot) {
     const key = snap.pressurePlates.map(p => +p.active).join('') + ':' + snap.spikeTrap?.active + ':' + snap.purpleGem.destroyed;
@@ -171,48 +168,110 @@ export class RaycastRenderer {
   render(snap: TacticsSnapshot, now: number): void {
     const start = performance.now();
     this.world.update(snap); this.updateCamera(snap); this.updateMarkers(snap);
-    this.pixels.fill(rgba(20, 18, 17));
-    this.drawWalls(now); this.drawFloor(); this.drawSprites(snap, now);
+    this.pixels.fill(rgba(0, 0, 0));
+    this.drawFloor(); this.drawWalls(now); this.drawSprites(snap, now); this.drawWallVeils();
     this.previousPlayerX = snap.player.x; this.previousPlayerY = snap.player.y;
     this.ctx.putImageData(this.image, 0, 0);
+    this.drawRain(snap, now);
     this.renderMs = performance.now() - start;
   }
+  private drawRain(snap: TacticsSnapshot, now: number) {
+    const ctx = this.ctx;
+    const cellSize = 160, radius = 1800;
+    const density = { low: .25, med: .45, high: .7, max: 1 }[this.quality];
+    const hash = (col: number, row: number, salt: number) => {
+      let value = Math.imul(col, 374761393) ^ Math.imul(row, 668265263) ^ salt;
+      value = Math.imul(value ^ (value >>> 13), 1274126177);
+      return ((value ^ (value >>> 16)) >>> 0) / 4294967296;
+    };
+    ctx.save(); ctx.lineWidth = .45;
+    ctx.strokeStyle = 'rgba(182, 205, 222, .42)';
+    // Each cell has a fixed world position and phase. Moving/orbiting only
+    // changes projection, never translates the rain with the camera.
+    for (let row = Math.floor((snap.player.y - radius) / cellSize); row <= Math.ceil((snap.player.y + radius) / cellSize); row++) {
+      for (let col = Math.floor((snap.player.x - radius) / cellSize); col <= Math.ceil((snap.player.x + radius) / cellSize); col++) {
+        if (hash(col, row, 7) > density) continue;
+        const wx = (col + hash(col, row, 19)) * cellSize;
+        const wy = (row + hash(col, row, 43)) * cellSize;
+        const dx = wx - this.cameraX, dy = wy - this.cameraY;
+        const depth = dx * this.forwardX + dy * this.forwardY;
+        if (depth < 70 || depth > 3600) continue;
+        const x = this.width / 2 + (dx * this.rightX + dy * this.rightY) * this.focal / depth;
+        if (x < 0 || x >= this.width) continue;
+        const scale = this.focal / depth;
+        const phase = (now / 1000 * (1.8 + hash(col, row, 71) * .6) + hash(col, row, 101)) % 1;
+        const groundY = this.horizon + this.eye * scale;
+        const height = Math.max(0, 1 - phase / .88) * 420;
+        const bottom = groundY - height * scale;
+        const top = bottom - (32 + hash(col, row, 131) * 24) * scale;
+        // Keep rain behind opaque walls hidden, while foreground rain remains visible.
+        const wallDepth = this.depths[Math.floor(x)]!;
+        const wallTop = this.horizon + (this.eye - WALL_HEIGHT) * this.focal / wallDepth;
+        if (depth > wallDepth && bottom >= wallTop) continue;
+        ctx.globalAlpha = Math.min(1, (3600 - depth) / 800);
+        if (phase < .88) {
+          if (bottom < 0 || top > this.height) continue;
+          ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+        } else if (groundY >= 0 && groundY < this.height) {
+          const age = (phase - .88) / .12;
+          ctx.globalAlpha *= 1 - age;
+          ctx.beginPath(); ctx.ellipse(x, groundY, (1 + age * 5) * scale,
+            (1 + age * 2) * scale, 0, 0, Math.PI * 2); ctx.stroke();
+        }
+      }
+    }
+    ctx.restore();
+  }
   private drawFloor() {
-    const texture = this.textures.get('floor'), grid = this.world.grid;
+    const texture = this.textures.get('floor'), grass = this.textures.get('grass'), grid = this.world.grid;
     const w = this.width, h = this.height;
     for (let y = 0; y < h; y++) {
       const offset = y * w;
-      if (y <= this.horizon || !texture) {
+      if (!texture || !grass || y <= this.horizon) {
         continue;
       }
       const distance = this.eye * this.focal / (y - this.horizon);
-      const light = Math.max(.14, Math.min(.9, 1.05 - distance / 1700));
-      const shaded = texture.shades![Math.max(0, Math.min(23, Math.floor(light * 24) - 1))]!;
+      // Fade out before the ray limit instead of stretching its last texture row
+      // across the horizon. Nearby grass stays visible when zoomed out.
+      if (distance >= 6000) continue;
+      const fogStart = this.cameraDistance + 2400;
+      const fog = Math.max(0, Math.min(1, (distance - fogStart) / (6000 - fogStart)));
+      const visibility = 1 - fog * fog * (3 - 2 * fog);
+      const light = Math.max(.35, Math.min(.9, 1.05 - Math.max(0, distance - this.cameraDistance) / 5000));
+      const level = Math.max(0, Math.min(23, Math.floor(light * 24) - 1));
+      const stoneShades = texture.shades![level]!, grassShades = grass.shades![level]!;
       const stepX = 2 * distance * this.rightX * FOV / w, stepY = 2 * distance * this.rightY * FOV / w;
       let xWorld = this.cameraX + distance * (this.forwardX - this.rightX * FOV);
       let yWorld = this.cameraY + distance * (this.forwardY - this.rightY * FOV);
       for (let x = 0; x < w; x++, xWorld += stepX, yWorld += stepY) {
-        if (y < this.wallBottoms[x]!) continue;
-        const tx = Math.floor(xWorld / 90 * texture.width) & (texture.width - 1);
-        const ty = Math.floor(yWorld / 90 * texture.height) & (texture.height - 1);
-        let color = shaded[ty * texture.width + tx]!;
         const col = Math.floor((xWorld - ARENA_X) / TILE_PX) - grid.minCol;
         const row = Math.floor((yWorld - ARENA_Y) / TILE_PX) - grid.minRow;
+        const inside = col >= 0 && row >= 0 && col < grid.width && row < grid.height
+          && grid.cells[row * grid.width + col] === 1;
+        const ground = inside ? texture : grass;
+        const tx = Math.floor(xWorld / 90 * ground.width) & (ground.width - 1);
+        const ty = Math.floor(yWorld / 90 * ground.height) & (ground.height - 1);
+        let color = (inside ? stoneShades : grassShades)[ty * ground.width + tx]!;
         const marker = col >= 0 && row >= 0 && col < grid.width && row < grid.height ? this.markers[row * grid.width + col] : 0;
         if (marker === 3) color = rgba(5, 2, 9);
         else if (marker) color = marker === 2 ? rgba(130, 77, 24) : rgba(20 + ((tx ^ ty) & 7), 23, 26);
-        this.pixels[offset + x] = marker ? shade(color, light) : color;
+        const groundColor = marker ? shade(color, light) : color;
+        this.pixels[offset + x] = fog > 0 ? shade(groundColor, visibility) : groundColor;
       }
     }
   }
   private drawWalls(now: number) {
+    this.wallVeils = [];
     const barrier = this.barrierFrames[Math.floor(now / 140) % 4]!;
     const texture = this.textures.get('wall');
     const webTexture = this.textures.get('web');
     for (let x = 0; x < this.width; x++) {
       const plane = (2 * (x + .5) / this.width - 1) * FOV;
-      const hit = this.world.cast(this.cameraX, this.cameraY, this.forwardX + this.rightX * plane, this.forwardY + this.rightY * plane);
-      this.depths[x] = hit.distance;
+      const hit = castCameraRay(this.world.grid, this.cameraX, this.cameraY,
+        this.forwardX + this.rightX * plane, this.forwardY + this.rightY * plane, this.world.gates, this.cameraDistance);
+      for (const veil of hit.veils) this.wallVeils.push({ x, hit: veil });
+      this.depths[x] = hit.distance >= 6000 ? Infinity : hit.distance;
+      if (hit.distance >= 6000) continue;
       const top = this.horizon + (this.eye - WALL_HEIGHT) * this.focal / hit.distance;
       const bottom = this.horizon + this.eye * this.focal / hit.distance;
       this.wallBottoms[x] = bottom;
@@ -220,7 +279,7 @@ export class RaycastRenderer {
       const along = hit.side ? hit.x : hit.y;
       const u = ((along / 90) % 1 + 1) % 1;
       const tx = texture ? Math.min(texture.width - 1, Math.floor(u * texture.width)) : 0;
-      const light = Math.max(.16, Math.min(1, 1.15 - hit.distance / 1800)) * (hit.side ? .75 : 1);
+      const light = Math.max(.4, Math.min(1, 1.15 - Math.max(0, hit.distance - this.cameraDistance) / 5500)) * (hit.side ? .75 : 1);
       const shaded = texture?.shades![Math.max(0, Math.min(23, Math.floor(light * 24) - 1))];
       const web = hit.material === 0 ? this.wallWebs.find(web => web.side === hit.side
         && Math.abs(web.plane - (hit.side ? hit.y : hit.x)) < 1
@@ -245,6 +304,20 @@ export class RaycastRenderer {
         }
         this.pixels[y * this.width + x] = hit.material === 2 ? shade(color, Math.max(.7, light))
           : hit.material || !texture ? shade(color, light) : color;
+      }
+    }
+  }
+  private drawWallVeils() {
+    for (const { x, hit } of this.wallVeils) {
+      const depth = Math.max(1, hit.distance);
+      const top = this.horizon + (this.eye - WALL_HEIGHT) * this.focal / depth;
+      const bottom = this.horizon + this.eye * this.focal / depth;
+      for (let y = Math.max(0, Math.floor(top)); y < Math.min(this.height, Math.ceil(bottom)); y++) {
+        const grey = 15, alpha = .45;
+        const pixel = this.pixels[y * this.width + x]!;
+        this.pixels[y * this.width + x] = rgba((pixel & 255) * (1 - alpha) + grey * alpha,
+          ((pixel >>> 8) & 255) * (1 - alpha) + grey * alpha,
+          ((pixel >>> 16) & 255) * (1 - alpha) + grey * alpha);
       }
     }
   }
@@ -329,13 +402,13 @@ export class RaycastRenderer {
     for (const sprite of sprites) sprite.depth = (sprite.x - this.cameraX) * this.forwardX + (sprite.y - this.cameraY) * this.forwardY;
     sprites.sort((a, b) => b.depth! - a.depth!);
     // Ground shadows are flattened cached sprites; they do not cast extra rays.
-    for (const sprite of sprites) if (sprite.image in SPRITE_META && !['bat', 'angel', 'gem', 'spider-wall'].includes(sprite.image))
+    for (const sprite of sprites) if (sprite.image in SPRITE_META && !['angel', 'gem', 'spider-wall'].includes(sprite.image))
       this.drawBillboard({ ...sprite, image: 'shadow', span: sprite.span * .6, z: 1, frame: 0, direction: 0 });
     for (const sprite of sprites) this.drawBillboard(sprite);
   }
   private drawBillboard(sprite: Billboard) {
     const depth = sprite.image.startsWith("player") ? Math.max(120, sprite.depth!) : sprite.depth!;
-    if (depth < 4 || depth > 2400) return;
+    if (depth < 4 || depth > 6000) return;
     const image = this.textures.get(sprite.image); if (!image) return;
     const across = (sprite.x - this.cameraX) * this.rightX + (sprite.y - this.cameraY) * this.rightY;
     const size = sprite.span * this.focal / depth;
@@ -350,7 +423,7 @@ export class RaycastRenderer {
     const x0 = Math.max(0, Math.floor(left)), x1 = Math.min(this.width, Math.ceil(left + size));
     const y0 = Math.max(0, Math.floor(top)), y1 = Math.min(this.height, Math.ceil(top + size), rockBottom !== undefined ? Math.ceil(groundY) : this.height);
     const frameSize = sprite.image in SPRITE_META ? image.width / 8 : image.width;
-    const light = Math.max(.2, Math.min(1.15, 1.2 - depth / 1600));
+    const light = Math.max(.45, Math.min(1.15, 1.2 - Math.max(0, depth - this.cameraDistance) / 5000));
     for (let x = x0; x < x1; x++) {
       if (!sprite.image.startsWith("player") && depth > this.depths[x]!) continue;
       const sx = sprite.direction * frameSize + Math.min(frameSize - 1, Math.max(0, Math.floor((x - left) / size * frameSize)));
@@ -363,10 +436,19 @@ export class RaycastRenderer {
     }
   }
   private proceduralSprites() {
-    for (const kind of ['torch', 'dagger', 'spike', 'shadow', 'web']) {
+    for (const kind of ['torch', 'dagger', 'spike', 'shadow', 'web', 'grass']) {
       const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;
       const c = canvas.getContext('2d')!;
-      if (kind === 'web') {
+      if (kind === 'grass') {
+        let state = 0x6a55;
+        const random = () => { state ^= state << 13; state ^= state >>> 17; state ^= state << 5; return (state >>> 0) / 4294967296; };
+        c.fillStyle = '#35472a'; c.fillRect(0, 0, 64, 64);
+        for (let i = 0; i < 2400; i++) {
+          const x = Math.floor(random() * 64), y = Math.floor(random() * 64);
+          c.fillStyle = ['#293820', '#465834', '#55643b', '#687047', '#3a4b29', '#49472f'][Math.floor(random() * 6)]!;
+          c.fillRect(x, y, 1, 1 + Math.floor(random() * 3));
+        }
+      } else if (kind === 'web') {
         c.strokeStyle = '#dddcd0'; c.lineWidth = .65;
         const cx = 29, cy = 27, spokes = 12;
         for (let i = 0; i < spokes; i++) {
@@ -393,7 +475,9 @@ export class RaycastRenderer {
         c.fillStyle = '#454d56'; c.beginPath(); c.moveTo(32, 3); c.lineTo(32, 51); c.lineTo(21, 51); c.fill();
         if (kind === 'dagger') { c.fillStyle = '#987549'; c.fillRect(20, 48, 24, 4); c.fillRect(29, 52, 6, 11); }
       }
-      this.textures.set(kind, { width: 64, height: 64, data: new Uint32Array(c.getImageData(0, 0, 64, 64).data.buffer) });
+      const data = new Uint32Array(c.getImageData(0, 0, 64, 64).data.buffer);
+      const shades = kind === 'grass' ? Array.from({ length: 24 }, (_, level) => data.map(pixel => shade(pixel, (level + 1) / 24))) : undefined;
+      this.textures.set(kind, { width: 64, height: 64, data, shades });
     }
   }
 }
