@@ -1,140 +1,52 @@
 # rpg-tactics
 
-A **turn-based** version of the 3D game: the same dungeon, the same models, the
-same UI, on a 3x3 board.
+The active game is a third-person, Doom-style raycast dungeon. Canvas2D draws textured walls and floors, with eight-direction sprites baked from the existing wolf and enemy models. The camera follows behind the whole wolf and can orbit independently. A wall or closed gate behind the player pushes the camera closer.
 
-```bash
+The server still owns movement, collisions, combat, eating, pressure plates, spikes, the gem, and dungeon progression. The client consumes the same 20 Hz snapshots. Dead enemies use static sprites and disappear as soon as eating completes.
+
+## Run
+
+```sh
 npm install
-npm start          # http://localhost:3300   (PORT to change it)
-npm run dev        # same, restarting the server on change
-npm run typecheck
+npm start
 ```
 
-The 2D game (3000) and the real-time 3D game (3200) keep their own ports, so all
-three can run at once.
-
-## The board
-
-```
-  @ .  h        the player holds the left column,
-  .  .  h       the pack holds the right,
-  .  .  D       and D is the door out of the room
-```
-
-**The door is a door, not a way to win.** It used to end the encounter the
-moment you stood on it; now right-clicking opens it onto a corridor, and the corridor onto a
-second chamber the size of this one, and all of it is ground you can walk on.
-The pack comes through after you.
-
-The board is turn-based but **not tile-based to look at**. Underneath it is a
-15x15 lattice — five cells to each of those three squares — and none of it is
-drawn. You walk to wherever you click within your reach for the turn rather than
-hopping from square to square, so a turn-based fight moves like a fluid one.
-
-The pack starts **asleep** — two hellhounds standing across the board looking at
-you, and you at them. They wake **one at a time**, and never settle again:
-
-- come within a square of one and it notices you;
-- put a dagger in one and it notices you — *only* it. Its packmate across the
-  room heard nothing and goes on watching.
-
-An unwoken hound takes no turn at all; it stands exactly where it started. A
-woken one turns to look at you wherever it is standing, which is the tell that
-separates the two. From then on the turns alternate: you act, each woken hound
-acts, then it is your turn again.
-
-**A round resolves in sequence and plays out all at once.** Your action is
-settled first, then each woken hound's, each reading the board the ones before it
-left — and then you watch the lot of it together, your step and both of theirs in
-the same beat, rather than sitting through three animations in a row.
-
-**Reach runs sideways and across, never straight up or down** — a quarter-turn
-cone opening left and right. A hellhound directly above or below you cannot bite
-you and you cannot cut it, which is why the pack manoeuvres to your flanks
-rather than simply walking at you. The daggers are the mirror image: anything
-already inside sword reach is too close to throw at.
-
-The floor carries one mark and nothing else: a small **white ring** under the
-cursor at the spot a click would put you, dark red when that spot is beyond this
-turn's reach, has something standing in it, or is not floor at all. Nothing is
-drawn under the player, and nothing marks the door — the light coming through it
-does that.
-
-Two hounds biting take a third of you a round, and it takes three sword blows to
-put one down. That arithmetic does not work in your favour, which is what the
-door in the south wall is for: giving ground is the answer to it, and there is
-somewhere to give ground *to*.
-
-**A click is a walk to wherever you clicked, not a step.** There is no reach to
-stay inside: click the far end of the corridor and you will go there, covering a
-square's worth of ground per round and letting the pack act in every one of them.
-A long walk is a commitment — you arrive having been bitten the whole way — and
-any click, **Space** or **.** calls it off.
-
-Nothing routes around a corner for you. Walking out of the room means walking to
-the doorway first and then down the corridor — aim straight at the far end from
-across the board and you will set off into the south wall, get nowhere, and be
-told the way is blocked.
-
-**The camera frames the board while you are standing on it, and follows you once
-you leave it.** Drag, pan and zoom still work wherever you are; **V** puts the
-view back.
-
-**F drops you into the player's own eyes**, looking the way they are facing, and
-F again lifts you back out to the overhead view you left — same yaw, same pitch,
-same zoom. Down there the drag is mouse-look rather than a grab of the board, and
-the wheel and the pan have nothing to do. The game underneath does not change: it
-is still your turn, you still click the floor to walk and mark a hound to swing
-at it, and the hound standing on your shoulder is much harder to ignore.
+Open http://localhost:3300 in your browser. The level editor remains at `/editor.html`.
 
 ## Controls
 
-| | |
-|---|---|
-| click anywhere on the floor | walk there, however far it is |
-| click a hellhound | mark it — click it again to drop the mark |
-| **1** / **2** or click a slot | choose the sword / the dagger. Costs nothing |
-| **Space** | open/close a faced nearby door, otherwise swing at the mark |
-| **Attack** | swing the chosen weapon at the mark |
-| **.** or **Wait** | hold your ground |
-| **Tab** | cycle the mark |
-| double-click a body | inspect it |
-| **R** | restart the encounter |
-| **drag** | orbit the camera |
-| **right-drag** / shift-drag | pan |
-| **right-click a door** | open or close it while standing in front and facing it |
-| **wheel** | zoom |
-| **F** | first person — look out of your own eyes. **F** again to come back |
-| **V** | reset the view (and drop out of first person) |
+- WASD / arrow keys: move relative to the camera; the wolf turns toward travel.
+- Hold right mouse and drag to orbit and look up/down. Release to stop looking; left-click bites, including while dragging.
+- Left click: bite in the wolf's facing direction. The player has no visible weapon.
+- E: eat a nearby corpse; Shift: run.
+- 1–4: existing weapon/item actions; R: restart; V: reset camera; /: turn the camera around.
+- Scroll down: zoom out a little; scroll up: return closer. V also resets zoom. Walls still limit camera distance.
+- H: show/hide the FPS counter.
 
-**Choosing an attack and making one are separate.** The bar picks up a weapon and
-costs nothing — swap freely mid-turn. The two stacked buttons to the right of it
-are what spend the turn:
+A pale enemy reticle indicates nearby or aligned; gold indicates both inside the facing cone and in bite range. Walls hide the indicator.
 
-```
-  [1] [2] [ ] [ ] [ ]   (Space) Attack
-                        (.)     Wait
-```
+## Graphics
 
-**Attack spends your turn whether or not it lands.** With nothing marked, or with
-the sword in hand at two columns' distance, you swing at air and the pack still
-gets to answer. The Attack button and the chosen slot's border both go gold when
-the blow would actually connect and white when it would only cost you the turn.
+Low / Med / High / Max remains at the top right and is saved between visits. Switching reloads the page.
 
-## What is actually new
+| Mode | Maximum internal width | Wall/floor textures | FPS limit |
+|---|---:|---:|---:|
+| Low | 320 px | 64 px | 30 |
+| Med | 480 px | 128 px | 60 |
+| High | 640 px | 256 px | Display refresh |
+| Max | 960 px | 512 px | Display refresh |
 
-Only the rules. The models, every animation rig, the snapshot playback, and the
-whole 2D UI are **imported** from `rpg-3d/` and `src/` rather than copied — the
-snapshot this server sends extends the real-time game's, so all of that code
-reads exactly the fields it always read.
+Height follows the window's aspect ratio. The scene is scaled with nearest-neighbor sampling for the pixel-art look; the HUD remains sharp. The active game does not load Three.js, GLTF files, skeletal animations, or dynamic lights. Performance still depends on viewport, browser, and scene contents.
 
-| | |
-|---|---|
-| `src/shared/tactics.ts` | the board, the rules, and the snapshot |
-| `src/server/game.ts` | turns, the pack's AI, aggro, death |
-| `src/server/index.ts` | Fastify + ws |
-| `src/client/stage.ts` | the chamber, its torches, and the orbit camera |
-| `src/client/chrome.ts` | turn banner, log and hint over the imported overlay |
-| `src/client/main.ts` | websocket, input, picking, the frame loop |
+## Development
 
-`CLAUDE.md` in the parent directory has the design notes.
+- `npm run typecheck` and `npm run build:client`: validate and build.
+- `npm run test:raycast`: headless ray/collision-map checks.
+- `node scripts/test-raycast-browser.mjs`: browser integration checks against a separate game server on port 3301 (override with `RAYCAST_TEST_URL`). Requires Google Chrome. Test screenshots go in ignored `work/`.
+- `npm run build:sprites`: regenerate `public/sprites/` and `src/client/sprite-metadata.ts`. Requires the game server on port 3300 and Google Chrome; uses WebGL only during this offline bake.
+
+Run a separate test server with PowerShell: `$env:PORT='3301'; npx tsx src/server/index.ts`.
+
+`raycast-world.ts` builds the floor grid from the same region definitions as the simulation, traces walls with DDA, and intersects pressure-plate gates and the gem barrier. `raycast-renderer.ts` draws the scene and occludes sprites using wall depths. `main.ts` owns network input, camera controls, and the reused HUD.
+
+The previous Three.js stage remains in `stage.ts` for reference. Shared models in `rpg-3d/` supply the offline sprite bake and the separate legacy 3D game. No simulation rules are copied into the renderer.

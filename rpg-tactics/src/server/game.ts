@@ -98,7 +98,8 @@ const SWORD_SIDE_DAMAGE = 20;
 const MAX_CORPSES = 8;
 
 /** Player walking speed in room pixels per second. */
-const PLAYER_SPEED = 150;
+const PLAYER_SPEED = 300;
+/** 480 pixels/second: twice the original 240-pixel run speed. */
 const PLAYER_RUN_MULTIPLIER = 1.6;
 /** Enemy chase speed in room pixels per second. */
 const ENEMY_SPEED = 140;
@@ -155,7 +156,7 @@ const ENEMY_ATTACK_INTERVAL_MS = 1500;
 /** Match the imported attack clip at its configured 1.25x playback speed. */
 const HOUND_ATTACK_ANIMATION_MS = 1250;
 /** Slow enough that circling behind a hound creates a real attack window. */
-const HOUND_TURN_SPEED = 2.2;
+const HOUND_TURN_SPEED = 1.65;
 /** A strict frontal bite: 35 degrees to either side of the snout. */
 const HOUND_ATTACK_CONE_DOT = Math.cos((35 * Math.PI) / 180);
 /** Recovery after throwing a dagger, in ms. */
@@ -1778,9 +1779,11 @@ export class TacticsGame {
     const dx = PURPLE_GEM.position.x - this.player.x;
     const dy = PURPLE_GEM.position.y - this.player.y;
     const gap = Math.hypot(dx, dy);
-    if (gap > MELEE_RANGE * 1.15) return false;
+    const gemRadius = 60;
+    if (gap > MELEE_RANGE + gemRadius) return false;
     const headingLength = Math.max(0.001, Math.hypot(this.playerHeading.x, this.playerHeading.y));
-    if (gap > 0.001 && (dx * this.playerHeading.x + dy * this.playerHeading.y) / (gap * headingLength) < ATTACK_CONE_DOT) return false;
+    const cone = Math.acos(ATTACK_CONE_DOT) + Math.asin(Math.min(1, gemRadius / Math.max(gap, .001)));
+    if (gap > gemRadius && (dx * this.playerHeading.x + dy * this.playerHeading.y) / (gap * headingLength) < Math.cos(cone)) return false;
     this.purpleGemDestroyed = true;
     this.say("The purple gem shatters. Somewhere, the barrier dissolves.");
     return true;

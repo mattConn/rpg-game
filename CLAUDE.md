@@ -6,6 +6,21 @@ Guidance for working in this repo.
 > first-person turn-based dungeon. All new work goes here unless stated
 > otherwise. `cd rpg-tactics && npm install && npm start`.
 
+## Current active renderer (September 5, 2026)
+
+`rpg-tactics/` now uses a **Canvas2D raycaster with an over-the-shoulder third-person camera**. The full white wolf is visible; right-click dragging orbits and looks up/down without changing a stationary wolf's facing. The reference angle (horizon at 11%) is the starting view. Hold right mouse to drag the camera; left-click bites, including while dragging. Movement remains camera-relative and server-authoritative. This supersedes the older first-person/Three.js descriptions below for the active game.
+
+- `src/client/raycast-world.ts`: shared-region floor grid, DDA walls, gate intersections.
+- `src/client/raycast-renderer.ts`: textured walls/floors, cached directional sprites, camera collision, scenery and gameplay markers. No live WebGL or GLTF model loads.
+- `src/client/main.ts`: existing snapshot protocol, movement/combat input, reused HUD.
+- `public/sprites/` and `src/client/sprite-metadata.ts`: generated from the existing shared model rigs by `npm run build:sprites` (server on 3300, Chrome installed).
+- Low/Med/High/Max controls internal render width (320/480/640/960), wall/floor texture size (64/128/256/512), and frame cap (30/60/display refresh/display refresh).
+- Enemy corpses stay still and disappear immediately when marked eaten.
+- Player sprites have no sword or dagger. Melee cooldowns select eight baked bite frames for the 320 ms active attack. The reticle follows player facing: pale for nearby/aligned, gold for both, and hidden behind walls.
+- Test DDA with `npm run test:raycast`; test browser interactions against an isolated server on 3301 with `node scripts/test-raycast-browser.mjs`. Do not run state-changing tests against the user's play session on 3300.
+
+The old Three.js `stage.ts` is retained but is not in the active client bundle. The separate root and `rpg-3d/` apps remain intact. See `rpg-tactics/README.md` for current run/build controls.
+
 ## What this is
 
 A single-player browser RPG in a dungeon, with **three front ends and two sets

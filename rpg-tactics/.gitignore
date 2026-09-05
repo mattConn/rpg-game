@@ -5,3 +5,6 @@ public/editor.js
 public/editor.js.map
 public/editor-play.js
 public/editor-play.js.map
+
+# Local rendering checks and screenshots
+work/

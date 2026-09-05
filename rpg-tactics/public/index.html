@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Single-Player RPG — Turn-Based</title>
+    <title>Wolf Dungeon</title>
     <style>
       html,
       body {
@@ -36,6 +36,7 @@
       }
 
       #scene {
+        image-rendering: pixelated;
         background: #000;
       }
 
@@ -72,6 +73,10 @@
         cursor: pointer;
       }
       #graphics-quality:focus-visible { outline: 2px solid #e6bf72; outline-offset: 3px; }
+      #play-help { position: fixed; left: 16px; bottom: 14px; color: #ddd2bb; font: 12px monospace; text-shadow: 1px 2px 2px #000; pointer-events: none; }
+      #connection-status { position: fixed; top: 54px; left: 16px; color: #eccd87; font: 13px monospace; pointer-events: none; }
+      #performance { color: #aaa28f; font: 11px monospace; min-width: 40px; }
+      @media (max-width: 700px) { #play-help { bottom: 8px; font-size: 10px; } #connection-status { top: 90px; } }
     </style>
   </head>
   <body>
@@ -79,12 +84,16 @@
       <canvas id="scene"></canvas>
       <canvas id="ui"></canvas>
     </div>
+    <div id="play-help">WASD move · drag to look · click attack · E eat · Shift run</div>
+    <div id="connection-status">Loading dungeon…</div>
     <div id="graphics-settings">
+      <span id="performance"></span>
       <label for="graphics-quality">Graphics</label>
-      <select id="graphics-quality" aria-label="Graphics quality" title="Changing graphics reloads the game to apply model and texture detail">
+      <select id="graphics-quality" aria-label="Graphics quality" title="Changing graphics reloads the game to apply rendering detail">
         <option value="low">Low</option>
         <option value="med">Med</option>
         <option value="high" selected>High</option>
+        <option value="max">Max</option>
       </select>
     </div>
     <script src="/tactics.js"></script>

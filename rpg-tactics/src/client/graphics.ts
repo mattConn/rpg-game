@@ -1,11 +1,12 @@
 import { TEXTURE_VARIANTS } from "./texture-manifest.js";
 
-export type GraphicsQuality = "low" | "med" | "high";
+export type GraphicsQuality = "low" | "med" | "high" | "max";
 
 export const GRAPHICS_PRESETS = {
-  low: { pixelRatioCap: 0.75, maxFps: 30, anisotropy: 1 },
-  med: { pixelRatioCap: 1, maxFps: 60, anisotropy: 4 },
-  high: { pixelRatioCap: 2, maxFps: Infinity, anisotropy: Infinity },
+  low: { renderWidth: 320, textureSize: 64, maxFps: 30 },
+  med: { renderWidth: 480, textureSize: 128, maxFps: 60 },
+  high: { renderWidth: 640, textureSize: 256, maxFps: Infinity },
+  max: { renderWidth: 960, textureSize: 512, maxFps: Infinity },
 } as const;
 
 const STORAGE_KEY = "rpg-graphics-quality";
@@ -13,7 +14,7 @@ const STORAGE_KEY = "rpg-graphics-quality";
 export function readGraphicsQuality(): GraphicsQuality {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved === "low" || saved === "med" || saved === "high") return saved;
+    if (saved === "low" || saved === "med" || saved === "high" || saved === "max") return saved;
   } catch { /* Settings still work when storage is unavailable. */ }
   return "high";
 }
@@ -34,7 +35,7 @@ export function setupGraphicsControl(initial: GraphicsQuality, onChange: (qualit
 
 /** Resolve texture and mesh detail together; leave blob/data URLs and originals alone. */
 export function graphicsAssetUrl(url: string, quality: GraphicsQuality): string {
-  if (quality === "high") return url;
+  if (quality === "high" || quality === "max") return url;
   const texture = TEXTURE_VARIANTS[url];
   if (texture) return texture[quality];
   return url.replace(

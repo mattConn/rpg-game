@@ -1,46 +1,26 @@
-/**
- * Render-only WebSocket client for the real-time tactical game. It sends input and
- * draws the `TacticsSnapshot` it gets back; no rule is decided here.
- *
- * Almost none of this is new work. `Actors`, `applyCues`, `interpolateSnapshot`
- * and the entire 2D overlay are **imported from the real-time 3D client** —
- * their job is to turn a snapshot into models, animation and a HUD, and that job
- * did not change when the rules did. What this file adds is the board's own
- * input language:
- *
- * - **a click resolves to a room point before it is sent**, as in the real-time
- *   client, so the server decides what was clicked using the geometry it owns —
- *   here, which of the nine squares the point fell in;
- * - **a drag is a camera move, not a click.** Anything past a few pixels of
- *   travel swallows the click that follows, or every attempt to look around the
- *   board would also order a step.
- */
-
-import * as THREE from "three";
-
+/** Server-authoritative dungeon, drawn as raycast walls and directional sprites. */
 import { WORLD_HEIGHT, WORLD_WIDTH } from "../../../src/shared/constants.js";
 import { LOOT_CLOSE_RECT, hitsRect, lootMenuProxyPoint } from "../../../src/shared/loot.js";
 import type { Point } from "../../../src/shared/movement.js";
 import { actionBarHandleRect, actionBarSize, squareAtPoint } from "../../../src/client/actionbar.js";
 import { SERVER_TICK_MS, renderFraction, smoothInterval } from "../../../src/client/interpolation.js";
 import { fillViewport } from "../../../src/client/viewport.js";
-import { Actors, applyCues, entityIdOf } from "../../../rpg-3d/src/client/entities.js";
 import { barOrigin, centreShift, drawOverlay, hits, resurrectRect } from "../../../rpg-3d/src/client/overlay.js";
 import { interpolateSnapshot } from "../../../rpg-3d/src/client/playback.js";
-import { toX, toZ } from "../../../rpg-3d/src/client/world.js";
 import {
   configureDungeon,
   configureEditorDungeon,
-  isOver,
   TACTICS_ACTIONS,
   type TacticsInput,
   type TacticsSnapshot,
   type EditorDungeonConfig,
 } from "../shared/tactics.js";
 import { BAR_LAYOUT, drawTacticsChrome } from "./chrome.js";
-import { createStage } from "./stage.js";
-import { drawHeldWeapon } from "./viewmodel.js";
-import { GRAPHICS_PRESETS, graphicsAssetUrl, readGraphicsQuality, setupGraphicsControl } from "./graphics.js";
+import { GemExplosion } from "./gem-explosion.js";
+import { BloodEffects } from "./blood-effects.js";
+import { selectAttackReticle } from "./attack-presentation.js";
+import { RaycastRenderer } from "./raycast-renderer.js";
+import { GRAPHICS_PRESETS, readGraphicsQuality, setupGraphicsControl } from "./graphics.js";
 
 // ------------------------------------------------------------------ canvases
 
@@ -79,9 +59,12 @@ const uiCanvas = document.getElementById("ui") as HTMLCanvasElement;
 const ctx = uiCanvas.getContext("2d")!;
 
 let graphicsQuality = readGraphicsQuality();
-// Choose the asset before any loaders start, including shared actor loaders.
-THREE.DefaultLoadingManager.setURLModifier((url) => graphicsAssetUrl(url, graphicsQuality));
-const stage = createStage(sceneCanvas, GRAPHICS_PRESETS[graphicsQuality].anisotropy);
+const stage = new RaycastRenderer(sceneCanvas, graphicsQuality);
+const connectionStatus = document.getElementById("connection-status")!;
+let assetsReady = false;
+stage.ready.then(() => { assetsReady = true; connectionStatus.textContent = ""; }).catch(() => {
+  connectionStatus.textContent = "Could not load game art. Refresh to retry.";
+});
 const dungeonFade = document.createElement("div");
 Object.assign(dungeonFade.style, {
   position: "fixed", inset: "0", background: "#000", opacity: "0",
@@ -122,8 +105,7 @@ function resize() {
     barOrigin.y = Math.max(9, Math.min(WORLD_HEIGHT - barSize.height, barOrigin.y));
   }
 
-  stage.resize(fit.displayWidth, fit.displayHeight,
-    Math.min(window.devicePixelRatio || 1, GRAPHICS_PRESETS[graphicsQuality].pixelRatioCap), viewWidth);
+  stage.resize(fit.displayWidth, fit.displayHeight, viewWidth);
 }
 
 setupGraphicsControl(graphicsQuality, (quality) => {
@@ -141,17 +123,12 @@ let prevSnapshotTime = 0;
 let currSnapshotTime = 0;
 let snapshotInterval = SERVER_TICK_MS;
 
-let actors: Actors | null = null;
-let showHitboxes = false;
+let showPerformance = true;
 
-// ------------------------------------------------------- the weapon in hand
-// The sword's swing is stamped from a *fresh cooldown*, the protocol's way of
-// saying "an attack just happened" — the same derivation `applyCues` uses,
-// rather than a second event on the wire. The dagger needs no stamp: it has no
-// animation, and whether it is in your hand is read from the cooldown itself.
-let swingStartTime = -Infinity;
 /** A deliberately faint edge glow, stamped whenever a hound lands a bite. */
 let hurt = 0;
+const blood = new BloodEffects();
+const gemExplosion = new GemExplosion();
 
 const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
 const wsQuery = new URLSearchParams({ seed: String(dungeonSeed) });
@@ -177,31 +154,20 @@ function connectWebSocket() {
         location.replace(next.toString());
         return;
       }
+      if (snap.dead || snap.inspect) cameraDrag = null;
+      if (assetsReady) connectionStatus.textContent = "";
       const now = performance.now();
-      // Keep local interaction facing aligned with the authoritative model
-      // whenever direct movement is not actively choosing a new direction.
-      if (heldKeys.size === 0) {
-        playerYaw = Math.atan2(-snap.playerHeading.x, -snap.playerHeading.y);
-      }
-      if (currSnapshot && actors && applyCues(actors, currSnapshot, snap, now, struckBy)) {
+      if (currSnapshot && snap.stats.health < currSnapshot.stats.health) {
         hurt = 0.32;
       }
 
-      // A fresh cooldown means an attack just landed. Which animation plays is
-      // read off `cooldown.slot` — the slot that actually fired — and not off
-      // `activeSlot`, or swapping weapons mid-cooldown would replay the swing
-      // as a throw.
-      const before = currSnapshot?.cooldown;
-      const after = snap.cooldown;
-      if (
-        after &&
-        (!before || before.slot !== after.slot || after.remainingMs > before.remainingMs + 1)
-      ) {
-        if (TACTICS_ACTIONS[after.slot]?.kind === "melee") swingStartTime = now;
+      if (currSnapshot) {
+        blood.update(currSnapshot, snap, now);
+        gemExplosion.update(currSnapshot, snap, now);
       }
 
-      prevSnapshot = currSnapshot;
       prevSnapshotTime = currSnapshotTime;
+      prevSnapshot = currSnapshot;
       currSnapshot = snap;
       currSnapshotTime = performance.now();
       if (prevSnapshot) snapshotInterval = smoothInterval(snapshotInterval, currSnapshotTime - prevSnapshotTime);
@@ -211,7 +177,8 @@ function connectWebSocket() {
   });
 
   ws.addEventListener("close", () => {
-    setTimeout(connectWebSocket, 1000);
+    connectionStatus.textContent = "Reconnecting…";
+    setTimeout(() => { socket = connectWebSocket(); }, 1000);
   });
 
   ws.addEventListener("error", () => {
@@ -219,18 +186,6 @@ function connectWebSocket() {
   });
 
   return ws;
-}
-
-/**
- * Which hellhounds just bit, straight from the simulation. A round resolves
- * whole, so both of them can land in the same snapshot; each blow carries a seq
- * that only ever rises, and anything above the highest already seen is new.
- * Guessing at the nearest hunter would give both bites to whichever happened to
- * be a pixel closer.
- */
-function struckBy(previous: TacticsSnapshot, snap: TacticsSnapshot): string[] {
-  const seen = previous.strikes.reduce((highest, s) => Math.max(highest, s.seq), 0);
-  return snap.strikes.filter((s) => s.seq > seen).map((s) => s.enemyId);
 }
 
 let socket = connectWebSocket();
@@ -246,7 +201,7 @@ function reportGargoyleVisibility(snap: TacticsSnapshot, now: number): void {
   if (now < nextVisibilityReportAt) return;
   nextVisibilityReportAt = now + 100;
   const ids = snap.enemies
-    .filter((enemy) => enemy.kind === "gargoyle" && stage.isPointVisible(enemy.x, enemy.y, 1.35))
+    .filter((enemy) => enemy.kind === "gargoyle" && stage.isPointVisible(enemy.x, enemy.y))
     .map((enemy) => enemy.id)
     .sort();
   const key = ids.join("|");
@@ -260,7 +215,6 @@ function reportGargoyleVisibility(snap: TacticsSnapshot, now: number): void {
 /** Direct movement oriented to the camera's current horizontal heading. */
 
 const heldKeys = new Set<string>();
-let playerYaw = -Math.PI / 2;
 let running = false;
 
 function sendMoveDir(): void {
@@ -270,12 +224,7 @@ function sendMoveDir(): void {
   const dx = Math.cos(cameraYaw) * across - Math.sin(cameraYaw) * forward;
   const dy = -Math.sin(cameraYaw) * across - Math.cos(cameraYaw) * forward;
 
-  if (dx !== 0 || dy !== 0) playerYaw = Math.atan2(-dx, -dy);
   send({ type: "move", dx, dy, turn: true, run: running });
-}
-
-function facingDirection(): Point {
-  return { x: -Math.sin(playerYaw), y: -Math.cos(playerYaw) };
 }
 
 /**
@@ -313,6 +262,7 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) holdW
 
 window.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
+  if (key === "escape") cameraDrag = null;
 
   if (event.key === "Shift") {
     if (!running) {
@@ -350,15 +300,14 @@ window.addEventListener("keydown", (event) => {
   }
 
   if (key === "f") {
-    // First-person view is disabled; reserve F so it cannot reach gameplay.
+    // Keep the over-the-shoulder camera while reserving F from gameplay.
     event.preventDefault();
     return;
   }
 
   if (key === "h") {
     if (!event.repeat) {
-      showHitboxes = !showHitboxes;
-      actors?.setHitboxesVisible(showHitboxes);
+      showPerformance = !showPerformance;
     }
     event.preventDefault();
     return;
@@ -424,145 +373,52 @@ function toOverlay(event: MouseEvent): Point {
   };
 }
 
-/** Mouse position in normalised device coordinates — where the 3D is picked. */
-function toNdc(event: MouseEvent): { x: number; y: number } {
-  const bounds = uiCanvas.getBoundingClientRect();
-  return {
-    x: ((event.clientX - bounds.left) / bounds.width) * 2 - 1,
-    y: -(((event.clientY - bounds.top) / bounds.height) * 2 - 1),
-  };
-}
-
-/**
- * The room point a click means. An entity under the cursor resolves to *its own*
- * position rather than to the floor behind it — so clicking a hellhound's head,
- * which hangs over the square in front of it at a low camera angle, still names
- * the square the hellhound is standing on.
- */
-function pickRoomPoint(event: MouseEvent): Point | null {
-  const ndc = toNdc(event);
-  const id = entityIdOf(stage.pickAt(ndc.x, ndc.y));
-
-  if (id && currSnapshot) {
-    const hit =
-      currSnapshot.enemies.find((e) => e.id === id) ??
-      currSnapshot.corpses.find((c) => c.id === id);
-    if (hit) return { x: hit.x, y: hit.y };
-  }
-
-  return stage.groundAt(ndc.x, ndc.y);
-}
-
-// -------------------------------------------------------------- camera drag
-
-/** Past this much travel a press is a camera move, and the click is swallowed. */
-const DRAG_THRESHOLD = 4;
-
-let dragButton: number | null = null;
-let dragMoved = 0;
-let lastDragX = 0;
-let lastDragY = 0;
-let swallowNextClick = false;
-let barDragging = false;
-
-uiCanvas.addEventListener("mousedown", (event) => {
-  if (SHOW_ACTION_BAR && event.button === 0 && hits(actionBarHandleRect(barOrigin), toOverlay(event))) {
-    barDragging = true;
-    dragMoved = 0;
-    lastDragX = event.clientX;
-    lastDragY = event.clientY;
-    event.preventDefault();
-    return;
-  }
-  // Either mouse button may rotate the camera. A left press remains an attack
-  // unless it travels past the drag threshold; right press never opens the
-  // browser menu over the game.
-  if (event.button !== 0 && event.button !== 2) return;
-  if (event.button === 2) event.preventDefault();
-  dragButton = event.button;
-  // Shift is the run modifier, not a camera-pan modifier. Every accepted drag
-  // rotates the view; this client no longer has lateral camera panning.
-  dragMoved = 0;
-  lastDragX = event.clientX;
-  lastDragY = event.clientY;
-});
-
-window.addEventListener("mouseup", (event) => {
-  // Released anywhere, not just over the button: dragging off it and letting go
-  // there is still letting go.
-  holdWait(false);
-  if (barDragging) {
-    barDragging = false;
-    swallowNextClick = true;
-    return;
-  }
-  if (dragButton === 0 && dragMoved > DRAG_THRESHOLD) swallowNextClick = true;
-  dragButton = null;
-});
-
-/** Cursor in overlay units (UI hit-testing) and on the floor (world reveals). */
+// --------------------------------------------------------------- mouse-look
 let uiCursor: Point | null = null;
 let groundCursor: Point | null = null;
-let hoveredEntityId: string | null = null;
-let hoveredDoor: import("../shared/tactics.js").DoorId | null = null;
-const PLAYER_CURSOR_ID = "__player";
-
-
-uiCanvas.addEventListener("mousemove", (event) => {
-  if (barDragging) {
-    const bounds = uiCanvas.getBoundingClientRect();
-    const dx = (event.clientX - lastDragX) * (viewWidth / bounds.width);
-    const dy = (event.clientY - lastDragY) * (WORLD_HEIGHT / bounds.height);
-    lastDragX = event.clientX;
-    lastDragY = event.clientY;
-    dragMoved += Math.abs(dx) + Math.abs(dy);
-    const size = actionBarSize(BAR_LAYOUT);
-    barOrigin.x = Math.max(9, Math.min(viewWidth - size.width, barOrigin.x + dx));
-    barOrigin.y = Math.max(9, Math.min(WORLD_HEIGHT - size.height, barOrigin.y + dy));
-  } else if (dragButton !== null) {
-    const dx = event.clientX - lastDragX;
-    const dy = event.clientY - lastDragY;
-    lastDragX = event.clientX;
-    lastDragY = event.clientY;
-    dragMoved += Math.abs(dx) + Math.abs(dy);
-    if (dragMoved > DRAG_THRESHOLD) {
-      const bounds = uiCanvas.getBoundingClientRect();
-      stage.look((dx / bounds.width) * 2, -(dy / bounds.height) * 2);
-      if (heldKeys.size > 0) sendMoveDir();
+let cameraDrag: { startX: number; startY: number; x: number; y: number; moved: boolean } | null = null;
+document.getElementById("play-help")!.textContent =
+  "WASD move · right-drag look · left-click bite · scroll zoom · E eat · Shift run";
+uiCanvas.addEventListener("mousedown", (event) => {
+  if (event.button !== 2) return;
+  if (!currSnapshot || currSnapshot.dead || currSnapshot.inspect) return;
+  cameraDrag = { startX: event.clientX, startY: event.clientY,
+    x: event.clientX, y: event.clientY, moved: false };
+  event.preventDefault();
+});
+document.addEventListener("mousemove", (event) => {
+  if (cameraDrag && !(event.buttons & 2)) cameraDrag = null;
+  if (cameraDrag) {
+    const drag = cameraDrag;
+    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) >= 4) {
+      drag.moved = true;
     }
-  }
-
-  uiCursor = toOverlay(event);
-  const ndc = toNdc(event);
-  groundCursor = stage.groundAt(ndc.x, ndc.y);
-  hoveredEntityId = entityIdOf(stage.pickAt(ndc.x, ndc.y));
-  hoveredDoor = stage.doorAt(ndc.x, ndc.y);
+    if (drag.moved) {
+      const bounds = uiCanvas.getBoundingClientRect();
+      stage.look((event.clientX - drag.x) / bounds.width * 2,
+        -(event.clientY - drag.y) / bounds.height * 2);
+      if (heldKeys.size > 0) sendMoveDir();
+      uiCursor = null;
+    }
+    drag.x = event.clientX; drag.y = event.clientY;
+  } else if (event.target === uiCanvas) uiCursor = toOverlay(event);
 });
-
-uiCanvas.addEventListener("mouseleave", () => {
-  uiCursor = null;
-  groundCursor = null;
-  hoveredEntityId = null;
-  hoveredDoor = null;
+document.addEventListener("mouseup", (event) => {
+  if (event.button === 2) cameraDrag = null;
 });
-
+window.addEventListener("blur", () => { cameraDrag = null; });
+uiCanvas.addEventListener("mouseleave", () => { uiCursor = null; groundCursor = null; });
 uiCanvas.addEventListener("wheel", (event) => {
   event.preventDefault();
+  const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16
+    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? window.innerHeight : 1;
+  stage.zoom(event.deltaY * unit);
 }, { passive: false });
-
-// Right-drag rotates the camera, so the browser menu must never appear here.
-uiCanvas.addEventListener("contextmenu", (event) => {
-  event.preventDefault();
-});
+uiCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
 // ----------------------------------------------------------------- clicking
 
 uiCanvas.addEventListener("click", (event) => {
-  if (swallowNextClick) {
-    swallowNextClick = false;
-    return;
-  }
-
   const uiPoint = toOverlay(event);
   if (SHOW_ACTION_BAR && hits(actionBarHandleRect(barOrigin), uiPoint)) return;
 
@@ -589,7 +445,7 @@ uiCanvas.addEventListener("click", (event) => {
     return;
   }
 
-  // Left click always swings the sword. The server's forward cone determines
+  // Left click bites. The server's forward cone determines
   // whether an enemy is close enough and sufficiently in front to be hit.
   send({ type: "useSlot", index: 0 });
 });
@@ -598,8 +454,7 @@ let appliedCursor = REGULAR_CURSOR;
 
 function updateCursorStyle(snap: TacticsSnapshot) {
   let wanted = REGULAR_CURSOR;
-  if (barDragging) wanted = "grabbing";
-  else if (uiCursor) {
+  if (uiCursor) {
     if (SHOW_ACTION_BAR && hits(actionBarHandleRect(barOrigin), uiCursor)) wanted = "grab";
     else if (snap.inspect && hitsRect(LOOT_CLOSE_RECT, { x: uiCursor.x - centreShift(viewWidth), y: uiCursor.y })) wanted = "pointer";
     else if (snap.dead && hits(resurrectRect(ctx), uiCursor)) wanted = "pointer";
@@ -616,13 +471,11 @@ function updateCursorStyle(snap: TacticsSnapshot) {
 
 // ----------------------------------------------------------------- game loop
 
-const projectionPoint = new THREE.Vector3();
-
-/** Room point at a height in 3D units -> overlay coordinates, for labels. */
 function toScreen(px: number, py: number, height: number): Point {
-  projectionPoint.set(toX(px), height, toZ(py));
-  return stage.project(projectionPoint);
+  return stage.project(px, py, height);
 }
+let fpsAt = performance.now(), fpsFrames = 0;
+const performanceLabel = document.getElementById("performance")!;
 
 let lastFrameTime = performance.now();
 let nextFrameTime = 0;
@@ -639,7 +492,6 @@ function frame(now: number) {
 
   const dt = Math.min((now - lastFrameTime) / 1000, 0.1);
   lastFrameTime = now;
-  const elapsed = now / 1000;
   hurt = Math.max(0, hurt - dt * 0.8);
 
   if (!currSnapshot) return;
@@ -649,52 +501,16 @@ function frame(now: number) {
     ? interpolateSnapshot(prevSnapshot, currSnapshot, t, now - currSnapshotTime)
     : currSnapshot;
 
-  if (!actors) {
-    actors = new Actors(stage.scene, stage.pickables, snap.player.color, true);
-    actors.player.root.userData["entityId"] = PLAYER_CURSOR_ID;
-    stage.pickables.push(actors.player.root);
-    actors.setHitboxesVisible(showHitboxes);
-  }
-
-  const actingKind = snap.cooldown && snap.cooldown.remainingMs > 0
-    ? TACTICS_ACTIONS[snap.cooldown.slot]?.kind
-    : TACTICS_ACTIONS[snap.activeSlot]?.kind;
-  actors.player.setWeapon(actingKind === "ranged" ? "ranged" : "melee");
-
-  actors.player.update(snap, null, dt, now, elapsed);
-  if (snap.dungeonPortal.fallProgress > 0) {
-    actors.player.root.position.y -= snap.dungeonPortal.fallProgress * 6.5;
-  }
   dungeonFade.style.opacity = String(Math.max(0, Math.min(1,
     (snap.dungeonPortal.fallProgress - 0.4) / 0.55,
   )));
-  // Behind your own eyes you are the inside of a cloak. The rig still runs —
-  // it is what the camera is riding — it just isn't drawn.
-  actors.player.root.visible = !stage.firstPerson;
-  // A woken hound looks at you wherever it is standing — that is the only tell
-  // that separates one which has noticed you from one which hasn't.
-  actors.syncEnemies(snap, dt, now, elapsed, (enemy) =>
-    enemy.aggro ? { x: snap.player.x, y: snap.player.y } : null,
-  );
-  actors.syncCorpses(snap, dt);
-  actors.syncProjectiles(snap, elapsed);
-  actors.syncTombstones(snap, stage.yaw);
-
-  stage.setCursorRing(null, null, "floor");
-  stage.setDoorHoverRing(null);
-  stage.setDoors(snap.doors);
-  stage.setPressurePlates(snap.pressurePlates);
-  stage.setSpikeTrap(snap.spikeTrap);
-  stage.setDungeonPortal(snap.dungeonPortal, snap.purpleGem);
-  stage.setTargetRing(null, null, 0xffd633);
-
-  // The board frames itself while you are standing on it; walk out through the
-  // doorway and the camera comes with you, or the corridor would be somewhere
-  // you can go but not somewhere you can see.
-  stage.follow(snap.player.x, snap.player.y, snap.player.facing, snap.playerRunning);
-  stage.update(dt);
-  stage.animateScenery(elapsed);
-  stage.render();
+  stage.render(snap, now);
+  fpsFrames++;
+  if (now - fpsAt >= 500) {
+    performanceLabel.textContent = showPerformance ? `${Math.round(fpsFrames * 1000 / (now - fpsAt))} FPS` : "";
+    performanceLabel.title = `Render: ${stage.renderMs.toFixed(1)} ms`;
+    fpsFrames = 0; fpsAt = now;
+  }
   reportGargoyleVisibility(snap, now);
 
   updateCursorStyle(snap);
@@ -712,52 +528,38 @@ function frame(now: number) {
     barLayout: BAR_LAYOUT,
     viewWidth,
   });
-  drawTacticsChrome(ctx, snap, viewWidth);
-
-  // ---- the weapon in hand ----
-  // Drawn last so nothing covers it: it is the closest thing to the camera
-  // there is. Hidden once the encounter is over, when the outcome card owns
-  // the screen.
-  const heldAction = TACTICS_ACTIONS[snap.activeSlot];
-  if (stage.firstPerson && (heldAction?.kind === "melee" || heldAction?.kind === "ranged") && !isOver(snap.phase)) {
-    // `spent` comes off the live cooldown rather than a timer of the client's
-    // own: `interpolateSnapshot` counts `remainingMs` down in real time, so the
-    // dagger reappears exactly when the server would let you throw the next one.
-    const cd = snap.cooldown;
-    drawHeldWeapon(ctx, {
-      kind: heldAction.kind,
-      sinceSwing: Number.isFinite(swingStartTime) ? now - swingStartTime : null,
-      spent: !!cd && cd.remainingMs > 0 && TACTICS_ACTIONS[cd.slot]?.kind === "ranged",
-    });
+  if (!snap.inspect) {
+    blood.draw(ctx, now, viewWidth, toScreen);
+    gemExplosion.draw(ctx, now, toScreen);
   }
-  if (!stage.firstPerson && !isOver(snap.phase)) {
-    const headingLength = Math.max(0.001, Math.hypot(snap.playerHeading.x, snap.playerHeading.y));
-    const headingX = snap.playerHeading.x / headingLength;
-    const headingY = snap.playerHeading.y / headingLength;
-    let aimedEnemy: TacticsSnapshot["enemies"][number] | null = null;
-    let aimedGap = Infinity;
-    for (const enemy of snap.enemies) {
-      const dx = enemy.x - snap.player.x;
-      const dy = enemy.y - snap.player.y;
-      const gap = Math.hypot(dx, dy);
-      const inCone = gap < 0.001 || (dx * headingX + dy * headingY) / gap >= Math.cos((35 * Math.PI) / 180);
-      const reach = snap.meleeRange + (enemy.kind === "hellhound" ? snap.meleeRange * (2 / 15) : 0);
-      if (inCone && gap <= reach && gap < aimedGap) {
-        aimedEnemy = enemy;
-        aimedGap = gap;
-      }
+  const reticle = selectAttackReticle(snap, (x, y) => stage.isPointVisible(x, y));
+  if (reticle) {
+    const enemy = reticle.enemy;
+    const height = enemy.kind === "bat" ? enemy.altitude ?? 2.25
+      : enemy.kind === "spider" ? (enemy.altitude ?? 0) + .45 : 1.35;
+    const point = stage.project(enemy.x, enemy.y, height);
+    const ready = reticle.inRange && reticle.aligned;
+    ctx.save();
+    ctx.beginPath(); ctx.arc(point.x, point.y, 19, 0, Math.PI * 2);
+    ctx.strokeStyle = "#17120e"; ctx.lineWidth = 5; ctx.stroke();
+    ctx.strokeStyle = ready ? "#ffd633" : "#c4bca9"; ctx.lineWidth = 2; ctx.stroke();
+    for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+      ctx.beginPath(); ctx.moveTo(point.x + dx * 14, point.y + dy * 14);
+      ctx.lineTo(point.x + dx * 24, point.y + dy * 24); ctx.stroke();
     }
-    if (aimedEnemy) {
-      stage.setAttackReticle(
-        aimedEnemy.x,
-        aimedEnemy.y,
-        aimedEnemy.kind === "bat" ? aimedEnemy.altitude ?? 2.25
-          : aimedEnemy.kind === "spider" ? (aimedEnemy.altitude ?? 0) + 0.45 : 1.35,
-      );
-    } else {
-      stage.setAttackReticle(null, null);
-    }
-  } else stage.setAttackReticle(null, null);
+    ctx.restore();
+  }
+  if (!snap.dead && !snap.inspect) {
+    const x = viewWidth / 2, y = WORLD_HEIGHT / 2;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(x - 4, y); ctx.lineTo(x + 4, y);
+    ctx.moveTo(x, y - 4); ctx.lineTo(x, y + 4);
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.65)"; ctx.lineWidth = 3; ctx.stroke();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.85)"; ctx.lineWidth = 1; ctx.stroke();
+    ctx.restore();
+  }
+  drawTacticsChrome(ctx, snap, viewWidth);
 }
 
 uiCanvas.style.cursor = REGULAR_CURSOR;
