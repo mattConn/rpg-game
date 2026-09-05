@@ -301,6 +301,7 @@ interface Thrown {
 // ------------------------------------------------------------------ simulation
 
 export class TacticsGame {
+  private readonly floorRunId = crypto.randomUUID();
   private readonly playerName = `${pick(FIRST_NAMES)} ${pick(LAST_NAMES)}`;
   private readonly playerColor = `hsl(${Math.floor(Math.random() * 360)} 85% 65%)`;
 
@@ -2414,6 +2415,7 @@ export class TacticsGame {
       pathCells: [],
       gameElapsedMs: this.gameElapsedMs,
       killCount: this.killCount,
+      floorRunId: this.floorRunId,
       dead,
       autoResurrect: this.autoRestart,
       resurrectInMs:

@@ -182,7 +182,7 @@ const generateDungeon = (seed: number) => {
     const current = rooms[index - 1]!;
     const size = remainingSizes[index - 1]!;
     const roomCells = ROOM_CELLS[size];
-    const corridorLength = [22, 28, 34, 40][Math.floor(dungeonRandom() * 4)]!;
+    const corridorLength = [44, 56, 68, 80][Math.floor(dungeonRandom() * 4)]!;
     const start = Math.floor(dungeonRandom() * directions.length);
     let placed = false;
     for (let attempt = 0; attempt < directions.length; attempt++) {
@@ -429,6 +429,8 @@ export function configureDungeon(seed: number): void {
   BOARD_REGION.cols = GRID_COLS;
   BOARD_REGION.rows = GRID_ROWS;
   BOARD_REGION.size = "medium";
+  PLAYER_START.col = Math.floor((GRID_COLS - 1) / 2);
+  PLAYER_START.row = Math.floor(GRID_ROWS / 2);
   DUNGEON_SEED = seed >>> 0 || 1;
   GENERATED_DUNGEON = generateDungeon(DUNGEON_SEED);
   ROOM_REGIONS = GENERATED_DUNGEON.rooms;
@@ -460,6 +462,8 @@ export function configureEditorDungeon(config: EditorDungeonConfig): void {
   BOARD_REGION.cols = config.width * EDITOR_TILE_CELLS;
   BOARD_REGION.rows = config.height * EDITOR_TILE_CELLS;
   BOARD_REGION.size = "medium";
+  PLAYER_START.col = Math.floor((GRID_COLS - 1) / 2);
+  PLAYER_START.row = Math.floor(GRID_ROWS / 2);
   ROOM_REGIONS = [BOARD_REGION];
   DUNGEON_CONNECTIONS = [];
   HALL_REGIONS = [];
@@ -857,6 +861,8 @@ export function isOver(phase: Phase): boolean {
  * fields they always read; the extra ones ride along untouched.
  */
 export interface TacticsSnapshot extends GameSnapshot {
+  /** Unique simulation instance for deduplicating persistent floor statistics. */
+  floorRunId: string;
   pressurePlates: Array<{ id: string; roomIndex: number; connectionIndex: number; active: boolean }>;
   spikeTrap: { roomIndex: number; active: boolean } | null;
   dungeonPortal: { roomIndex: number; side: ConnectionSide; unlocked: boolean; fallProgress: number };

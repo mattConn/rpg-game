@@ -23,7 +23,8 @@ async function bake(name: string, rig: any, dead = false, bite = false, eat = fa
   const center = bounds.getCenter(new THREE.Vector3());
   const size = bounds.getSize(new THREE.Vector3());
   const span = Math.max(size.x, size.y, size.z) * 1.3;
-  const frames = bite || eat ? 8 : FRAMES;
+  const overhead = name === 'spider-wall';
+  const frames = overhead ? 9 : bite || eat ? 8 : FRAMES;
   const atlas = document.createElement('canvas'); atlas.width = W * DIRECTIONS; atlas.height = W * frames;
   const ctx = atlas.getContext('2d')!;
   rig.mixer?.stopAllAction();
@@ -38,11 +39,17 @@ async function bake(name: string, rig: any, dead = false, bite = false, eat = fa
         action.reset().play(); action.clampWhenFinished = true;
         rig.mixer?.setTime(action.getClip().duration * f / frames);
       } else if (f === 0) rig.mixer?.stopAllAction();
-      else { action.play(); rig.mixer?.setTime(action.getClip().duration * (f - 1) / (FRAMES - 1)); }
+      else { action.play(); rig.mixer?.setTime(action.getClip().duration * (f - 1) / (frames - 1)); }
     }
     for (let d = 0; d < DIRECTIONS; d++) {
       const angle = d / DIRECTIONS * Math.PI * 2;
-      camera.position.set(center.x + Math.cos(angle) * 20, center.y + (name.startsWith("player") ? 5.5 : 2), center.z + Math.sin(angle) * 20);
+      if (overhead) {
+        camera.position.set(center.x, center.y + 20, center.z);
+        camera.up.set(Math.cos(angle), 0, Math.sin(angle));
+      } else {
+        camera.up.set(0, 1, 0);
+        camera.position.set(center.x + Math.cos(angle) * 20, center.y + (name.startsWith("player") ? 5.5 : 2), center.z + Math.sin(angle) * 20);
+      }
       camera.lookAt(center);
       renderer.render(scene, camera);
       ctx.drawImage(renderer.domElement, d * W, f * W);
@@ -70,6 +77,10 @@ async function run() {
     }
     if (name === 'player') { rig.sword.removeFromParent(); rig.dagger.removeFromParent(); }
     await bake(name, rig);
+    if (name === 'spider') {
+      rig.mixer?.stopAllAction();
+      await bake('spider-wall', rig);
+    }
     if (name === 'player') {
       await bake('player-bite', rig, false, true);
       rig.mixer?.stopAllAction();
@@ -106,7 +117,15 @@ async function run() {
     model.updateMatrixWorld(true);
     const scaled = new THREE.Box3().setFromObject(model), center = scaled.getCenter(new THREE.Vector3());
     model.position.set(-center.x, -scaled.min.y, -center.z);
+    if (name === 'boulder') {
+      renderer.localClippingEnabled = true;
+      model.traverse(node => {
+        if (node instanceof THREE.Mesh) for (const material of (Array.isArray(node.material) ? node.material : [node.material]))
+          material.clippingPlanes = [new THREE.Plane(new THREE.Vector3(0, 1, 0), -.2)];
+      });
+    }
     await bake(name!, { model });
+    renderer.localClippingEnabled = false;
   }
   (window as any).spriteBake = result;
 }

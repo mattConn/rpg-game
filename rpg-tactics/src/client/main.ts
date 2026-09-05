@@ -5,7 +5,7 @@ import type { Point } from "../../../src/shared/movement.js";
 import { actionBarHandleRect, actionBarSize, squareAtPoint } from "../../../src/client/actionbar.js";
 import { SERVER_TICK_MS, renderFraction, smoothInterval } from "../../../src/client/interpolation.js";
 import { fillViewport } from "../../../src/client/viewport.js";
-import { barOrigin, centreShift, drawOverlay, hits, resurrectRect } from "../../../rpg-3d/src/client/overlay.js";
+import { barOrigin, centreShift, drawOverlay, hits } from "../../../rpg-3d/src/client/overlay.js";
 import { interpolateSnapshot } from "../../../rpg-3d/src/client/playback.js";
 import {
   configureDungeon,
@@ -15,7 +15,8 @@ import {
   type TacticsSnapshot,
   type EditorDungeonConfig,
 } from "../shared/tactics.js";
-import { BAR_LAYOUT, drawTacticsChrome } from "./chrome.js";
+import { BAR_LAYOUT, drawTacticsChrome, deathResurrectRect } from "./chrome.js";
+import { FloorStats } from "./floor-stats.js";
 import { GemExplosion } from "./gem-explosion.js";
 import { BloodEffects } from "./blood-effects.js";
 import { selectAttackReticle } from "./attack-presentation.js";
@@ -124,6 +125,15 @@ let currSnapshotTime = 0;
 let snapshotInterval = SERVER_TICK_MS;
 
 let showPerformance = true;
+let statsStorage: Storage | null = null;
+try { statsStorage = localStorage; } catch { /* Counters work in memory too. */ }
+const floorStats = new FloorStats(statsStorage);
+const floorStatsKey = editorLevelId ? `editor:${editorLevelId}:${dungeonSeed}` : String(dungeonSeed);
+document.getElementById("export-stats")!.addEventListener("click", () => {
+  const url = URL.createObjectURL(new Blob([floorStats.csv()], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a"); link.href = url; link.download = "wolf-dungeon-stats.csv";
+  link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
 
 /** A deliberately faint edge glow, stamped whenever a hound lands a bite. */
 let hurt = 0;
@@ -157,6 +167,7 @@ function connectWebSocket() {
       if (snap.dead || snap.inspect) cameraDrag = null;
       if (assetsReady) connectionStatus.textContent = "";
       const now = performance.now();
+      floorStats.update(floorStatsKey, dungeonSeed, snap);
       if (currSnapshot && snap.stats.health < currSnapshot.stats.health) {
         hurt = 0.32;
       }
@@ -424,7 +435,7 @@ uiCanvas.addEventListener("click", (event) => {
 
   // The HUD's own buttons first, exactly as in the other two clients — here
   // they restart the encounter rather than revive you mid-fight.
-  if (currSnapshot?.dead && hits(resurrectRect(ctx), uiPoint)) {
+  if (currSnapshot?.dead && hitsRect(deathResurrectRect(viewWidth), uiPoint)) {
     send({ type: "resurrect" });
     return;
   }
@@ -457,7 +468,7 @@ function updateCursorStyle(snap: TacticsSnapshot) {
   if (uiCursor) {
     if (SHOW_ACTION_BAR && hits(actionBarHandleRect(barOrigin), uiCursor)) wanted = "grab";
     else if (snap.inspect && hitsRect(LOOT_CLOSE_RECT, { x: uiCursor.x - centreShift(viewWidth), y: uiCursor.y })) wanted = "pointer";
-    else if (snap.dead && hits(resurrectRect(ctx), uiCursor)) wanted = "pointer";
+    else if (snap.dead && hitsRect(deathResurrectRect(viewWidth), uiCursor)) wanted = "pointer";
     else if (SHOW_ACTION_BAR && squareAtPoint(barOrigin, uiCursor, BAR_LAYOUT) !== null) wanted = "pointer";
   }
 
@@ -517,6 +528,7 @@ function frame(now: number) {
   drawOverlay(ctx, {
     snap, uiCursor, groundCursor, toScreen, hurt,
     showAutoRes: false,
+    showResurrect: false,
     showRoomLabel: false,
     showHoverNames: false,
     showGameClock: false,
@@ -559,7 +571,7 @@ function frame(now: number) {
     ctx.strokeStyle = "rgba(255, 255, 255, 0.85)"; ctx.lineWidth = 1; ctx.stroke();
     ctx.restore();
   }
-  drawTacticsChrome(ctx, snap, viewWidth);
+  drawTacticsChrome(ctx, snap, viewWidth, floorStats.totalDeaths, uiCursor, floorStats.floors.get(floorStatsKey)?.deaths ?? 0);
 }
 
 uiCanvas.style.cursor = REGULAR_CURSOR;

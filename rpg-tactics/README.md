@@ -50,3 +50,7 @@ Run a separate test server with PowerShell: `$env:PORT='3301'; npx tsx src/serve
 `raycast-world.ts` builds the floor grid from the same region definitions as the simulation, traces walls with DDA, and intersects pressure-plate gates and the gem barrier. `raycast-renderer.ts` draws the scene and occludes sprites using wall depths. `main.ts` owns network input, camera controls, and the reused HUD.
 
 The previous Three.js stage remains in `stage.ts` for reference. Shared models in `rpg-3d/` supply the offline sprite bake and the separate legacy 3D game. No simulation rules are copied into the renderer.
+
+The camera starts farther back with a slightly elevated view. Scroll out for a wider overhead view (up to 840 world units); scroll in to return close to the wolf. Camera height lowers automatically near walls. V restores the default distance.
+
+Floor stats appear below health: kills/total for the current floor, deaths on this floor, and deaths across saved floors. Resetting or resurrecting clears the current kill count; deaths accumulate. Records are saved in browser local storage by floor seed. Export stats downloads CSV with columns `seed,deaths,enemies killed/total`. The DEAD panel offers a central Resurrect button; R also resurrects.

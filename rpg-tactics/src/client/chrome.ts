@@ -16,6 +16,8 @@ import { ACTION_BAR_COLUMN } from "../../../src/client/actionbar.js";
 import { HUD_HEIGHT, HUD_WIDTH } from "../../../src/client/hud.js";
 import { hudOrigin } from "../../../rpg-3d/src/client/overlay.js";
 import { WORLD_HEIGHT, WORLD_WIDTH } from "../../../src/shared/constants.js";
+import type { Point } from "../../../src/shared/movement.js";
+import { hitsRect } from "../../../src/shared/loot.js";
 import { isOver, type TacticsSnapshot } from "../shared/tactics.js";
 
 const BANNER_FONT = "bold 17px monospace";
@@ -44,9 +46,22 @@ export function drawTacticsChrome(
   ctx: CanvasRenderingContext2D,
   snap: TacticsSnapshot,
   viewWidth: number = WORLD_WIDTH,
+  deathsTotal = 0,
+  cursor: Point | null = null,
+  deathsHere = snap.tombstones.length,
 ): void {
   ctx.setLineDash([]);
-  if (isOver(snap.phase)) drawOutcome(ctx, snap, viewWidth);
+  ctx.save();
+  ctx.font = "13px monospace"; ctx.textAlign = "left"; ctx.textBaseline = "top";
+  const rows = [`Enemies killed ${snap.killCount}/${snap.killCount + snap.enemies.length}`,
+    `Deaths here ${deathsHere}`, `Deaths total ${deathsTotal}`];
+  rows.forEach((text, i) => {
+    const x = hudOrigin.x, y = hudOrigin.y + 27 + i * 18;
+    ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,.85)"; ctx.strokeText(text, x, y);
+    ctx.fillStyle = "#e5dfd2"; ctx.fillText(text, x, y);
+  });
+  ctx.restore();
+  if (isOver(snap.phase)) drawOutcome(ctx, snap, viewWidth, cursor);
 }
 
 // ----------------------------------------------------------------- hunted eye
@@ -250,13 +265,17 @@ function drawStanding(ctx: CanvasRenderingContext2D, awake: boolean, viewWidth: 
 }
 
 /** The end of the encounter, centred over the board. */
-function drawOutcome(ctx: CanvasRenderingContext2D, snap: TacticsSnapshot, viewWidth: number): void {
+export function deathResurrectRect(viewWidth: number) {
+  return { x: viewWidth / 2 - 95, y: WORLD_HEIGHT * .34 + 6, width: 190, height: 36 };
+}
+
+function drawOutcome(ctx: CanvasRenderingContext2D, snap: TacticsSnapshot, viewWidth: number, cursor: Point | null): void {
   // Two outcomes now. Walking out of the room used to be a third, and is not an
   // outcome at all any more — you just leave, and the fight comes with you.
   const { title, color } =
     snap.phase === "cleared"
       ? { title: "PACK SLAIN", color: "#9fe8ff" }
-      : { title: "KILLED", color: "#c0392b" };
+      : { title: "DEAD", color: "#c0392b" };
 
   const cy = WORLD_HEIGHT * 0.34;
 
@@ -265,10 +284,10 @@ function drawOutcome(ctx: CanvasRenderingContext2D, snap: TacticsSnapshot, viewW
 
   // A slab behind it: over a lit floor, unbacked text at this size disappears.
   ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
-  ctx.fillRect(viewWidth / 2 - 220, cy - 40, 440, 80);
+  ctx.fillRect(viewWidth / 2 - 220, cy - 40, 440, snap.dead ? 100 : 80);
   ctx.strokeStyle = color;
   ctx.lineWidth = 1.5;
-  ctx.strokeRect(viewWidth / 2 - 220, cy - 40, 440, 80);
+  ctx.strokeRect(viewWidth / 2 - 220, cy - 40, 440, snap.dead ? 100 : 80);
 
   ctx.font = OUTCOME_FONT;
   ctx.fillStyle = color;
@@ -276,5 +295,15 @@ function drawOutcome(ctx: CanvasRenderingContext2D, snap: TacticsSnapshot, viewW
 
   ctx.font = OUTCOME_SUB_FONT;
   ctx.fillStyle = DIM;
-  ctx.fillText(snap.hint, viewWidth / 2, cy + 22);
+  if (snap.dead) {
+    const rect = deathResurrectRect(viewWidth);
+    const hover = cursor !== null && hitsRect(rect, cursor);
+    ctx.fillStyle = hover ? "#51442b" : "#28231d";
+    ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+    ctx.strokeStyle = hover ? "#ffd633" : "#89785a";
+    ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+    ctx.font = "bold 18px monospace"; ctx.fillStyle = "#fff4d9";
+    ctx.fillText("Resurrect", viewWidth / 2, rect.y + rect.height / 2);
+
+  } else ctx.fillText(snap.hint, viewWidth / 2, cy + 22);
 }

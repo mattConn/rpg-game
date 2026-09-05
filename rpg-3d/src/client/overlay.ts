@@ -103,6 +103,8 @@ export interface OverlayParams {
   hurt: number;
   /** Tactics replaces this line with the name of the hovered action item. */
   showAutoRes?: boolean;
+  /** A client may provide its own central resurrection button. */
+  showResurrect?: boolean;
   /** Optional front-end-specific contents for the shared five-slot bar. */
   actions?: readonly (Action | null)[];
   viableActions?: readonly boolean[];
@@ -162,7 +164,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, params: OverlayParams
   if (params.compactPlayerHud) drawBarsOnlyHud(ctx, hudOrigin, hudStats);
   else drawHud(ctx, hudOrigin, hudStats);
 
-  if (snap.dead) {
+  if (snap.dead && params.showResurrect !== false) {
     const rect = resurrectRect(ctx);
     ctx.font = RESURRECT_FONT;
     ctx.textAlign = "left";
