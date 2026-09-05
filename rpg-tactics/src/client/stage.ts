@@ -378,7 +378,7 @@ function generateFloorTexture(): THREE.CanvasTexture {
   return texture;
 }
 
-export function createStage(canvas: HTMLCanvasElement): Stage {
+export function createStage(canvas: HTMLCanvasElement, maxAnisotropy = Infinity): Stage {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   /**
    * **No shadows, but every light still lights.** This is the one switch for it:
@@ -414,7 +414,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.wrapS = THREE.RepeatWrapping;
     texture.wrapT = THREE.RepeatWrapping;
-    texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    texture.anisotropy = Math.min(maxAnisotropy, renderer.capabilities.getMaxAnisotropy());
     return texture;
   };
 
@@ -782,7 +782,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   }
   const plateTexture = new THREE.CanvasTexture(plateTextureCanvas);
   plateTexture.colorSpace = THREE.SRGBColorSpace;
-  plateTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  plateTexture.anisotropy = Math.min(maxAnisotropy, renderer.capabilities.getMaxAnisotropy());
   const plateMaterial = new THREE.MeshStandardMaterial({
     map: plateTexture, color: 0x8b9094, metalness: 0.58, roughness: 0.82,
   });

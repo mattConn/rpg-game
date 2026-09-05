@@ -47,7 +47,6 @@ const PLAYER_WOLF_STRIDE_SPEED = 200;
 
 const SWING_MS = 320;
 const LUNGE_MS = 300;
-const COLLAPSE_MS = 450;
 const FALL_MS = 600;
 const JUMP_MS = 620;
 const JUMP_HEIGHT = 1.4;
@@ -81,26 +80,6 @@ function syncKeys<T>(
       map.delete(id);
     }
   }
-}
-
-/** Fade one actor without mutating model materials shared by another actor. */
-function setActorOpacity(root: THREE.Object3D, opacity: number): void {
-  root.traverse((object) => {
-    if (!(object instanceof THREE.Mesh)) return;
-    if (!object.userData["fadeMaterialsCloned"]) {
-      object.material = Array.isArray(object.material)
-        ? object.material.map((material) => material.clone())
-        : object.material.clone();
-      object.userData["fadeMaterialsCloned"] = true;
-    }
-    const materials = Array.isArray(object.material) ? object.material : [object.material];
-    for (const material of materials) {
-      material.transparent = opacity < 0.999;
-      material.opacity = opacity;
-      material.depthWrite = opacity > 0.45;
-    }
-  });
-  root.visible = opacity > 0.01;
 }
 
 /** The entity a picked mesh belongs to — rigs tag their root, meshes don't. */
@@ -720,228 +699,58 @@ class GargoyleActor {
   dispose(): void { disposeObject(this.root); }
 }
 
-/** A body: the same wolf, toppled onto its side and dimmed where it fell. */
+/** A fixed body on the floor; no death simulation continues after it appears. */
 class CorpseActor {
+  readonly kind: GameSnapshot["corpses"][number]["kind"];
   readonly root = new THREE.Group();
-  private readonly rig: WolfRig;
-  private age = 0;
+  private readonly rig: WolfRig | BatRig | SpiderRig | GargoyleRig;
+  private groundedChildCount = -1;
 
   constructor(id: string, corpse: GameSnapshot["corpses"][number]) {
-    this.rig = buildWolf(darken(parseColor(corpse.color), 0.6));
+    this.kind = corpse.kind;
+    this.rig = corpse.kind === "bat" ? buildBat()
+      : corpse.kind === "spider" ? buildSpider()
+        : corpse.kind === "gargoyle" ? buildGargoyle()
+          : buildWolf(darken(parseColor(corpse.color), 0.6));
     this.root.add(this.rig.model);
-    this.root.scale.setScalar(HELLHOUND_SCALE);
     this.root.userData["entityId"] = id;
     this.root.position.set(toX(corpse.x), 0, toZ(corpse.y));
     this.root.rotation.y = yawFor(corpse.facing, 0);
-    tintObject(this.rig.model, new THREE.Color(0x000000), 0.55);
+    if (corpse.kind === "bat") {
+      this.rig.model.rotation.x = Math.PI;
+    } else if (corpse.kind === "spider") {
+      this.rig.model.rotation.z = Math.PI;
+    } else {
+      this.rig.model.rotation.x = Math.PI / 2;
+      if (corpse.kind !== "gargoyle") this.root.scale.setScalar(HELLHOUND_SCALE);
+    }
+    this.update();
   }
 
-  update(dt: number): void {
-    // A lightweight skeletal ragdoll: the torso topples first, then the loose
-    // joints oscillate with rapidly decaying energy until the body settles.
-    this.age += dt;
-    const fall = Math.min(1, this.age / (COLLAPSE_MS / 1000));
-    const t = 1 - Math.pow(1 - fall, 3);
-    const energy = Math.exp(-this.age * 3.6);
-    const impact = Math.sin(this.age * 18) * energy;
-    this.rig.model.rotation.x = t * (Math.PI / 2) + impact * 0.1;
-    this.rig.model.rotation.y = Math.sin(this.age * 11 + 0.8) * 0.2 * energy;
-    this.rig.model.rotation.z = impact * 0.28;
-    this.rig.model.position.z = t * -0.55 * WOLF_SCALE;
-
-    const spineCount = Math.max(1, this.rig.importedSpine.length - 1);
-    this.rig.importedSpine.forEach((joint, i) => {
-      // Each vertebra keeps a little more bend than the one before it, so the
-      // dead torso finishes as a loose curve instead of snapping straight.
-      const settledSlump = 0.08 + (i / spineCount) * 0.16;
-      const flex = settledSlump + Math.sin(this.age * 14 + i * 1.05) * 0.52 * energy;
-      SPINE_FLEX_QUATERNION.setFromAxisAngle(SPINE_FLEX_AXIS, flex);
-      joint.bone.quaternion.copy(joint.bindQuaternion).multiply(SPINE_FLEX_QUATERNION);
-    });
-
-    if (this.rig.importedHead) {
-      const headFlop = 0.32 + Math.sin(this.age * 14 + 0.7) * 0.62 * energy;
-      ATTACK_BEND_QUATERNION.setFromAxisAngle(TAIL_BEND_AXIS, headFlop);
-      this.rig.importedHead.bone.quaternion
-        .copy(this.rig.importedHead.bindQuaternion)
-        .multiply(ATTACK_BEND_QUATERNION);
-    }
-    if (this.rig.importedTail) {
-      ATTACK_BEND_QUATERNION.setFromAxisAngle(TAIL_BEND_AXIS, -0.42 + Math.sin(this.age * 17) * 0.48 * energy);
-      this.rig.importedTail.bone.quaternion
-        .copy(this.rig.importedTail.bindQuaternion)
-        .multiply(ATTACK_BEND_QUATERNION);
-    }
-
-    // Keep the lowest rendered point on the dungeon floor throughout the
-    // collapse. The old fixed lift raised a scaled corpse almost a full world
-    // unit and left it visibly hovering once the ragdoll settled.
-    this.rig.model.position.y = 0;
+  update(): void {
+    // Imported visuals are appended asynchronously. Ground the fallback once,
+    // then the imported body once, rather than skinning every vertex each frame.
+    const model = this.rig.model;
+    if (this.groundedChildCount === model.children.length) return;
+    this.groundedChildCount = model.children.length;
+    if ("mixer" in this.rig) this.rig.mixer?.stopAllAction();
+    model.position.y = 0;
     this.root.updateMatrixWorld(true);
     const bounds = new THREE.Box3().makeEmpty();
-    this.rig.model.traverse((object) => {
-      if (!(object instanceof THREE.Mesh) || !object.visible) return;
+    model.traverseVisible((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
       if (object instanceof THREE.SkinnedMesh) {
-        // Box3.setFromObject uses the undeformed geometry bounds for a skinned
-        // mesh. Compute against the current bone pose so a wolf lying on its
-        // side is grounded by the corpse, not by its former standing pose.
         object.skeleton.update();
         object.computeBoundingBox();
         if (object.boundingBox) bounds.union(object.boundingBox.clone().applyMatrix4(object.matrixWorld));
-        return;
-      }
-      object.geometry.computeBoundingBox();
-      if (object.geometry.boundingBox) {
-        bounds.union(object.geometry.boundingBox.clone().applyMatrix4(object.matrixWorld));
+      } else {
+        object.geometry.computeBoundingBox();
+        if (object.geometry.boundingBox) bounds.union(object.geometry.boundingBox.clone().applyMatrix4(object.matrixWorld));
       }
     });
     if (Number.isFinite(bounds.min.y)) {
-      const worldFloor = this.root.position.y + 0.015;
-      this.rig.model.position.y = (worldFloor - bounds.min.y) / this.root.scale.y;
+      model.position.y = (this.root.position.y + 0.02 - bounds.min.y) / this.root.scale.y;
     }
-  }
-
-  dispose(): void {
-    disposeObject(this.root);
-  }
-}
-
-/** A slain flying enemy rolls belly-up, drops, and remains where it lands. */
-class BatCorpseActor {
-  readonly root = new THREE.Group();
-  private readonly rig: BatRig;
-  private age = 0;
-  private readonly startAltitude: number;
-
-  constructor(id: string, corpse: GameSnapshot["corpses"][number]) {
-    this.rig = buildBat();
-    this.root.add(this.rig.model);
-    this.root.userData["entityId"] = id;
-    this.startAltitude = corpse.altitude ?? 2.25;
-    this.root.position.set(toX(corpse.x), this.startAltitude, toZ(corpse.y));
-    this.root.rotation.y = yawFor(corpse.facing, 0);
-    tintObject(this.rig.model, new THREE.Color(0x000000), 0.28);
-  }
-
-  update(dt: number): void {
-    this.age += dt;
-    // A corpse must not continue playing the looping flight clip. This check
-    // runs every frame because the imported rig may finish loading after death.
-    this.rig.flightAction?.stop();
-    this.rig.mixer?.stopAllAction();
-    const fall = Math.min(1, this.age / 0.82);
-    const eased = fall * fall * (3 - 2 * fall);
-    const loose = Math.exp(-this.age * 3.2);
-    for (const joint of this.rig.wingJoints) {
-      const segment = joint.order / 5;
-      const droop = joint.side * (0.32 + segment * 0.22);
-      const flop = joint.side * Math.sin(this.age * (11 + joint.order) + joint.order * 0.7)
-        * (0.55 - segment * 0.16) * loose;
-      const ragdoll = new THREE.Quaternion().setFromEuler(new THREE.Euler(
-        0.12 + segment * 0.08,
-        0,
-        droop + flop,
-      ));
-      joint.bone.quaternion.copy(joint.bindQuaternion).multiply(ragdoll);
-    }
-    this.rig.model.rotation.x = eased * Math.PI;
-    this.rig.model.rotation.z = Math.sin(fall * Math.PI) * 0.24;
-    this.root.position.y = this.startAltitude * (1 - eased);
-    if (fall < 1) return;
-
-    // The imported bat is centred around its body rather than grounded at its
-    // feet. Once it lands, lift only enough for the flipped mesh to meet y=0.
-    this.rig.model.position.y = 0;
-    this.root.updateMatrixWorld(true);
-    const bounds = new THREE.Box3().setFromObject(this.rig.model);
-    if (Number.isFinite(bounds.min.y)) this.rig.model.position.y = 0.025 - bounds.min.y;
-  }
-
-  dispose(): void { disposeObject(this.root); }
-}
-
-class SpiderCorpseActor {
-  readonly root = new THREE.Group();
-  private readonly rig = buildSpider();
-  private age = 0;
-  private limbRest: THREE.Quaternion[] | null = null;
-
-  constructor(id: string, corpse: GameSnapshot["corpses"][number]) {
-    this.root.add(this.rig.model);
-    this.root.userData["entityId"] = id;
-    this.root.position.set(toX(corpse.x), corpse.altitude ?? 0, toZ(corpse.y));
-    this.root.rotation.y = yawFor(corpse.facing, 0);
-  }
-
-  update(dt: number): void {
-    this.age += dt;
-    this.rig.walkAction?.stop();
-    this.rig.mixer?.stopAllAction();
-    this.root.position.y = Math.max(0, this.root.position.y - dt * 5);
-
-    const fall = Math.min(1, this.age / 0.72);
-    const easedFall = 1 - Math.pow(1 - fall, 3);
-    // A complete half-turn leaves the spider visibly upside down rather than
-    // merely toppled on its side.
-    this.rig.model.rotation.z = easedFall * Math.PI;
-
-    if (this.rig.limbRoots.length && this.limbRest === null) {
-      this.limbRest = this.rig.limbRoots.map((bone) => bone.quaternion.clone());
-    }
-    if (this.limbRest) {
-      const looseEnergy = Math.exp(-this.age * 3.1);
-      this.rig.limbRoots.forEach((bone, index) => {
-        const side = bone.name.endsWith("_L") ? 1 : -1;
-        const stagger = index * 0.73;
-        const fold = easedFall * side * (0.42 + (index % 4) * 0.055);
-        const flop = Math.sin(this.age * (9.5 + (index % 3)) + stagger) * looseEnergy * 0.5;
-        const twist = Math.cos(this.age * 8.2 + stagger) * looseEnergy * 0.24;
-        const ragdoll = new THREE.Quaternion().setFromEuler(
-          new THREE.Euler(flop * 0.45, twist, fold + flop, "XYZ"),
-        );
-        bone.quaternion.copy(this.limbRest![index]!).multiply(ragdoll);
-      });
-    }
-
-    // Once it has landed, settle the transformed skeleton exactly onto the
-    // floor so neither the abdomen nor loose legs remain floating.
-    if (this.root.position.y <= 0 && fall >= 1) {
-      this.rig.model.position.y = 0;
-      this.root.updateMatrixWorld(true);
-      const bounds = new THREE.Box3().setFromObject(this.rig.model);
-      if (Number.isFinite(bounds.min.y)) this.rig.model.position.y = 0.02 - bounds.min.y;
-    }
-  }
-
-  dispose(): void { disposeObject(this.root); }
-}
-
-class GargoyleCorpseActor {
-  readonly root = new THREE.Group();
-  private readonly rig = buildGargoyle();
-  private age = 0;
-
-  constructor(id: string, corpse: GameSnapshot["corpses"][number]) {
-    this.root.add(this.rig.model);
-    this.root.userData["entityId"] = id;
-    this.root.position.set(toX(corpse.x), 0, toZ(corpse.y));
-    this.root.rotation.y = yawFor(corpse.facing, 0);
-  }
-
-  update(dt: number): void {
-    this.age += dt;
-    const fall = Math.min(1, this.age / 0.48);
-    const eased = 1 - Math.pow(1 - fall, 3);
-    // The imported statue's authored axes make a local-Z fall land on its
-    // back. Roll around local X instead so it settles on one shoulder/side.
-    this.rig.model.rotation.x = eased * Math.PI / 2;
-    this.rig.model.rotation.z = 0;
-    // The visual arrives asynchronously; settle it after loading as well as on
-    // later frames so a defeated statue never hovers above the flagstones.
-    this.rig.model.position.y = 0;
-    this.root.updateMatrixWorld(true);
-    const bounds = new THREE.Box3().setFromObject(this.rig.model);
-    if (Number.isFinite(bounds.min.y)) this.rig.model.position.y = 0.02 - bounds.min.y;
   }
 
   dispose(): void { disposeObject(this.root); }
@@ -953,8 +762,7 @@ class GargoyleCorpseActor {
 export class Actors {
   readonly player: PlayerActor | PlayerWolfActor;
   private readonly enemies = new Map<string, WolfActor | BatActor | SpiderActor | GargoyleActor>();
-  private readonly corpses = new Map<string, CorpseActor | BatCorpseActor | SpiderCorpseActor | GargoyleCorpseActor>();
-  private readonly corpseOpacity = new Map<string, number>();
+  private readonly corpses = new Map<string, CorpseActor>();
   private readonly projectiles: THREE.Group[] = [];
   private readonly tombstones = new Map<string, THREE.Group>();
   private readonly bloodBursts: BloodBurst[] = [];
@@ -996,7 +804,7 @@ export class Actors {
   }
 
   bloodOnNearestCorpse(): void {
-    let nearest: CorpseActor | BatCorpseActor | SpiderCorpseActor | GargoyleCorpseActor | null = null;
+    let nearest: CorpseActor | null = null;
     let nearestDistance = Infinity;
     for (const corpse of this.corpses.values()) {
       const distance = corpse.root.position.distanceTo(this.player.root.position);
@@ -1006,7 +814,7 @@ export class Actors {
       }
     }
     if (!nearest) return;
-    const color = nearest instanceof SpiderCorpseActor ? SPIDER_BLOOD : RED_BLOOD;
+    const color = nearest.kind === "spider" ? SPIDER_BLOOD : RED_BLOOD;
     this.spawnBlood(nearest.root, this.player.root, false, color);
     this.pendingBloodBursts.push({
       delay: 0.16,
@@ -1188,16 +996,13 @@ export class Actors {
     }
   }
 
-  syncCorpses(snap: GameSnapshot, dt: number): void {
+  syncCorpses(snap: GameSnapshot, _dt: number): void {
     syncKeys(
       this.corpses,
-      snap.corpses.map((c) => c.id),
+      snap.corpses.filter((c) => !c.eaten).map((c) => c.id),
       (id) => {
         const corpse = snap.corpses.find((c) => c.id === id)!;
-        const actor = corpse.kind === "bat" ? new BatCorpseActor(id, corpse)
-          : corpse.kind === "spider" ? new SpiderCorpseActor(id, corpse)
-            : corpse.kind === "gargoyle" ? new GargoyleCorpseActor(id, corpse)
-              : new CorpseActor(id, corpse);
+        const actor = new CorpseActor(id, corpse);
         this.scene.add(actor.root);
         this.pickables.push(actor.root);
         return actor;
@@ -1205,19 +1010,7 @@ export class Actors {
       (actor) => this.remove(actor.root, () => actor.dispose()),
     );
 
-    const corpseStates = new Map(snap.corpses.map((corpse) => [corpse.id, corpse]));
-    for (const [id, actor] of this.corpses) {
-      actor.update(dt);
-      const eaten = corpseStates.get(id)?.eaten === true;
-      const opacity = eaten
-        ? Math.max(0, (this.corpseOpacity.get(id) ?? 1) - dt * 1.35)
-        : 1;
-      this.corpseOpacity.set(id, opacity);
-      setActorOpacity(actor.root, opacity);
-    }
-    for (const id of [...this.corpseOpacity.keys()]) {
-      if (!corpseStates.has(id)) this.corpseOpacity.delete(id);
-    }
+    for (const actor of this.corpses.values()) actor.update();
   }
 
   /** Daggers are interchangeable, so they come from a pool rather than by id. */

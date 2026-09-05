@@ -10,7 +10,9 @@
     "watch:client": "npm run build:client -- --watch",
     "start": "npm run build:client && tsx src/server/index.ts",
     "dev": "npm run build:client && tsx watch src/server/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:lods": "node scripts/generate-lods.mjs",
+    "build:textures": "node scripts/generate-textures.mjs"
   },
   "license": "ISC",
   "dependencies": {
@@ -24,6 +26,8 @@
     "@types/three": "^0.185.0",
     "@types/ws": "^8.18.1",
     "esbuild": "^0.28.1",
+    "meshoptimizer": "^1.1.1",
+    "sharp": "^0.35.4",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2"
   }

@@ -40,6 +40,7 @@ import {
 import { BAR_LAYOUT, drawTacticsChrome } from "./chrome.js";
 import { createStage } from "./stage.js";
 import { drawHeldWeapon } from "./viewmodel.js";
+import { GRAPHICS_PRESETS, graphicsAssetUrl, readGraphicsQuality, setupGraphicsControl } from "./graphics.js";
 
 // ------------------------------------------------------------------ canvases
 
@@ -77,7 +78,10 @@ const sceneCanvas = document.getElementById("scene") as HTMLCanvasElement;
 const uiCanvas = document.getElementById("ui") as HTMLCanvasElement;
 const ctx = uiCanvas.getContext("2d")!;
 
-const stage = createStage(sceneCanvas);
+let graphicsQuality = readGraphicsQuality();
+// Choose the asset before any loaders start, including shared actor loaders.
+THREE.DefaultLoadingManager.setURLModifier((url) => graphicsAssetUrl(url, graphicsQuality));
+const stage = createStage(sceneCanvas, GRAPHICS_PRESETS[graphicsQuality].anisotropy);
 const dungeonFade = document.createElement("div");
 Object.assign(dungeonFade.style, {
   position: "fixed", inset: "0", background: "#000", opacity: "0",
@@ -118,9 +122,14 @@ function resize() {
     barOrigin.y = Math.max(9, Math.min(WORLD_HEIGHT - barSize.height, barOrigin.y));
   }
 
-  stage.resize(fit.displayWidth, fit.displayHeight, window.devicePixelRatio || 1, viewWidth);
+  stage.resize(fit.displayWidth, fit.displayHeight,
+    Math.min(window.devicePixelRatio || 1, GRAPHICS_PRESETS[graphicsQuality].pixelRatioCap), viewWidth);
 }
 
+setupGraphicsControl(graphicsQuality, (quality) => {
+  graphicsQuality = quality;
+  location.reload();
+});
 window.addEventListener("resize", resize);
 resize();
 
@@ -616,9 +625,17 @@ function toScreen(px: number, py: number, height: number): Point {
 }
 
 let lastFrameTime = performance.now();
+let nextFrameTime = 0;
 
 function frame(now: number) {
   requestAnimationFrame(frame);
+
+  if (document.hidden) return;
+  const interval = 1000 / GRAPHICS_PRESETS[graphicsQuality].maxFps;
+  if (now < nextFrameTime - 0.5) return;
+  // Keep the cadence on high-refresh screens without accumulating missed frames.
+  nextFrameTime = interval > 0
+    ? now + interval - Math.max(0, now - nextFrameTime) % interval : now;
 
   const dt = Math.min((now - lastFrameTime) / 1000, 0.1);
   lastFrameTime = now;

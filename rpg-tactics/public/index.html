@@ -47,12 +47,45 @@
         background: transparent;
         cursor: default;
       }
+      #graphics-settings {
+        position: fixed;
+        top: max(16px, env(safe-area-inset-top));
+        right: max(16px, env(safe-area-inset-right));
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 12px;
+        border: 1px solid #716249;
+        border-radius: 6px;
+        background: #171510ed;
+        color: #e9dfca;
+        font: 13px system-ui, sans-serif;
+      }
+      #graphics-quality {
+        padding: 5px 8px;
+        border: 1px solid #716249;
+        border-radius: 4px;
+        background: #28241c;
+        color: #fff1d4;
+        font: inherit;
+        cursor: pointer;
+      }
+      #graphics-quality:focus-visible { outline: 2px solid #e6bf72; outline-offset: 3px; }
     </style>
   </head>
   <body>
     <div id="stage">
       <canvas id="scene"></canvas>
       <canvas id="ui"></canvas>
+    </div>
+    <div id="graphics-settings">
+      <label for="graphics-quality">Graphics</label>
+      <select id="graphics-quality" aria-label="Graphics quality" title="Changing graphics reloads the game to apply model and texture detail">
+        <option value="low">Low</option>
+        <option value="med">Med</option>
+        <option value="high" selected>High</option>
+      </select>
     </div>
     <script src="/tactics.js"></script>
   </body>
