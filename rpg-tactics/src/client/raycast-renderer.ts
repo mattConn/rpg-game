@@ -9,7 +9,7 @@ import { GRAPHICS_PRESETS, type GraphicsQuality } from './graphics.js';
 // A narrower lens and distant, fixed-elevation camera give an overhead ARPG view.
 const FOV = Math.tan(Math.PI * 50 / 360), WALL_HEIGHT = 168;
 const CAMERA_YAW = -Math.PI / 4, CAMERA_ANGLE = Math.PI * 30 / 180;
-const CAMERA_NEAR = 320, CAMERA_DEFAULT = 600, CAMERA_FAR = 1200;
+const CAMERA_DEFAULT = 600;
 const rgba = (r: number, g: number, b: number) => (0xff000000 | (b << 16) | (g << 8) | r) >>> 0;
 const shade = (color: number, amount: number) => rgba(Math.min(255, (color & 255) * amount), Math.min(255, ((color >>> 8) & 255) * amount), Math.min(255, ((color >>> 16) & 255) * amount));
 interface Pixels { width: number; height: number; data: Uint32Array; shades?: Uint32Array[]; bottomRows?: number[] }
@@ -108,15 +108,10 @@ export class RaycastRenderer {
     this.wallBottoms = new Float32Array(this.width);
   }
   setQuality(quality: GraphicsQuality): void { this.quality = quality; }
-  look(dx: number, dy: number): void {
-    this.yaw -= dx * 4;
-    this.cameraAngle = Math.max(Math.PI * 10 / 180, Math.min(CAMERA_ANGLE,
-      this.cameraAngle - dy * 1.5));
-  }
-  zoom(delta: number): void {
-    this.cameraDistance = Math.max(CAMERA_NEAR, Math.min(CAMERA_FAR, this.cameraDistance + Math.max(-120, Math.min(120, delta)) * .3));
-  }
-  flip(): void { this.yaw += Math.PI; }
+  // Camera framing stays fixed.
+  look(_dx: number, _dy: number): void {}
+  zoom(_delta: number): void {}
+  flip(): void {}
   resetView(): void { this.yaw = CAMERA_YAW; this.cameraAngle = CAMERA_ANGLE; this.cameraDistance = CAMERA_DEFAULT; }
 
   private updateCamera(snap: TacticsSnapshot) {
@@ -145,7 +140,8 @@ export class RaycastRenderer {
     if (depth < 1 || Math.abs(dx * this.rightX + dy * this.rightY) > depth * FOV) return false;
     const distance = Math.hypot(dx, dy);
     return castCameraRay(this.world.grid, this.cameraX, this.cameraY, dx / distance, dy / distance,
-      this.world.gates, this.cameraDistance * distance / depth, distance + 1).distance >= distance - 2;
+      this.world.gates, this.cameraDistance * distance / depth, distance + 1,
+      { x: this.cameraX + this.forwardX * this.cameraDistance, y: this.cameraY + this.forwardY * this.cameraDistance }).distance >= distance - 2;
   }
   private updateMarkers(snap: TacticsSnapshot) {
     const key = snap.pressurePlates.map(p => +p.active).join('') + ':' + snap.spikeTrap?.active + ':' + snap.purpleGem.destroyed;
@@ -169,7 +165,7 @@ export class RaycastRenderer {
     const start = performance.now();
     this.world.update(snap); this.updateCamera(snap); this.updateMarkers(snap);
     this.pixels.fill(rgba(0, 0, 0));
-    this.drawFloor(); this.drawWalls(now); this.drawSprites(snap, now); this.drawWallVeils();
+    this.drawFloor(); this.drawWalls(now); this.drawSprites(snap, now); this.drawWallVeils(now);
     this.previousPlayerX = snap.player.x; this.previousPlayerY = snap.player.y;
     this.ctx.putImageData(this.image, 0, 0);
     this.drawRain(snap, now);
@@ -268,8 +264,11 @@ export class RaycastRenderer {
     for (let x = 0; x < this.width; x++) {
       const plane = (2 * (x + .5) / this.width - 1) * FOV;
       const hit = castCameraRay(this.world.grid, this.cameraX, this.cameraY,
-        this.forwardX + this.rightX * plane, this.forwardY + this.rightY * plane, this.world.gates, this.cameraDistance);
-      for (const veil of hit.veils) this.wallVeils.push({ x, hit: veil });
+        this.forwardX + this.rightX * plane, this.forwardY + this.rightY * plane, this.world.gates, this.cameraDistance, 6000,
+        { x: this.cameraX + this.forwardX * this.cameraDistance, y: this.cameraY + this.forwardY * this.cameraDistance });
+      for (const veil of hit.veils) {
+        this.wallVeils.push({ x, hit: veil });
+      }
       this.depths[x] = hit.distance >= 6000 ? Infinity : hit.distance;
       if (hit.distance >= 6000) continue;
       const top = this.horizon + (this.eye - WALL_HEIGHT) * this.focal / hit.distance;
@@ -307,17 +306,31 @@ export class RaycastRenderer {
       }
     }
   }
-  private drawWallVeils() {
+  private drawWallVeils(now: number) {
+    const barrier = this.barrierFrames[Math.floor(now / 140) % 4]!;
     for (const { x, hit } of this.wallVeils) {
       const depth = Math.max(1, hit.distance);
       const top = this.horizon + (this.eye - WALL_HEIGHT) * this.focal / depth;
       const bottom = this.horizon + this.eye * this.focal / depth;
+      const along = hit.side ? hit.x : hit.y;
+      const u = ((along / 90) % 1 + 1) % 1;
       for (let y = Math.max(0, Math.floor(top)); y < Math.min(this.height, Math.ceil(bottom)); y++) {
-        const grey = 15, alpha = .45;
+        const v = (y - top) / (bottom - top);
+        let color: number;
+        if (hit.material === 0) {
+          color = rgba(15, 15, 15);
+        } else if (hit.material === 1) {
+          // Keep the openings clear and the iron bars translucent.
+          if (Math.floor(u * 12) % 2 !== 0 && Math.floor(v * 12) % 6 !== 0) continue;
+          color = rgba(81, 88, 94);
+        } else {
+          color = barrier[Math.min(BARRIER_HEIGHT - 1, Math.max(0, Math.floor(v * BARRIER_HEIGHT))) * BARRIER_WIDTH + Math.floor(u * BARRIER_WIDTH)]!;
+        }
+        const alpha = .45;
         const pixel = this.pixels[y * this.width + x]!;
-        this.pixels[y * this.width + x] = rgba((pixel & 255) * (1 - alpha) + grey * alpha,
-          ((pixel >>> 8) & 255) * (1 - alpha) + grey * alpha,
-          ((pixel >>> 16) & 255) * (1 - alpha) + grey * alpha);
+        this.pixels[y * this.width + x] = rgba((pixel & 255) * (1 - alpha) + (color & 255) * alpha,
+          ((pixel >>> 8) & 255) * (1 - alpha) + ((color >>> 8) & 255) * alpha,
+          ((pixel >>> 16) & 255) * (1 - alpha) + ((color >>> 16) & 255) * alpha);
       }
     }
   }

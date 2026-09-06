@@ -90,14 +90,14 @@ export class RaycastWorld {
 
 /** View-only wall cutaway: solid gameplay geometry remains unchanged. */
 export function castCameraRay(grid: FloorGrid, x: number, y: number, dx: number, dy: number,
-  gates: readonly Gate[], cutawayDepth: number, max = 6000): RayHit & { veils: RayHit[] } {
+  gates: readonly Gate[], cutawayDepth: number, max = 6000, focus?: { x: number; y: number }): RayHit & { veils: RayHit[] } {
   let col = Math.floor((x - ARENA_X) / TILE_PX), row = Math.floor((y - ARENA_Y) / TILE_PX);
   const sx = dx < 0 ? -1 : 1, sy = dy < 0 ? -1 : 1;
   const stepX = Math.abs(TILE_PX / dx), stepY = Math.abs(TILE_PX / dy);
   let tx = dx === 0 ? Infinity : (ARENA_X + (col + (sx > 0 ? 1 : 0)) * TILE_PX - x) / dx;
   let ty = dy === 0 ? Infinity : (ARENA_Y + (row + (sy > 0 ? 1 : 0)) * TILE_PX - y) / dy;
   const hit = (distance: number, side: number, material = 0): RayHit => ({ distance, side, material, x: x + dx * distance, y: y + dy * distance });
-  let result = hit(max, 0), wasFloor = !!grid.at(col, row), recordedSolid = false;
+  let result = hit(max, 0), wasFloor = !!grid.at(col, row);
   const veils: RayHit[] = [];
   const steps = Math.ceil(max * (Math.abs(dx) + Math.abs(dy)) / TILE_PX) + 2;
   for (let i = 0; i < steps; i++) {
@@ -107,12 +107,16 @@ export function castCameraRay(grid: FloorGrid, x: number, y: number, dx: number,
     if (distance >= max) break;
     const floor = !!grid.at(col, row);
     if (wasFloor && !floor) {
-      if (distance >= cutawayDepth) { result = hit(distance, side); break; }
-      veils.push(hit(distance, side)); recordedSolid = true;
-    } else if (!wasFloor && floor) {
-      if (!recordedSolid && distance < cutawayDepth) veils.push(hit(distance, side));
-      recordedSolid = false;
+      const wall = hit(distance, side);
+      // Classify the whole wall plane relative to the player, not each
+      // column's depth: far walls stay solid even near screen edges.
+      const foreground = focus
+        ? (side ? (wall.y - focus.y) * dy : (wall.x - focus.x) * dx) < 0
+        : distance < cutawayDepth;
+      if (foreground) veils.push(wall);
+      else { result = wall; break; }
     }
+    // Entering floor from outside is the hidden near face: draw nothing.
     wasFloor = floor;
   }
   for (const gate of gates) {

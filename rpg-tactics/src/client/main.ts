@@ -164,7 +164,6 @@ function connectWebSocket() {
         location.replace(next.toString());
         return;
       }
-      if (snap.dead || snap.inspect) cameraDrag = null;
       if (assetsReady) connectionStatus.textContent = "";
       const now = performance.now();
       floorStats.update(floorStatsKey, dungeonSeed, snap);
@@ -273,7 +272,6 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) holdW
 
 window.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
-  if (key === "escape") cameraDrag = null;
 
   if (event.key === "Shift") {
     if (!running) {
@@ -387,44 +385,13 @@ function toOverlay(event: MouseEvent): Point {
 // --------------------------------------------------------------- mouse-look
 let uiCursor: Point | null = null;
 let groundCursor: Point | null = null;
-let cameraDrag: { startX: number; startY: number; x: number; y: number; moved: boolean } | null = null;
 document.getElementById("play-help")!.textContent =
-  "WASD move · right-drag camera · V reset · left-click bite · scroll zoom · E eat · Shift run";
-uiCanvas.addEventListener("mousedown", (event) => {
-  if (event.button !== 2) return;
-  if (!currSnapshot || currSnapshot.dead || currSnapshot.inspect) return;
-  cameraDrag = { startX: event.clientX, startY: event.clientY,
-    x: event.clientX, y: event.clientY, moved: false };
-  event.preventDefault();
-});
+  "WASD move · left-click bite · E eat · Shift run";
 document.addEventListener("mousemove", (event) => {
-  if (cameraDrag && !(event.buttons & 2)) cameraDrag = null;
-  if (cameraDrag) {
-    const drag = cameraDrag;
-    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) >= 4) {
-      drag.moved = true;
-    }
-    if (drag.moved) {
-      const bounds = uiCanvas.getBoundingClientRect();
-      stage.look((event.clientX - drag.x) / bounds.width * 2,
-        -(event.clientY - drag.y) / bounds.height * 2);
-      if (heldKeys.size > 0) sendMoveDir();
-      uiCursor = null;
-    }
-    drag.x = event.clientX; drag.y = event.clientY;
-  } else if (event.target === uiCanvas) uiCursor = toOverlay(event);
+  if (event.target === uiCanvas) uiCursor = toOverlay(event);
 });
-document.addEventListener("mouseup", (event) => {
-  if (event.button === 2) cameraDrag = null;
-});
-window.addEventListener("blur", () => { cameraDrag = null; });
 uiCanvas.addEventListener("mouseleave", () => { uiCursor = null; groundCursor = null; });
-uiCanvas.addEventListener("wheel", (event) => {
-  event.preventDefault();
-  const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16
-    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? window.innerHeight : 1;
-  stage.zoom(event.deltaY * unit);
-}, { passive: false });
+uiCanvas.addEventListener("wheel", event => event.preventDefault(), { passive: false });
 uiCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
 // ----------------------------------------------------------------- clicking
