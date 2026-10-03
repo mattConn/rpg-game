@@ -14,7 +14,8 @@
     "build:lods": "node scripts/generate-lods.mjs",
     "build:textures": "node scripts/generate-textures.mjs",
     "build:sprites": "node scripts/bake-sprites.mjs",
-    "test:raycast": "tsx scripts/test-raycast.ts"
+    "test:raycast": "tsx scripts/test-raycast.ts",
+    "test:snake": "tsx scripts/test-snake.ts"
   },
   "license": "ISC",
   "dependencies": {

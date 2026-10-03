@@ -1,5 +1,5 @@
 type TileType = "void" | "floor" | "wall" | "doorway";
-type EntityType = "player" | "hellhound" | "bat" | "spider" | "gargoyle"
+type EntityType = "player" | "hellhound" | "bat" | "spider" | "gargoyle" | "snake"
   | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue";
 type ToolType = TileType | EntityType | "erase";
 
@@ -26,6 +26,7 @@ const tools: ToolDefinition[] = [
   { type: "bat", label: "Bat", icon: "⌁", group: "entity" },
   { type: "spider", label: "Spider", icon: "✳", group: "entity" },
   { type: "gargoyle", label: "Gargoyle", icon: "♜", group: "entity" },
+  { type: "snake", label: "Snake", icon: "≈", group: "entity" },
   { type: "purple-gem", label: "Purple gem", icon: "♦", group: "object" },
   { type: "pressure-plate", label: "Pressure plate", icon: "▣", group: "object" },
   { type: "portal-exit", label: "Dungeon exit", icon: "◎", group: "object" },
@@ -198,6 +199,9 @@ function drawEntity(entity: PlacedEntity): void {
     context.fillStyle = "#777b84"; context.strokeStyle = "#c1c5cc";
     context.fillRect(-radius * .65, -radius * .7, radius * 1.3, radius * 1.4); context.strokeRect(-radius * .65, -radius * .7, radius * 1.3, radius * 1.4);
     context.fillStyle = "#ff1b12"; context.fillRect(radius * .15, -radius * .34, 2, 2); context.fillRect(radius * .15, radius * .22, 2, 2);
+  } else if (entity.type === "snake") {
+    context.strokeStyle = "#9a7448"; context.lineWidth = Math.max(2, radius * .35);
+    context.beginPath(); context.moveTo(-radius, radius * .45); context.bezierCurveTo(-radius * .35, -radius, radius * .25, radius, radius, -radius * .25); context.stroke();
   } else {
     const colors: Record<string, string> = { "purple-gem": "#aa3cff", "pressure-plate": "#a98c57", "portal-exit": "#9d38e8", torch: "#ff8a2c", boulder: "#737884", "angel-statue": "#c0c2c8" };
     const glyphs: Record<string, string> = { "purple-gem": "♦", "pressure-plate": "▣", "portal-exit": "◎", torch: "♨", boulder: "●", "angel-statue": "♰" };
@@ -210,7 +214,7 @@ function draw(): void {
   context.clearRect(0, 0, width * cellSize, height * cellSize);
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) drawTile(x, y, tileAt(x, y));
   for (const entity of entities) drawEntity(entity);
-  const enemyCount = entities.filter((entity) => ["hellhound", "bat", "spider", "gargoyle"].includes(entity.type)).length;
+  const enemyCount = entities.filter((entity) => ["hellhound", "bat", "spider", "gargoyle", "snake"].includes(entity.type)).length;
   counts.textContent = `${entities.length} objects · ${enemyCount} enemies`;
 }
 

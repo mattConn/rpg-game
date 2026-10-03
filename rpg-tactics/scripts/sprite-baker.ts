@@ -28,13 +28,16 @@ async function bake(name: string, rig: any, dead = false, bite = false, eat = fa
   const atlas = document.createElement('canvas'); atlas.width = W * DIRECTIONS; atlas.height = W * frames;
   const ctx = atlas.getContext('2d')!;
   rig.mixer?.stopAllAction();
-  const action = eat ? rig.eatAction : bite ? rig.attackAction : rig.runAction ?? rig.flightAction ?? rig.walkAction;
+  const action = dead ? rig.deathAction
+    : eat ? rig.eatAction : bite ? rig.attackAction : rig.runAction ?? rig.flightAction ?? rig.walkAction;
   if ((bite || eat) && !action) throw new Error("Player attack/eating animation is missing");
-  if (!dead) action?.reset().play();
+  action?.reset().play();
   camera.left = -span / 2; camera.right = span / 2; camera.top = span / 2; camera.bottom = -span / 2;
   camera.updateProjectionMatrix();
   for (let f = 0; f < frames; f++) {
-    if (!dead && action) {
+    if (dead && action) {
+      rig.mixer?.setTime(action.getClip().duration * 0.98);
+    } else if (action) {
       if (bite || eat) {
         action.reset().play(); action.clampWhenFinished = true;
         rig.mixer?.setTime(action.getClip().duration * f / frames);
@@ -62,6 +65,62 @@ async function run() {
   const rigs: Record<string, any> = { hellhound: buildWolf(new THREE.Color(0x6c6572)), player: buildPlayerWolf(), bat: buildBat(), spider: buildSpider(), gargoyle: buildGargoyle(), cross: { model: buildTombstone() } };
   // LoadingManager covers nested textures too; callbacks finish on this microtask.
   await new Promise<void>(resolve => { THREE.DefaultLoadingManager.onLoad = () => setTimeout(resolve, 100); });
+  const snakeGltf = await new GLTFLoader().loadAsync('/shared-models/snake/scene.gltf');
+  const snake = snakeGltf.scene;
+  // The viper's head is on source +Z and its tail extends down -Z. Rotate the
+  // head onto world +X so a snake looking toward the camera selects a head-on
+  // column rather than its tail or side.
+  // This makes direction zero genuinely the face, with direction four the tail.
+  snake.rotation.y = Math.PI / 2;
+  snake.traverse((node: THREE.Object3D) => {
+    if (!(node instanceof THREE.Mesh)) return;
+    for (const material of (Array.isArray(node.material) ? node.material : [node.material])) {
+      const mapped = material as THREE.Material & { map?: THREE.Texture | null; color?: THREE.Color };
+      if (!mapped.map?.image) continue;
+      const source = mapped.map.image as CanvasImageSource & { width: number; height: number };
+      const textureCanvas = document.createElement('canvas');
+      textureCanvas.width = source.width; textureCanvas.height = source.height;
+      const textureContext = textureCanvas.getContext('2d', { willReadFrequently: true })!;
+      textureContext.drawImage(source, 0, 0);
+      const pixels = textureContext.getImageData(0, 0, textureCanvas.width, textureCanvas.height);
+      for (let index = 0; index < pixels.data.length; index += 4) {
+        pixels.data[index] = Math.round(pixels.data[index]! * 0.58);
+        pixels.data[index + 1] = Math.round(pixels.data[index + 1]! * 0.58);
+        pixels.data[index + 2] = Math.round(pixels.data[index + 2]! * 0.58);
+      }
+      textureContext.putImageData(pixels, 0, 0);
+      const recolored = new THREE.CanvasTexture(textureCanvas);
+      recolored.colorSpace = THREE.SRGBColorSpace;
+      recolored.flipY = mapped.map.flipY;
+      mapped.map = recolored;
+      mapped.color?.set(0xffffff);
+      mapped.needsUpdate = true;
+    }
+  });
+  snake.updateMatrixWorld(true);
+  const snakeBounds = new THREE.Box3().setFromObject(snake);
+  const snakeSize = snakeBounds.getSize(new THREE.Vector3());
+  // 9.6 units makes the billboard exactly twice the original 4.8-unit bake.
+  snake.scale.multiplyScalar(9.6 / Math.max(snakeSize.x, snakeSize.y, snakeSize.z));
+  snake.updateMatrixWorld(true);
+  const scaledSnakeBounds = new THREE.Box3().setFromObject(snake);
+  const snakeCenter = scaledSnakeBounds.getCenter(new THREE.Vector3());
+  snake.position.set(-snakeCenter.x, -scaledSnakeBounds.min.y, -snakeCenter.z);
+  const snakeMixer = new THREE.AnimationMixer(snake);
+  const normalizedClipName = (clip: THREE.AnimationClip) => clip.name.toLowerCase().replace(/[^a-z]/g, '');
+  const moveClip = snakeGltf.animations.find(clip => normalizedClipName(clip) === 'crawl');
+  const attackClip = snakeGltf.animations.find(clip => normalizedClipName(clip).startsWith('bitestand'));
+  const deathClip = snakeGltf.animations.find(clip => normalizedClipName(clip) === 'death');
+  if (!moveClip) throw new Error('Viper crawl animation is missing');
+  if (!attackClip) throw new Error('Viper bitestand animation is missing');
+  const moveAction = snakeMixer.clipAction(moveClip);
+  rigs.snake = {
+    model: snake,
+    mixer: snakeMixer,
+    runAction: moveAction,
+    attackAction: snakeMixer.clipAction(attackClip),
+    deathAction: deathClip ? snakeMixer.clipAction(deathClip) : undefined,
+  };
   rigs.hellhound.model.scale.multiplyScalar(1.95);
   for (const [name, rig] of Object.entries(rigs)) {
     if (name === 'cross') {
@@ -86,9 +145,12 @@ async function run() {
       rig.mixer?.stopAllAction();
       await bake('player-eat', rig, false, false, true);
     }
+    if (name === 'snake') {
+      await bake('snake-attack', rig, false, true);
+    }
     rig.mixer?.stopAllAction();
     if (name === 'spider') rig.model.rotation.z = Math.PI;
-    else rig.model.rotation.x = name === 'bat' ? Math.PI : Math.PI / 2;
+    else if (name !== 'snake') rig.model.rotation.x = name === 'bat' ? Math.PI : Math.PI / 2;
     rig.model.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(rig.model);
     rig.model.position.y -= box.min.y;

@@ -130,7 +130,7 @@ export const BOARD_REGION: Region = {
 export let DUNGEON_SEED = 0x574f4c46;
 export interface EditorDungeonEntity {
   id: string;
-  type: "player" | "hellhound" | "bat" | "spider" | "gargoyle"
+  type: "player" | "hellhound" | "bat" | "spider" | "gargoyle" | "snake"
     | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue";
   x: number;
   y: number;
@@ -231,7 +231,7 @@ export let HALL_ROWS = HALL_REGION.rows;
 export let REGIONS: readonly Region[] = ROOM_REGIONS.flatMap((room, index) =>
   index < HALL_REGIONS.length ? [room, HALL_REGIONS[index]!] : [room]);
 
-export interface DungeonEnemySpawn { kind: "hellhound" | "bat" | "spider" | "gargoyle"; cell: Cell; roomIndex: number }
+export interface DungeonEnemySpawn { kind: "hellhound" | "bat" | "spider" | "gargoyle" | "snake"; cell: Cell; roomIndex: number }
 /** One to four enemies per combat room; room zero is always the safe spawn. */
 const generateEnemies = (seed: number, rooms: readonly Region[]): readonly DungeonEnemySpawn[] => {
   const enemyRandom = seededRandom(seed ^ 0x9e3779b9);
@@ -285,6 +285,28 @@ const generateEnemies = (seed: number, rooms: readonly Region[]): readonly Dunge
           row: chosen.room.row + Math.floor(chosen.room.rows * down),
         },
       });
+    }
+  }
+  // Thirty percent of floors contain a snake encounter. Ten percent of those
+  // encounters are a pair; both use free-looking positions in one combat room.
+  if (enemyRandom() < 0.3) {
+    const eligible = rooms.map((room, roomIndex) => ({ room, roomIndex })).filter(({ roomIndex }) =>
+      roomIndex !== 0 && roomIndex !== PORTAL_ROOM_INDEX);
+    const chosen = eligible[Math.floor(enemyRandom() * eligible.length)];
+    if (chosen) {
+      const count = enemyRandom() < 0.1 ? 2 : 1;
+      const snakeSpots = [[0.5, 0.5], [0.38, 0.58]] as const;
+      for (let index = 0; index < count; index++) {
+        const [across, down] = snakeSpots[index]!;
+        result.push({
+          kind: "snake",
+          roomIndex: chosen.roomIndex,
+          cell: {
+            col: chosen.room.col + Math.floor(chosen.room.cols * across),
+            row: chosen.room.row + Math.floor(chosen.room.rows * down),
+          },
+        });
+      }
     }
   }
   return result;
@@ -507,7 +529,7 @@ export function configureEditorDungeon(config: EditorDungeonConfig): void {
   const editorCell = (coordinate: number) => coordinate * EDITOR_TILE_CELLS + Math.floor(EDITOR_TILE_CELLS / 2);
   PLAYER_START.col = editorCell(player?.x ?? fallback.x);
   PLAYER_START.row = editorCell(player?.y ?? fallback.y);
-  const enemyKinds = new Set(["hellhound", "bat", "spider", "gargoyle"]);
+  const enemyKinds = new Set(["hellhound", "bat", "spider", "gargoyle", "snake"]);
   DUNGEON_ENEMIES = config.entities.filter((entity) => enemyKinds.has(entity.type)).map((entity) => ({
     kind: entity.type as DungeonEnemySpawn["kind"],
     roomIndex: 0,

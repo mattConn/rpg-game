@@ -215,6 +215,15 @@ const GARGOYLE_CONTACT_RANGE = SQUARE_PX * 0.72;
 const GARGOYLE_ATTACK_INTERVAL_MS = 1500;
 const GARGOYLE_DAMAGE = 50;
 const GARGOYLE_HITBOX_BONUS = SQUARE_PX * 0.32;
+const SNAKE_MAX_HEALTH = 200;
+const SNAKE_DAMAGE = 30;
+const SNAKE_AGGRO_RANGE = AGGRO_RANGE * 2;
+const SNAKE_ATTACK_RANGE = MELEE_RANGE * 0.82;
+const SNAKE_ATTACK_CONE_DOT = Math.cos((35 * Math.PI) / 180);
+const SNAKE_ATTACK_INTERVAL_MS = 1500;
+const SNAKE_ATTACK_ANIMATION_MS = 900;
+const SNAKE_POISON_CHANCE = 0.1;
+const SNAKE_ROAM_SPEED = 90;
 const ENEMY_MOVEMENT_START_DELAY_MS = 3000;
 const POISON_DAMAGE = 10;
 const POISON_INTERVAL_MS = 2000;
@@ -253,7 +262,7 @@ interface Actor {
 type SpiderSurface = "floor" | "north" | "east" | "south" | "west";
 
 interface Hound extends Actor {
-  kind: "hellhound" | "bat" | "spider" | "gargoyle";
+  kind: "hellhound" | "bat" | "spider" | "gargoyle" | "snake";
   glyph: string;
   color: string;
   aggro: boolean;
@@ -474,6 +483,18 @@ export class TacticsGame {
           roomIndex: spawn.roomIndex,
         };
       }
+      if (spawn.kind === "snake") {
+        return {
+          id: `snake-${this.nextEnemySeq++}`, kind: "snake" as const,
+          name: "Dungeon Snake", glyph: "≈", color: "#805a32",
+          cell: { ...cell }, pos: center, ...center, facing: -1 as const,
+          health: SNAKE_MAX_HEALTH, maxHealth: SNAKE_MAX_HEALTH,
+          aggro: false, nextAttackAt: 0,
+          patrolLeft: center.x, patrolRight: center.x, patrolDir: 1 as const,
+          heading: { x: 1, y: 0 }, movementStartsAt,
+          roomIndex: spawn.roomIndex,
+        };
+      }
       const hound: Hound = {
         id: `hound-${this.nextEnemySeq++}`,
         kind: "hellhound",
@@ -582,6 +603,10 @@ export class TacticsGame {
       }
       if (enemy.kind === "gargoyle") {
         this.updateGargoyle(enemy, dt);
+        continue;
+      }
+      if (enemy.kind === "snake") {
+        this.updateSnake(enemy, dt);
         continue;
       }
       if (enemy.aggro) {
@@ -1281,6 +1306,77 @@ export class TacticsGame {
     }
   }
 
+  /** A roaming snake becomes a permanent pursuer once it notices the player. */
+  private updateSnake(snake: Hound, dt: number): void {
+    const player = this.playerAt();
+    if (!snake.aggro && distance(this.at(snake), player) <= SNAKE_AGGRO_RANGE) this.wake(snake);
+
+    // An attack plants the snake for the full clip, including recovery.
+    if (this.simNow < (snake.attackUntil ?? 0)) return;
+
+    if (snake.aggro) {
+      const waypoint = this.nextWaypoint(snake);
+      const target = waypoint ?? player;
+      const gapToPlayer = distance(this.at(snake), player);
+      const targetDx = target.x - snake.x;
+      const targetDy = target.y - snake.y;
+      const targetLength = Math.max(0.001, Math.hypot(targetDx, targetDy));
+      // Turn the head at a finite rate so getting behind it matters. Translation
+      // below still follows the target vector, preventing backward pursuit.
+      this.turnHoundToward(snake, target, dt);
+      const playerDx = player.x - snake.x;
+      const playerDy = player.y - snake.y;
+      const playerLength = Math.max(0.001, Math.hypot(playerDx, playerDy));
+      const playerInHeadCone = (playerDx * snake.heading.x + playerDy * snake.heading.y)
+        / playerLength >= SNAKE_ATTACK_CONE_DOT;
+      if (!waypoint && gapToPlayer <= SNAKE_ATTACK_RANGE && playerInHeadCone
+          && this.simNow >= snake.nextAttackAt) {
+        this.player.health = Math.max(0, this.player.health - SNAKE_DAMAGE);
+        this.strikes.push({ enemyId: snake.id, seq: ++this.strikeSeq });
+        snake.attackUntil = this.simNow + SNAKE_ATTACK_ANIMATION_MS;
+        snake.nextAttackAt = this.simNow + SNAKE_ATTACK_INTERVAL_MS;
+        if (!this.poisoned && this.player.health > 0 && Math.random() < SNAKE_POISON_CHANCE) {
+          this.poisoned = true;
+          this.poisonTicksRemaining = POISON_TICKS;
+          this.nextPoisonAt = this.simNow + POISON_INTERVAL_MS;
+        }
+        return;
+      }
+      const gap = distance(this.at(snake), target);
+      const hold = waypoint ? 0 : SNAKE_ATTACK_RANGE * 0.9;
+      if (gap <= hold) return;
+      // Match the player's current walking/running pace so sprinting opens no
+      // permanent leash and slowing down lets the snake settle with you.
+      const speed = PLAYER_SPEED * (this.playerRunning ? PLAYER_RUN_MULTIPLIER : 1);
+      const step = Math.min(speed * dt, gap - hold);
+      const next = this.place(snake, {
+        x: snake.x + (targetDx / targetLength) * step,
+        y: snake.y + (targetDy / targetLength) * step,
+      });
+      snake.facing = snake.heading.x >= 0 ? 1 : -1;
+      if (distance(next, target) < 2) snake.wanderTarget = undefined;
+      return;
+    }
+
+    // Before aggro, choose unhurried random destinations around the room.
+    const region = ROOM_REGIONS[snake.roomIndex]!;
+    if (!snake.wanderTarget || distance(this.at(snake), snake.wanderTarget) < 3) {
+      snake.wanderTarget = {
+        x: ARENA_X + (region.col + 0.75 + Math.random() * Math.max(0.5, region.cols - 1.5)) * TILE_PX,
+        y: ARENA_Y + (region.row + 0.75 + Math.random() * Math.max(0.5, region.rows - 1.5)) * TILE_PX,
+      };
+    }
+    const target = snake.wanderTarget;
+    const targetDx = target.x - snake.x;
+    const targetDy = target.y - snake.y;
+    const targetLength = Math.max(0.001, Math.hypot(targetDx, targetDy));
+    snake.heading = { x: targetDx / targetLength, y: targetDy / targetLength };
+    const gap = distance(this.at(snake), target);
+    const step = Math.min(SNAKE_ROAM_SPEED * dt, gap);
+    this.place(snake, { x: snake.x + snake.heading.x * step, y: snake.y + snake.heading.y * step });
+    snake.facing = snake.heading.x >= 0 ? 1 : -1;
+  }
+
   private patrolEnemy(enemy: Hound, dt: number): void {
     const pos = this.at(enemy);
     let nx = pos.x + PATROL_SPEED * dt * enemy.patrolDir;
@@ -1933,12 +2029,13 @@ export class TacticsGame {
     if (corpseIndex < 0) return;
     const corpse = this.corpses[corpseIndex]!;
     this.eatenCorpseIds.add(corpse.id);
-    if (corpse.kind === "spider") {
+    if (corpse.kind === "spider" || corpse.kind === "snake") {
       this.poisoned = false;
       this.poisonTicksRemaining = 0;
       this.nextPoisonAt = 0;
     }
-    const heal = corpse.kind === "bat" ? 15 : corpse.kind === "spider" ? 10 : EAT_HEAL;
+    const heal = corpse.kind === "bat" ? 15 : corpse.kind === "spider" ? 10
+      : corpse.kind === "snake" ? 20 : EAT_HEAL;
     this.player.health = Math.min(this.player.maxHealth, this.player.health + heal);
     this.spawnDamageNumber(this.player.x, this.player.y, `+${heal}`, "#ffffff");
   }
@@ -2382,6 +2479,7 @@ export class TacticsGame {
           this.simNow < e.movementStartsAt
           || (e.spiderPauseUntil !== undefined && this.simNow < e.spiderPauseUntil)
         ),
+        attacking: this.simNow < (e.attackUntil ?? 0),
       })),
       corpses: this.corpses.map((c) => ({
         id: c.id,

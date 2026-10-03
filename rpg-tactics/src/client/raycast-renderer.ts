@@ -41,6 +41,8 @@ export class RaycastRenderer {
   private eatingStartedAt: number | null = null;
   private spiderMotion = new Map<string, { x: number; y: number; altitude: number; movedAt: number; direction: number }>();
   private houndMotion = new Map<string, { x: number; y: number; movedAt: number }>();
+  private snakeMotion = new Map<string, { x: number; y: number; movedAt: number }>();
+  private snakeAttackStartedAt = new Map<string, number>();
   private previousPlayerX = NaN; private previousPlayerY = NaN;
 
   constructor(private readonly canvas: HTMLCanvasElement, private quality: GraphicsQuality) {
@@ -340,7 +342,9 @@ export class RaycastRenderer {
       const meta = SPRITE_META[name];
       const angle = Math.atan2(this.cameraY - actor.y, this.cameraX - actor.x) - Math.atan2(actor.heading?.y ?? 0, actor.heading?.x ?? actor.facing);
       const direction = ((Math.round(angle / (Math.PI / 4)) % 8) + 8) % 8;
-      sprites.push({ x: actor.x, y: actor.y, z: meta.center + (actor.altitude ?? 0) * 30, span: meta.span, image: name, direction, frame: moving ? 1 + Math.floor(now / 130) % 3 : 0 });
+      const sprite = { x: actor.x, y: actor.y, z: meta.center + (actor.altitude ?? 0) * 30, span: meta.span, image: name as string, direction, frame: moving ? 1 + Math.floor(now / 130) % 3 : 0 };
+      sprites.push(sprite);
+      return sprite;
     };
     const houndIds = new Set<string>();
     const spiderIds = new Set<string>();
@@ -355,6 +359,21 @@ export class RaycastRenderer {
         // Bridge snapshot gaps, then return to idle when the hound actually stops.
         moving = now - movedAt < 100;
         this.houndMotion.set(enemy.id, { x: enemy.x, y: enemy.y, movedAt });
+      }
+      if (kind === 'snake') {
+        const previous = this.snakeMotion.get(enemy.id);
+        const moved = previous && Math.hypot(enemy.x - previous.x, enemy.y - previous.y) > .01;
+        const movedAt = moved ? now : previous?.movedAt ?? -Infinity;
+        moving = now - movedAt < 100;
+        this.snakeMotion.set(enemy.id, { x: enemy.x, y: enemy.y, movedAt });
+        if (enemy.attacking) {
+          const startedAt = this.snakeAttackStartedAt.get(enemy.id) ?? now;
+          this.snakeAttackStartedAt.set(enemy.id, startedAt);
+          const sprite = addActor(enemy, 'snake-attack', false);
+          sprite.frame = Math.min(7, Math.floor((now - startedAt) / 900 * 8));
+          continue;
+        }
+        this.snakeAttackStartedAt.delete(enemy.id);
       }
       if (kind === 'spider' && enemy.surface && enemy.surface !== 'floor') {
         spiderIds.add(enemy.id);
@@ -376,6 +395,9 @@ export class RaycastRenderer {
     }
     for (const id of this.spiderMotion.keys()) if (!spiderIds.has(id)) this.spiderMotion.delete(id);
     for (const id of this.houndMotion.keys()) if (!houndIds.has(id)) this.houndMotion.delete(id);
+    const snakeIds = new Set(snap.enemies.filter(enemy => enemy.kind === 'snake').map(enemy => enemy.id));
+    for (const id of this.snakeMotion.keys()) if (!snakeIds.has(id)) this.snakeMotion.delete(id);
+    for (const id of this.snakeAttackStartedAt.keys()) if (!snakeIds.has(id)) this.snakeAttackStartedAt.delete(id);
     for (const corpse of snap.corpses) if (!corpse.eaten) addActor({ ...corpse, altitude: 0 }, `${corpse.kind ?? 'hellhound'}-dead` as keyof typeof SPRITE_META, false);
     if (!snap.dead) addActor({ ...snap.player, heading: snap.playerHeading }, 'player', Math.hypot(snap.player.x - this.previousPlayerX, snap.player.y - this.previousPlayerY) > .05);
     else addActor({ ...snap.player, altitude: 0 }, 'player-dead', false);
