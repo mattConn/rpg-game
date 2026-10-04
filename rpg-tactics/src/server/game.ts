@@ -576,6 +576,14 @@ export class TacticsGame {
     if (isOver(this.phase)) return;
 
     if (this.dungeonFallStartedAt !== null) {
+      // Pull the actor into the centre line while it drops, so the billboard
+      // travels down the vertical shaft instead of hanging over its lip.
+      const centre = DUNGEON_PORTAL.holePosition;
+      const settle = Math.min(1, dt * 4.5);
+      this.player.x += (centre.x - this.player.x) * settle;
+      this.player.y += (centre.y - this.player.y) * settle;
+      this.player.pos = { x: this.player.x, y: this.player.y };
+      this.player.cell = clampToGrid(this.player.pos);
       if (this.simNow - this.dungeonFallStartedAt >= 1100) {
         this.nextDungeonSeed ??= (Math.floor(Math.random() * 0xffffffff) >>> 0) || 1;
       }

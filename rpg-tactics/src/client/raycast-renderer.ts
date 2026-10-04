@@ -10,6 +10,7 @@ import { GRAPHICS_PRESETS, type GraphicsQuality } from './graphics.js';
 const FOV = Math.tan(Math.PI * 50 / 360), WALL_HEIGHT = 168;
 const CAMERA_YAW = -Math.PI / 4, CAMERA_ANGLE = Math.PI * 30 / 180;
 const CAMERA_DEFAULT = 600;
+const PORTAL_HALF_SIZE = TILE_PX * 2.1;
 const rgba = (r: number, g: number, b: number) => (0xff000000 | (b << 16) | (g << 8) | r) >>> 0;
 const shade = (color: number, amount: number) => rgba(Math.min(255, (color & 255) * amount), Math.min(255, ((color >>> 8) & 255) * amount), Math.min(255, ((color >>> 16) & 255) * amount));
 interface Pixels { width: number; height: number; data: Uint32Array; shades?: Uint32Array[]; bottomRows?: number[] }
@@ -26,6 +27,9 @@ export class RaycastRenderer {
   private depths = new Float32Array(480);
   private wallVeils: { x: number; hit: RayHit }[] = [];
   private wallBottoms = new Float32Array(480);
+  private portalForeground = new Uint32Array(480 * 270);
+  private portalOpeningMask = new Uint8Array(480 * 270);
+  private portalFallProgress = 0;
   private cameraX = 0; private cameraY = 0; private eye = CAMERA_DEFAULT * Math.tan(CAMERA_ANGLE);
   private forwardX = 1; private forwardY = 0; private rightX = 0; private rightY = 1;
   private focal = 1; private horizon = 0;
@@ -41,7 +45,8 @@ export class RaycastRenderer {
   private eatingStartedAt: number | null = null;
   private spiderMotion = new Map<string, { x: number; y: number; altitude: number; movedAt: number; direction: number }>();
   private houndMotion = new Map<string, { x: number; y: number; movedAt: number }>();
-  private snakeMotion = new Map<string, { x: number; y: number; movedAt: number }>();
+  private snakeMotion = new Map<string, { x: number; y: number; headingX: number; headingY: number; movedAt: number; turnedAt: number }>();
+  private snakeTurnStartedAt = new Map<string, number>();
   private snakeAttackStartedAt = new Map<string, number>();
   private previousPlayerX = NaN; private previousPlayerY = NaN;
 
@@ -108,6 +113,8 @@ export class RaycastRenderer {
     this.pixels = new Uint32Array(this.image.data.buffer);
     this.depths = new Float32Array(this.width);
     this.wallBottoms = new Float32Array(this.width);
+    this.portalForeground = new Uint32Array(this.width * this.height);
+    this.portalOpeningMask = new Uint8Array(this.width * this.height);
   }
   setQuality(quality: GraphicsQuality): void { this.quality = quality; }
   // Camera framing stays fixed.
@@ -125,7 +132,7 @@ export class RaycastRenderer {
     this.cameraY = snap.player.y - this.forwardY * distance;
     // Preserve the selected viewing angle across zoom levels.
     const slope = Math.tan(this.cameraAngle);
-    this.eye = distance * slope + 25 - snap.dungeonPortal.fallProgress * 65;
+    this.eye = distance * slope + 25;
     this.focal = this.width / (2 * FOV);
     this.horizon = this.height * .58 - slope * this.focal;
   }
@@ -156,7 +163,7 @@ export class RaycastRenderer {
         if (grid.at(col, row)) this.markers[(row - grid.minRow) * grid.width + col - grid.minCol] = type;
       }
     };
-    if (!EDITOR_DUNGEON) mark(DUNGEON_PORTAL.holePosition.x, DUNGEON_PORTAL.holePosition.y, 37.8, 3);
+    if (!EDITOR_DUNGEON) mark(DUNGEON_PORTAL.holePosition.x, DUNGEON_PORTAL.holePosition.y, PORTAL_HALF_SIZE, 3);
     for (const plate of PRESSURE_PLATES) mark(plate.position.x, plate.position.y, 12, snap.pressurePlates.find(p => p.id === plate.id)?.active ? 2 : 1);
     if (snap.spikeTrap) {
       const room = ROOM_REGIONS[snap.spikeTrap.roomIndex];
@@ -167,7 +174,11 @@ export class RaycastRenderer {
     const start = performance.now();
     this.world.update(snap); this.updateCamera(snap); this.updateMarkers(snap);
     this.pixels.fill(rgba(0, 0, 0));
-    this.drawFloor(); this.drawWalls(now); this.drawSprites(snap, now); this.drawWallVeils(now);
+    this.portalForeground.fill(0);
+    this.portalOpeningMask.fill(0);
+    this.portalFallProgress = snap.dungeonPortal.fallProgress;
+    this.drawFloor(snap, now); this.drawWalls(now); this.drawPortalShaft(snap, now); this.drawSprites(snap, now);
+    this.drawPortalForeground(); this.drawWallVeils(now);
     this.previousPlayerX = snap.player.x; this.previousPlayerY = snap.player.y;
     this.ctx.putImageData(this.image, 0, 0);
     this.drawRain(snap, now);
@@ -220,7 +231,7 @@ export class RaycastRenderer {
     }
     ctx.restore();
   }
-  private drawFloor() {
+  private drawFloor(snap: TacticsSnapshot, now: number) {
     const texture = this.textures.get('floor'), grass = this.textures.get('grass'), grid = this.world.grid;
     const w = this.width, h = this.height;
     for (let y = 0; y < h; y++) {
@@ -251,11 +262,119 @@ export class RaycastRenderer {
         const ty = Math.floor(yWorld / 90 * ground.height) & (ground.height - 1);
         let color = (inside ? stoneShades : grassShades)[ty * ground.width + tx]!;
         const marker = col >= 0 && row >= 0 && col < grid.width && row < grid.height ? this.markers[row * grid.width + col] : 0;
-        if (marker === 3) color = rgba(5, 2, 9);
+        if (marker === 3) {
+          const portalDx = xWorld - DUNGEON_PORTAL.holePosition.x;
+          const portalDy = yWorld - DUNGEON_PORTAL.holePosition.y;
+          const nx = portalDx / PORTAL_HALF_SIZE;
+          const ny = portalDy / PORTAL_HALF_SIZE;
+          const edge = Math.max(Math.abs(nx), Math.abs(ny));
+          if (edge <= 1) color = rgba(2, 2, snap.dungeonPortal.unlocked ? 7 + Math.sin(now / 220) * 2 : 3);
+        }
         else if (marker) color = marker === 2 ? rgba(130, 77, 24) : rgba(20 + ((tx ^ ty) & 7), 23, 26);
         const groundColor = marker ? shade(color, light) : color;
         this.pixels[offset + x] = fog > 0 ? shade(groundColor, visibility) : groundColor;
       }
+    }
+  }
+  private drawPortalShaft(snap: TacticsSnapshot, now: number) {
+    if (EDITOR_DUNGEON) return;
+    const wall = this.textures.get('wall'); if (!wall) return;
+    const center = DUNGEON_PORTAL.holePosition;
+    const half = PORTAL_HALF_SIZE;
+    const shaftDepth = 230;
+    const worldCorners = [
+      { x: center.x - half, y: center.y - half },
+      { x: center.x + half, y: center.y - half },
+      { x: center.x + half, y: center.y + half },
+      { x: center.x - half, y: center.y + half },
+    ];
+    const project = (point: { x: number; y: number }, z: number) => {
+      const dx = point.x - this.cameraX, dy = point.y - this.cameraY;
+      const depth = Math.max(4, dx * this.forwardX + dy * this.forwardY);
+      return {
+        x: this.width / 2 + (dx * this.rightX + dy * this.rightY) * this.focal / depth,
+        y: this.horizon + (this.eye - z) * this.focal / depth,
+      };
+    };
+    const top = worldCorners.map(point => project(point, 1));
+    const bottom = worldCorners.map(point => project(point, -shaftDepth));
+    const insideTriangle = (px: number, py: number, a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }) => {
+      const cross = (p: { x: number; y: number }, q: { x: number; y: number }) => (px - q.x) * (p.y - q.y) - (p.x - q.x) * (py - q.y);
+      const d1 = cross(a, b), d2 = cross(b, c), d3 = cross(c, a);
+      return !(d1 < 0 || d2 < 0 || d3 < 0) || !(d1 > 0 || d2 > 0 || d3 > 0);
+    };
+    const triangleWeights = (px: number, py: number, a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }) => {
+      const denominator = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+      if (Math.abs(denominator) < .0001) return null;
+      const wa = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) / denominator;
+      const wb = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) / denominator;
+      const wc = 1 - wa - wb;
+      return wa >= 0 && wb >= 0 && wc >= 0 ? [wa, wb, wc] as const : null;
+    };
+    const insideOpening = (x: number, y: number) => insideTriangle(x, y, top[0]!, top[1]!, top[2]!)
+      || insideTriangle(x, y, top[0]!, top[2]!, top[3]!);
+    const openingMinX = Math.max(0, Math.floor(Math.min(...top.map(point => point.x))));
+    const openingMaxX = Math.min(this.width - 1, Math.ceil(Math.max(...top.map(point => point.x))));
+    const openingMinY = Math.max(0, Math.floor(Math.min(...top.map(point => point.y))));
+    const openingMaxY = Math.min(this.height - 1, Math.ceil(Math.max(...top.map(point => point.y))));
+    for (let y = openingMinY; y <= openingMaxY; y++) for (let x = openingMinX; x <= openingMaxX; x++)
+      if (insideOpening(x, y)) this.portalOpeningMask[y * this.width + x] = 1;
+    const paintQuad = (points: Array<{ x: number; y: number }>, face: number, foreground = false) => {
+      const minX = Math.max(0, Math.floor(Math.min(...points.map(point => point.x))));
+      const maxX = Math.min(this.width - 1, Math.ceil(Math.max(...points.map(point => point.x))));
+      const minY = Math.max(0, Math.floor(Math.min(...points.map(point => point.y))));
+      const maxY = Math.min(this.height - 1, Math.ceil(Math.max(...points.map(point => point.y))));
+      const light = face % 2 === 0 ? .7 : .52;
+      const level = Math.max(0, Math.min(23, Math.floor(light * 24) - 1));
+      for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
+        if (!insideOpening(x, y)) continue;
+        const first = triangleWeights(x, y, points[0]!, points[1]!, points[2]!);
+        const second = first ? null : triangleWeights(x, y, points[0]!, points[2]!, points[3]!);
+        if (!first && !second) continue;
+        // Stable face-local UVs: the texture follows the wall corners instead
+        // of being stretched to a screen-space bounding box as the camera moves.
+        const u = first ? first[1] + first[2] : second![1];
+        const v = first ? first[2] : second![1] + second![2];
+        const tx = Math.min(wall.width - 1, Math.floor(u * wall.width));
+        const ty = Math.floor(v * wall.height * 2.5) % wall.height;
+        const color = wall.shades?.[level]?.[ty * wall.width + tx]
+          ?? shade(wall.data[ty * wall.width + tx]!, light);
+        const index = y * this.width + x;
+        this.pixels[index] = color;
+        if (foreground) this.portalForeground[index] = color;
+      }
+    };
+    // The lower square is separated from the opening by a full wall-height,
+    // making the passage visibly vertical rather than a dark floor decal.
+    const coreGlow = snap.dungeonPortal.unlocked ? 9 + Math.sin(now / 220) * 3 : 2;
+    const bottomMinX = Math.max(0, Math.floor(Math.min(...bottom.map(point => point.x))));
+    const bottomMaxX = Math.min(this.width - 1, Math.ceil(Math.max(...bottom.map(point => point.x))));
+    const bottomMinY = Math.max(0, Math.floor(Math.min(...bottom.map(point => point.y))));
+    const bottomMaxY = Math.min(this.height - 1, Math.ceil(Math.max(...bottom.map(point => point.y))));
+    for (let y = bottomMinY; y <= bottomMaxY; y++) for (let x = bottomMinX; x <= bottomMaxX; x++) {
+      if (insideOpening(x, y) && (insideTriangle(x, y, bottom[0]!, bottom[1]!, bottom[2]!)
+          || insideTriangle(x, y, bottom[0]!, bottom[2]!, bottom[3]!))
+      )
+        this.pixels[y * this.width + x] = rgba(1 + coreGlow, 1, 3 + coreGlow * 1.5);
+    }
+    for (let face = 0; face < 4; face++) {
+      const next = (face + 1) % 4;
+      const middle = {
+        x: (worldCorners[face]!.x + worldCorners[next]!.x) / 2 - center.x,
+        y: (worldCorners[face]!.y + worldCorners[next]!.y) / 2 - center.y,
+      };
+      // Camera yaw is fixed, so foreground ownership must depend on that view
+      // direction—not the player's changing position relative to the shaft.
+      const towardCamera = middle.x * -this.forwardX + middle.y * -this.forwardY > 0;
+      paintQuad([top[face]!, top[next]!, bottom[next]!, bottom[face]!], face, towardCamera);
+    }
+  }
+  private drawPortalForeground() {
+    // Repaint only the two camera-facing shaft walls after billboards. This is
+    // the cutaway edge that makes a falling actor disappear inside the tunnel.
+    for (let index = 0; index < this.portalForeground.length; index++) {
+      const color = this.portalForeground[index];
+      if (color) this.pixels[index] = color;
     }
   }
   private drawWalls(now: number) {
@@ -364,16 +483,34 @@ export class RaycastRenderer {
         const previous = this.snakeMotion.get(enemy.id);
         const moved = previous && Math.hypot(enemy.x - previous.x, enemy.y - previous.y) > .01;
         const movedAt = moved ? now : previous?.movedAt ?? -Infinity;
+        const headingX = enemy.heading?.x ?? enemy.facing;
+        const headingY = enemy.heading?.y ?? 0;
+        const headingChanged = previous
+          ? previous.headingX * headingX + previous.headingY * headingY < .9995
+          : false;
+        const turnedAt = headingChanged ? now : previous?.turnedAt ?? -Infinity;
+        const turning = now - turnedAt < 100;
         moving = now - movedAt < 100;
-        this.snakeMotion.set(enemy.id, { x: enemy.x, y: enemy.y, movedAt });
+        this.snakeMotion.set(enemy.id, { x: enemy.x, y: enemy.y, headingX, headingY, movedAt, turnedAt });
         if (enemy.attacking) {
           const startedAt = this.snakeAttackStartedAt.get(enemy.id) ?? now;
           this.snakeAttackStartedAt.set(enemy.id, startedAt);
+          this.snakeTurnStartedAt.delete(enemy.id);
           const sprite = addActor(enemy, 'snake-attack', false);
           sprite.frame = Math.min(7, Math.floor((now - startedAt) / 900 * 8));
           continue;
         }
         this.snakeAttackStartedAt.delete(enemy.id);
+        if (turning) {
+          const startedAt = this.snakeTurnStartedAt.get(enemy.id) ?? now;
+          this.snakeTurnStartedAt.set(enemy.id, startedAt);
+          const sprite = addActor(enemy, 'snake-attack', false);
+          // Turning only uses the upright opening poses from bitestand. The
+          // actual strike restarts the full clip from frame zero above.
+          sprite.frame = Math.min(2, Math.floor((now - startedAt) / 90));
+          continue;
+        }
+        this.snakeTurnStartedAt.delete(enemy.id);
       }
       if (kind === 'spider' && enemy.surface && enemy.surface !== 'floor') {
         spiderIds.add(enemy.id);
@@ -398,9 +535,18 @@ export class RaycastRenderer {
     const snakeIds = new Set(snap.enemies.filter(enemy => enemy.kind === 'snake').map(enemy => enemy.id));
     for (const id of this.snakeMotion.keys()) if (!snakeIds.has(id)) this.snakeMotion.delete(id);
     for (const id of this.snakeAttackStartedAt.keys()) if (!snakeIds.has(id)) this.snakeAttackStartedAt.delete(id);
+    for (const id of this.snakeTurnStartedAt.keys()) if (!snakeIds.has(id)) this.snakeTurnStartedAt.delete(id);
     for (const corpse of snap.corpses) if (!corpse.eaten) addActor({ ...corpse, altitude: 0 }, `${corpse.kind ?? 'hellhound'}-dead` as keyof typeof SPRITE_META, false);
-    if (!snap.dead) addActor({ ...snap.player, heading: snap.playerHeading }, 'player', Math.hypot(snap.player.x - this.previousPlayerX, snap.player.y - this.previousPlayerY) > .05);
+    let playerSprite: Billboard | undefined;
+    if (!snap.dead) playerSprite = addActor({
+      ...snap.player,
+      heading: snap.playerHeading,
+      altitude: -snap.dungeonPortal.fallProgress * 5.5,
+    }, 'player', Math.hypot(snap.player.x - this.previousPlayerX, snap.player.y - this.previousPlayerY) > .05);
     else addActor({ ...snap.player, altitude: 0 }, 'player-dead', false);
+    if (playerSprite && snap.dungeonPortal.fallProgress > 0) {
+      playerSprite.span *= 1 - snap.dungeonPortal.fallProgress * .48;
+    }
     if (snap.playerEating && !snap.dead) {
       this.eatingStartedAt ??= now;
       const player = sprites.find(sprite => sprite.image === 'player');
@@ -437,7 +583,8 @@ export class RaycastRenderer {
     for (const sprite of sprites) sprite.depth = (sprite.x - this.cameraX) * this.forwardX + (sprite.y - this.cameraY) * this.forwardY;
     sprites.sort((a, b) => b.depth! - a.depth!);
     // Ground shadows are flattened cached sprites; they do not cast extra rays.
-    for (const sprite of sprites) if (sprite.image in SPRITE_META && !['angel', 'gem', 'spider-wall'].includes(sprite.image))
+    for (const sprite of sprites) if (sprite.image in SPRITE_META && !['angel', 'gem', 'spider-wall'].includes(sprite.image)
+      && !(sprite.image.startsWith('player') && snap.dungeonPortal.fallProgress > 0))
       this.drawBillboard({ ...sprite, image: 'shadow', span: sprite.span * .6, z: 1, frame: 0, direction: 0 });
     for (const sprite of sprites) this.drawBillboard(sprite);
   }
@@ -465,6 +612,8 @@ export class RaycastRenderer {
       for (let y = y0; y < y1; y++) {
         const sy = sprite.frame * frameSize + Math.min(frameSize - 1, Math.max(0, Math.floor((y - top) / size * frameSize)));
         const pixel = image.data[sy * image.width + sx]!;
+        if (sprite.image.startsWith('player') && this.portalFallProgress > 0
+            && !this.portalOpeningMask[y * this.width + x]) continue;
         if ((pixel >>> 24) > 100) this.pixels[y * this.width + x] = sprite.image === 'shadow'
           ? shade(this.pixels[y * this.width + x]!, .6) : shade(pixel, light);
       }
