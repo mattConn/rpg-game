@@ -131,10 +131,12 @@ export let DUNGEON_SEED = 0x574f4c46;
 export interface EditorDungeonEntity {
   id: string;
   type: "player" | "hellhound" | "bat" | "spider" | "gargoyle" | "snake"
-    | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue";
+    | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue"
+    | "gate" | "gate-button";
   x: number;
   y: number;
   facing: number;
+  label?: string;
 }
 export interface EditorDungeonConfig {
   version: 1;
@@ -146,6 +148,14 @@ export interface EditorDungeonConfig {
 }
 /** Present only when the real game was launched from the level editor. */
 export let EDITOR_DUNGEON: EditorDungeonConfig | null = null;
+export interface EditorGateDefinition {
+  id: string; label: string; x: number; y: number; vertical: boolean;
+}
+export interface EditorButtonDefinition {
+  id: string; label: string; position: Point;
+}
+export let EDITOR_GATES: readonly EditorGateDefinition[] = [];
+export let EDITOR_BUTTONS: readonly EditorButtonDefinition[] = [];
 /** One safe spawn chamber followed by six procedurally populated rooms. */
 const ROOM_COUNT = 7;
 const PORTAL_ROOM_INDEX = ROOM_COUNT - 1;
@@ -446,6 +456,8 @@ export function pressurePlateNearConnection(roomIndex: number): DungeonConnectio
 /** Rebuild every derived layout value before constructing the stage/game. */
 export function configureDungeon(seed: number): void {
   EDITOR_DUNGEON = null;
+  EDITOR_GATES = [];
+  EDITOR_BUTTONS = [];
   BOARD_REGION.col = 0;
   BOARD_REGION.row = 0;
   BOARD_REGION.cols = GRID_COLS;
@@ -527,6 +539,7 @@ export function configureEditorDungeon(config: EditorDungeonConfig): void {
   const player = config.entities.find((entity) => entity.type === "player");
   const fallback = walkable[0] ?? { x: 0, y: 0 };
   const editorCell = (coordinate: number) => coordinate * EDITOR_TILE_CELLS + Math.floor(EDITOR_TILE_CELLS / 2);
+  const editorPosition = (x: number, y: number) => cellCenter({ col: editorCell(x), row: editorCell(y) });
   PLAYER_START.col = editorCell(player?.x ?? fallback.x);
   PLAYER_START.row = editorCell(player?.y ?? fallback.y);
   const enemyKinds = new Set(["hellhound", "bat", "spider", "gargoyle", "snake"]);
@@ -537,6 +550,62 @@ export function configureEditorDungeon(config: EditorDungeonConfig): void {
   }));
   PRESSURE_PLATE_ROOMS = [];
   PRESSURE_PLATES = [];
+  const walkableKeys = new Set(walkable.map((tile) => `${tile.x},${tile.y}`));
+  const wallKeys = new Set(config.tiles.filter((tile) => tile.type === "wall").map((tile) => `${tile.x},${tile.y}`));
+  const gateEntities = config.entities.filter((entity) => entity.type === "gate" && /^[0-9A-Za-z]$/.test(entity.label ?? ""));
+  const gateAt = new Map(gateEntities.map((gate) => [`${gate.x},${gate.y}`, gate]));
+  const gateOrientations = new Map<string, boolean>();
+  const visitedGates = new Set<string>();
+  for (const first of gateEntities) {
+    if (visitedGates.has(first.id)) continue;
+    const assembly: EditorDungeonEntity[] = [];
+    const pending = [first];
+    visitedGates.add(first.id);
+    while (pending.length > 0) {
+      const gate = pending.pop()!;
+      assembly.push(gate);
+      for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+        const neighbour = gateAt.get(`${gate.x + dx},${gate.y + dy}`);
+        if (neighbour && !visitedGates.has(neighbour.id)) { visitedGates.add(neighbour.id); pending.push(neighbour); }
+      }
+    }
+    const xs = assembly.map((gate) => gate.x), ys = assembly.map((gate) => gate.y);
+    const xSpan = Math.max(...xs) - Math.min(...xs);
+    const ySpan = Math.max(...ys) - Math.min(...ys);
+    let vertical: boolean;
+    if (xSpan !== ySpan) {
+      // A multi-tile gate occupies one continuous wall plane: north/south
+      // neighbours share x, while east/west neighbours share y.
+      vertical = ySpan > xSpan;
+    } else {
+      const verticalWalls = assembly.reduce((sum, gate) => sum
+        + Number(wallKeys.has(`${gate.x},${gate.y - 1}`)) + Number(wallKeys.has(`${gate.x},${gate.y + 1}`)), 0);
+      const horizontalWalls = assembly.reduce((sum, gate) => sum
+        + Number(wallKeys.has(`${gate.x - 1},${gate.y}`)) + Number(wallKeys.has(`${gate.x + 1},${gate.y}`)), 0);
+      const horizontalFloor = assembly.reduce((sum, gate) => sum
+        + Number(walkableKeys.has(`${gate.x - 1},${gate.y}`)) + Number(walkableKeys.has(`${gate.x + 1},${gate.y}`)), 0);
+      const verticalFloor = assembly.reduce((sum, gate) => sum
+        + Number(walkableKeys.has(`${gate.x},${gate.y - 1}`)) + Number(walkableKeys.has(`${gate.x},${gate.y + 1}`)), 0);
+      vertical = verticalWalls !== horizontalWalls ? verticalWalls > horizontalWalls : horizontalFloor >= verticalFloor;
+    }
+    for (const gate of assembly) gateOrientations.set(gate.id, vertical);
+  }
+  EDITOR_GATES = gateEntities.map((entity) => {
+    const horizontal = Number(walkableKeys.has(`${entity.x - 1},${entity.y}`)) + Number(walkableKeys.has(`${entity.x + 1},${entity.y}`));
+    const verticalNeighbours = Number(walkableKeys.has(`${entity.x},${entity.y - 1}`)) + Number(walkableKeys.has(`${entity.x},${entity.y + 1}`));
+    const wallsAlongVerticalPlane = Number(wallKeys.has(`${entity.x},${entity.y - 1}`)) + Number(wallKeys.has(`${entity.x},${entity.y + 1}`));
+    const wallsAlongHorizontalPlane = Number(wallKeys.has(`${entity.x - 1},${entity.y}`)) + Number(wallKeys.has(`${entity.x + 1},${entity.y}`));
+    const position = editorPosition(entity.x, entity.y);
+    // A gate fills a missing section of wall, so the wall axis wins. Only use
+    // corridor flow when the authored opening has no immediately adjacent wall.
+    const vertical = gateOrientations.get(entity.id) ?? (wallsAlongVerticalPlane !== wallsAlongHorizontalPlane
+      ? wallsAlongVerticalPlane > wallsAlongHorizontalPlane
+      : horizontal >= verticalNeighbours);
+    return { id: entity.id, label: entity.label!, x: position.x, y: position.y, vertical };
+  });
+  EDITOR_BUTTONS = config.entities.filter((entity) => entity.type === "gate-button" && /^[0-9A-Za-z]$/.test(entity.label ?? "")).map((entity) => ({
+    id: entity.id, label: entity.label!, position: editorPosition(entity.x, entity.y),
+  }));
   SPIKE_TRAP_ROOM = null;
   DUNGEON_PORTAL = {
     roomIndex: 0, side: "south", exitRegion: BOARD_REGION,
@@ -886,6 +955,8 @@ export interface TacticsSnapshot extends GameSnapshot {
   /** Unique simulation instance for deduplicating persistent floor statistics. */
   floorRunId: string;
   pressurePlates: Array<{ id: string; roomIndex: number; connectionIndex: number; active: boolean }>;
+  editorGates: Array<{ id: string; label: string; closed: boolean }>;
+  editorButtons: Array<{ id: string; label: string; active: boolean }>;
   spikeTrap: { roomIndex: number; active: boolean } | null;
   dungeonPortal: { roomIndex: number; side: ConnectionSide; unlocked: boolean; fallProgress: number };
   purpleGem: { x: number; y: number; destroyed: boolean };

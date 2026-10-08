@@ -1,9 +1,12 @@
+import { editorDungeonSeed } from "../shared/editor-seed.js";
+
 type TileType = "void" | "floor" | "wall" | "doorway";
 type EntityType = "player" | "hellhound" | "bat" | "spider" | "gargoyle" | "snake"
-  | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue";
+  | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue"
+  | "gate" | "gate-button";
 type ToolType = TileType | EntityType | "erase";
 
-interface PlacedEntity { id: string; type: EntityType; x: number; y: number; facing: number }
+interface PlacedEntity { id: string; type: EntityType; x: number; y: number; facing: number; label?: string }
 interface LevelData {
   version: 1;
   name: string;
@@ -16,44 +19,42 @@ interface LevelData {
 interface ToolDefinition { type: ToolType; label: string; icon: string; group: "tile" | "entity" | "object" }
 
 const tools: ToolDefinition[] = [
-  { type: "floor", label: "Stone floor", icon: "▦", group: "tile" },
-  { type: "wall", label: "Stone wall", icon: "▩", group: "tile" },
-  { type: "doorway", label: "Doorway", icon: "▯", group: "tile" },
-  { type: "void", label: "Void", icon: "■", group: "tile" },
+  { type: "floor", label: "Floor tile", icon: "◇", group: "tile" },
+  { type: "wall", label: "Wall block", icon: "◆", group: "tile" },
   { type: "erase", label: "Erase", icon: "⌫", group: "tile" },
-  { type: "player", label: "Player spawn", icon: "◆", group: "entity" },
-  { type: "hellhound", label: "Hellhound", icon: "◢", group: "entity" },
-  { type: "bat", label: "Bat", icon: "⌁", group: "entity" },
-  { type: "spider", label: "Spider", icon: "✳", group: "entity" },
-  { type: "gargoyle", label: "Gargoyle", icon: "♜", group: "entity" },
-  { type: "snake", label: "Snake", icon: "≈", group: "entity" },
-  { type: "purple-gem", label: "Purple gem", icon: "♦", group: "object" },
-  { type: "pressure-plate", label: "Pressure plate", icon: "▣", group: "object" },
-  { type: "portal-exit", label: "Dungeon exit", icon: "◎", group: "object" },
-  { type: "torch", label: "Wall torch", icon: "♨", group: "object" },
-  { type: "boulder", label: "Boulder", icon: "●", group: "object" },
-  { type: "angel-statue", label: "Angel statue", icon: "♰", group: "object" },
+  { type: "player", label: "Player spawn", icon: "▲", group: "entity" },
+  { type: "gate", label: "Gate", icon: "▥", group: "object" },
+  { type: "gate-button", label: "Gate button", icon: "◉", group: "object" },
 ];
 
 const entityTypes = new Set<EntityType>(tools.filter((tool) => tool.group !== "tile").map((tool) => tool.type as EntityType));
 const canvas = document.querySelector<HTMLCanvasElement>("#editor")!;
 const context = canvas.getContext("2d")!;
+const viewport = document.querySelector<HTMLElement>("#viewport")!;
 const levelName = document.querySelector<HTMLInputElement>("#level-name")!;
-const widthInput = document.querySelector<HTMLInputElement>("#grid-width")!;
-const heightInput = document.querySelector<HTMLInputElement>("#grid-height")!;
 const zoomInput = document.querySelector<HTMLInputElement>("#zoom")!;
 const status = document.querySelector<HTMLElement>("#status")!;
 const coords = document.querySelector<HTMLElement>("#coords")!;
 const counts = document.querySelector<HTMLElement>("#counts")!;
+const seedLabel = document.querySelector<HTMLElement>("#level-seed")!;
+const rotationLabel = document.querySelector<HTMLElement>("#rotation")!;
 const importFile = document.querySelector<HTMLInputElement>("#import-file")!;
+const linkLabel = document.querySelector<HTMLInputElement>("#link-label")!;
+const validLinkLabel = (value: string) => /^[0-9A-Za-z]$/.test(value);
 
-let width = 40;
-let height = 28;
-let cellSize = 28;
+const width = 100;
+const height = 100;
+let cellSize = 12;
+let viewQuarterTurns = 0;
 let tiles: TileType[] = [];
 let entities: PlacedEntity[] = [];
 let selectedTool: ToolType = "floor";
 let drawing = false;
+let panning = false;
+let panX = 0;
+let panY = 0;
+let panPointerX = 0;
+let panPointerY = 0;
 let changedDuringGesture = false;
 let draggedEntityId: string | null = null;
 let sequence = 1;
@@ -67,15 +68,6 @@ const inside = (x: number, y: number) => x >= 0 && y >= 0 && x < width && y < he
 function blankLevel(): void {
   tiles = Array.from({ length: width * height }, () => "void" as TileType);
   entities = [];
-  const left = Math.max(2, Math.floor(width * 0.17));
-  const right = Math.min(width - 3, Math.ceil(width * 0.83));
-  const top = Math.max(2, Math.floor(height * 0.17));
-  const bottom = Math.min(height - 3, Math.ceil(height * 0.83));
-  for (let y = top; y <= bottom; y++) for (let x = left; x <= right; x++) {
-    tiles[tileIndex(x, y)] = x === left || x === right || y === top || y === bottom ? "wall" : "floor";
-  }
-  tiles[tileIndex(Math.floor((left + right) / 2), bottom)] = "doorway";
-  entities.push({ id: `player-${sequence++}`, type: "player", x: Math.floor(width / 2), y: Math.floor(height / 2), facing: 0 });
 }
 
 function serialize(): LevelData {
@@ -102,9 +94,7 @@ function recordHistory(): void {
 function normalizeLevel(value: unknown): LevelData {
   if (!value || typeof value !== "object") throw new Error("The JSON does not contain a level.");
   const raw = value as Partial<LevelData>;
-  const nextWidth = Math.max(8, Math.min(100, Math.round(Number(raw.width))));
-  const nextHeight = Math.max(8, Math.min(100, Math.round(Number(raw.height))));
-  if (!Number.isFinite(nextWidth) || !Number.isFinite(nextHeight) || !Array.isArray(raw.tiles) || !Array.isArray(raw.entities)) {
+  if (!Array.isArray(raw.tiles) || !Array.isArray(raw.entities)) {
     throw new Error("Invalid level dimensions, tiles, or entities.");
   }
   const validTiles = new Set<TileType>(["floor", "wall", "doorway"]);
@@ -112,13 +102,13 @@ function normalizeLevel(value: unknown): LevelData {
     !!tile && Number.isInteger(tile.x) && Number.isInteger(tile.y) && validTiles.has(tile.type));
   const nextEntities = raw.entities.filter((entity): entity is PlacedEntity =>
     !!entity && typeof entity.id === "string" && entityTypes.has(entity.type)
-    && Number.isInteger(entity.x) && Number.isInteger(entity.y));
-  return { version: 1, name: typeof raw.name === "string" ? raw.name : "Imported Dungeon", width: nextWidth, height: nextHeight, tiles: nextTiles, entities: nextEntities };
+    && Number.isInteger(entity.x) && Number.isInteger(entity.y)
+    && ((entity.type !== "gate" && entity.type !== "gate-button") || validLinkLabel(entity.label ?? "")));
+  return { version: 1, name: typeof raw.name === "string" ? raw.name : "Imported Dungeon", width, height, tiles: nextTiles, entities: nextEntities };
 }
 
 function applyLevel(level: LevelData, addHistory = true): void {
-  width = level.width; height = level.height;
-  widthInput.value = String(width); heightInput.value = String(height); levelName.value = level.name;
+  levelName.value = level.name;
   tiles = Array.from({ length: width * height }, () => "void" as TileType);
   for (const tile of level.tiles) if (inside(tile.x, tile.y)) tiles[tileIndex(tile.x, tile.y)] = tile.type;
   entities = level.entities.filter((entity) => inside(entity.x, entity.y)).map((entity) => ({ ...entity }));
@@ -140,89 +130,168 @@ function restoreHistory(index: number): void {
 }
 
 function resizeCanvas(): void {
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = width * cellSize * dpr;
-  canvas.height = height * cellSize * dpr;
-  canvas.style.width = `${width * cellSize}px`;
-  canvas.style.height = `${height * cellSize}px`;
+  // A 100×100 isometric map is already several million pixels when zoomed;
+  // keep one backing pixel per CSS pixel so high-DPI screens stay responsive.
+  const dpr = 1;
+  const size = canvasDimensions();
+  canvas.width = size.width * dpr;
+  canvas.height = size.height * dpr;
+  canvas.style.width = `${size.width}px`;
+  canvas.style.height = `${size.height}px`;
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  applyPan();
   draw();
 }
 
-function drawTile(x: number, y: number, type: TileType): void {
-  const px = x * cellSize, py = y * cellSize;
-  if (type === "floor" || type === "doorway") {
-    context.fillStyle = (x + y) % 2 ? "#343942" : "#30353e";
-    context.fillRect(px, py, cellSize, cellSize);
-    context.strokeStyle = "#484e59";
-    context.strokeRect(px + 2, py + 2, cellSize - 4, cellSize - 4);
-  } else if (type === "wall") {
-    context.fillStyle = "#171b23";
-    context.fillRect(px, py, cellSize, cellSize);
-    context.fillStyle = "#4b5260";
-    context.fillRect(px + 2, py + 3, cellSize - 4, cellSize - 6);
-    context.strokeStyle = "#252a33";
-    context.strokeRect(px + 2, py + 3, cellSize - 4, cellSize - 6);
-    context.beginPath(); context.moveTo(px + cellSize / 2, py + 3); context.lineTo(px + cellSize / 2, py + cellSize - 3); context.stroke();
-  } else {
-    context.fillStyle = "#07090d";
-    context.fillRect(px, py, cellSize, cellSize);
-  }
-  if (type === "doorway") {
-    context.strokeStyle = "#d6a84d"; context.lineWidth = 3;
-    context.strokeRect(px + 4, py + 3, cellSize - 8, cellSize - 5);
-    context.lineWidth = 1;
-  }
-  context.strokeStyle = "rgba(138,147,164,.16)";
-  context.strokeRect(px + .5, py + .5, cellSize - 1, cellSize - 1);
+function applyPan(): void {
+  canvas.style.transform = `translate(${panX}px, ${panY}px)`;
 }
 
-function drawEntity(entity: PlacedEntity): void {
-  const cx = (entity.x + .5) * cellSize, cy = (entity.y + .5) * cellSize;
-  const radius = cellSize * .3;
-  context.save(); context.translate(cx, cy); context.rotate(entity.facing);
-  if (entity.type === "player") {
-    context.fillStyle = "#f0f2f7"; context.strokeStyle = "#ffe13b"; context.lineWidth = 2;
-    context.beginPath(); context.moveTo(radius, 0); context.lineTo(-radius * .7, -radius * .72); context.lineTo(-radius * .45, 0); context.lineTo(-radius * .7, radius * .72); context.closePath(); context.fill(); context.stroke();
-  } else if (entity.type === "hellhound") {
-    context.fillStyle = "#25171a"; context.strokeStyle = "#ff3434"; context.lineWidth = 2;
-    context.beginPath(); context.arc(0, 0, radius, 0, Math.PI * 2); context.fill(); context.stroke();
-    context.fillStyle = "#ff3030"; context.fillRect(radius * .15, -radius * .45, 2, 2); context.fillRect(radius * .15, radius * .3, 2, 2);
-  } else if (entity.type === "bat") {
-    context.fillStyle = "#17121e"; context.strokeStyle = "#9c4fbd";
-    context.beginPath(); context.moveTo(0, 0); context.lineTo(-radius * 1.4, -radius); context.lineTo(-radius, radius * .8); context.lineTo(0, radius * .25); context.lineTo(radius, radius * .8); context.lineTo(radius * 1.4, -radius); context.closePath(); context.fill(); context.stroke();
-  } else if (entity.type === "spider") {
-    context.strokeStyle = "#a27aad"; context.lineWidth = 2;
-    for (const side of [-1, 1]) for (let leg = -2; leg <= 2; leg++) { context.beginPath(); context.moveTo(0, leg * radius * .23); context.lineTo(side * radius * 1.25, leg * radius * .42); context.stroke(); }
-    context.fillStyle = "#211b24"; context.beginPath(); context.arc(0, 0, radius * .7, 0, Math.PI * 2); context.fill();
-  } else if (entity.type === "gargoyle") {
-    context.fillStyle = "#777b84"; context.strokeStyle = "#c1c5cc";
-    context.fillRect(-radius * .65, -radius * .7, radius * 1.3, radius * 1.4); context.strokeRect(-radius * .65, -radius * .7, radius * 1.3, radius * 1.4);
-    context.fillStyle = "#ff1b12"; context.fillRect(radius * .15, -radius * .34, 2, 2); context.fillRect(radius * .15, radius * .22, 2, 2);
-  } else if (entity.type === "snake") {
-    context.strokeStyle = "#9a7448"; context.lineWidth = Math.max(2, radius * .35);
-    context.beginPath(); context.moveTo(-radius, radius * .45); context.bezierCurveTo(-radius * .35, -radius, radius * .25, radius, radius, -radius * .25); context.stroke();
-  } else {
-    const colors: Record<string, string> = { "purple-gem": "#aa3cff", "pressure-plate": "#a98c57", "portal-exit": "#9d38e8", torch: "#ff8a2c", boulder: "#737884", "angel-statue": "#c0c2c8" };
-    const glyphs: Record<string, string> = { "purple-gem": "♦", "pressure-plate": "▣", "portal-exit": "◎", torch: "♨", boulder: "●", "angel-statue": "♰" };
-    context.fillStyle = colors[entity.type]!; context.font = `bold ${Math.round(cellSize * .7)}px Georgia`; context.textAlign = "center"; context.textBaseline = "middle"; context.fillText(glyphs[entity.type]!, 0, 1);
+const tileWidth = () => cellSize * 2;
+const tileHeight = () => cellSize;
+const wallHeight = () => cellSize * 1.55;
+const canvasPadding = () => Math.max(40, cellSize * 2.4);
+const canvasDimensions = () => ({
+  width: (width + height) * tileWidth() / 2 + canvasPadding() * 2,
+  height: (width + height) * tileHeight() / 2 + canvasPadding() * 2 + wallHeight(),
+});
+const gridOrigin = () => ({ x: height * tileWidth() / 2 + canvasPadding(), y: canvasPadding() + wallHeight() });
+const rotateGridPoint = (x: number, y: number) => {
+  switch (viewQuarterTurns) {
+    case 1: return { x: height - y, y: x };
+    case 2: return { x: width - x, y: height - y };
+    case 3: return { x: y, y: width - x };
+    default: return { x, y };
   }
+};
+const unrotateGridPoint = (x: number, y: number) => {
+  switch (viewQuarterTurns) {
+    case 1: return { x: y, y: height - x };
+    case 2: return { x: width - x, y: height - y };
+    case 3: return { x: width - y, y: x };
+    default: return { x, y };
+  }
+};
+const drawOrders = new Map<number, Array<{ x: number; y: number }>>();
+function cellsInDrawOrder(): Array<{ x: number; y: number }> {
+  const cached = drawOrders.get(viewQuarterTurns);
+  if (cached) return cached;
+  const cells = Array.from({ length: width * height }, (_, index) => ({ x: index % width, y: Math.floor(index / width) }));
+  cells.sort((a, b) => {
+    const ar = rotateGridPoint(a.x + .5, a.y + .5), br = rotateGridPoint(b.x + .5, b.y + .5);
+    return ar.x + ar.y - br.x - br.y;
+  });
+  drawOrders.set(viewQuarterTurns, cells);
+  return cells;
+}
+const gridPoint = (x: number, y: number) => {
+  const origin = gridOrigin();
+  const rotated = rotateGridPoint(x, y);
+  return { x: origin.x + (rotated.x - rotated.y) * tileWidth() / 2, y: origin.y + (rotated.x + rotated.y) * tileHeight() / 2 };
+};
+const diamond = (x: number, y: number, lift = 0) => {
+  const centre = gridPoint(x + .5, y + .5);
+  const halfW = tileWidth() / 2, halfH = tileHeight() / 2;
+  return [
+    { x: centre.x, y: centre.y - halfH - lift },
+    { x: centre.x + halfW, y: centre.y - lift },
+    { x: centre.x, y: centre.y + halfH - lift },
+    { x: centre.x - halfW, y: centre.y - lift },
+  ];
+};
+function pathPolygon(points: Array<{ x: number; y: number }>): void {
+  context.beginPath(); context.moveTo(points[0]!.x, points[0]!.y);
+  for (let index = 1; index < points.length; index++) context.lineTo(points[index]!.x, points[index]!.y);
+  context.closePath();
+}
+function pointInPolygon(px: number, py: number, points: Array<{ x: number; y: number }>): boolean {
+  let insidePolygon = false;
+  for (let index = 0, previous = points.length - 1; index < points.length; previous = index++) {
+    const a = points[index]!, b = points[previous]!;
+    if ((a.y > py) !== (b.y > py) && px < (b.x - a.x) * (py - a.y) / (b.y - a.y) + a.x) insidePolygon = !insidePolygon;
+  }
+  return insidePolygon;
+}
+function drawTile(x: number, y: number, type: TileType): void {
+  const base = diamond(x, y);
+  if (type === "wall") {
+    const top = diamond(x, y, wallHeight());
+    context.fillStyle = "#242a34"; pathPolygon([top[3]!, top[2]!, base[2]!, base[3]!]); context.fill();
+    context.fillStyle = "#343c48"; pathPolygon([top[1]!, top[2]!, base[2]!, base[1]!]); context.fill();
+    context.fillStyle = "#596372"; pathPolygon(top); context.fill();
+    context.strokeStyle = "#737f90"; pathPolygon(top); context.stroke();
+    context.strokeStyle = "rgba(10,12,16,.72)";
+    for (const side of [[top[3]!, base[3]!], [top[2]!, base[2]!], [top[1]!, base[1]!]] as const) {
+      context.beginPath(); context.moveTo(side[0].x, side[0].y); context.lineTo(side[1].x, side[1].y); context.stroke();
+    }
+    return;
+  }
+  context.fillStyle = type === "floor" || type === "doorway"
+    ? ((x + y) % 2 ? "#323943" : "#3a424d") : "#0b0e14";
+  pathPolygon(base); context.fill();
+  context.strokeStyle = type === "void" ? "rgba(104,119,142,.22)" : "#596474";
+  pathPolygon(base); context.stroke();
+}
+function drawEntity(entity: PlacedEntity): void {
+  const centre = gridPoint(entity.x + .5, entity.y + .5);
+  if (entity.type === "gate-button") {
+    const base = diamond(entity.x, entity.y, cellSize * .08);
+    context.save();
+    context.fillStyle = "#594719"; context.strokeStyle = "#e3bd44"; context.lineWidth = Math.max(1, cellSize * .12);
+    context.beginPath(); context.ellipse(centre.x, centre.y - cellSize * .08, cellSize * .55, cellSize * .27, 0, 0, Math.PI * 2); context.fill(); context.stroke();
+    context.fillStyle = "#fff3b2"; context.font = `700 ${Math.max(10, cellSize * .85)}px ui-monospace`; context.textAlign = "center"; context.textBaseline = "middle";
+    context.fillText(entity.label ?? "?", centre.x, centre.y - cellSize * .13);
+    context.restore(); void base; return;
+  }
+  if (entity.type === "gate") {
+    context.save(); context.translate(centre.x, centre.y - cellSize * .6);
+    context.strokeStyle = "#b6c0cc"; context.lineWidth = Math.max(2, cellSize * .16);
+    for (let offset = -0.65; offset <= .65; offset += .325) { context.beginPath(); context.moveTo(offset * cellSize, -cellSize * .72); context.lineTo(offset * cellSize, cellSize * .65); context.stroke(); }
+    context.beginPath(); context.moveTo(-cellSize * .78, -cellSize * .65); context.lineTo(cellSize * .78, -cellSize * .65); context.moveTo(-cellSize * .78, cellSize * .58); context.lineTo(cellSize * .78, cellSize * .58); context.stroke();
+    context.fillStyle = "#11151b"; context.strokeStyle = "#e3bd44"; context.lineWidth = 1; context.fillRect(-cellSize * .48, -cellSize * .3, cellSize * .96, cellSize * .75); context.strokeRect(-cellSize * .48, -cellSize * .3, cellSize * .96, cellSize * .75);
+    context.fillStyle = "#fff3b2"; context.font = `700 ${Math.max(10, cellSize * .82)}px ui-monospace`; context.textAlign = "center"; context.textBaseline = "middle"; context.fillText(entity.label ?? "?", 0, cellSize * .08);
+    context.restore(); return;
+  }
+  if (entity.type !== "player") return;
+  const size = cellSize * .48;
+  context.save(); context.translate(centre.x, centre.y - cellSize * .36);
+  context.fillStyle = "rgba(255,213,83,.18)"; context.strokeStyle = "#ffd553"; context.lineWidth = 2;
+  context.beginPath(); context.ellipse(0, cellSize * .34, size * .9, size * .32, 0, 0, Math.PI * 2); context.fill(); context.stroke();
+  context.fillStyle = "#f2f4f7";
+  context.beginPath(); context.moveTo(0, -size); context.lineTo(size * .72, size * .55); context.lineTo(0, size * .25); context.lineTo(-size * .72, size * .55); context.closePath(); context.fill(); context.stroke();
   context.restore();
 }
-
 function draw(): void {
-  context.clearRect(0, 0, width * cellSize, height * cellSize);
-  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) drawTile(x, y, tileAt(x, y));
+  const size = canvasDimensions();
+  context.clearRect(0, 0, size.width, size.height);
+  for (const cell of cellsInDrawOrder()) drawTile(cell.x, cell.y, tileAt(cell.x, cell.y));
   for (const entity of entities) drawEntity(entity);
-  const enemyCount = entities.filter((entity) => ["hellhound", "bat", "spider", "gargoyle", "snake"].includes(entity.type)).length;
-  counts.textContent = `${entities.length} objects · ${enemyCount} enemies`;
+  const level = serialize();
+  counts.textContent = `${level.tiles.length} placed tiles · ${entities.some(entity => entity.type === "player") ? "spawn ready" : "spawn missing"}`;
+  seedLabel.textContent = String(editorDungeonSeed(level));
 }
-
-function cellFromEvent(event: PointerEvent | DragEvent): { x: number; y: number } | null {
+function cellFromEvent(event: Pick<MouseEvent, "clientX" | "clientY">): { x: number; y: number } | null {
   const rect = canvas.getBoundingClientRect();
-  const x = Math.floor((event.clientX - rect.left) / cellSize);
-  const y = Math.floor((event.clientY - rect.top) / cellSize);
-  return inside(x, y) ? { x, y } : null;
+  const px = event.clientX - rect.left, py = event.clientY - rect.top;
+  // Raised wall tops and faces are checked first, from front to back.
+  const wallCells = cellsInDrawOrder()
+    .filter((cell) => tileAt(cell.x, cell.y) === "wall")
+    .reverse();
+  for (const { x, y } of wallCells) {
+    const top = diamond(x, y, wallHeight()), base = diamond(x, y);
+    if (pointInPolygon(px, py, top)
+        || pointInPolygon(px, py, [top[3]!, top[2]!, base[2]!, base[3]!])
+        || pointInPolygon(px, py, [top[1]!, top[2]!, base[2]!, base[1]!])) return { x, y };
+  }
+  const origin = gridOrigin();
+  const diagonalX = (px - origin.x) / (tileWidth() / 2);
+  const diagonalY = (py - origin.y) / (tileHeight() / 2);
+  const viewX = (diagonalX + diagonalY) / 2;
+  const viewY = (diagonalY - diagonalX) / 2;
+  const unrotated = unrotateGridPoint(viewX, viewY);
+  const x = Math.floor(unrotated.x);
+  const y = Math.floor(unrotated.y);
+  return inside(x, y) && pointInPolygon(px, py, diamond(x, y)) ? { x, y } : null;
 }
 
 function placeTool(tool: ToolType, x: number, y: number): boolean {
@@ -240,10 +309,17 @@ function placeTool(tool: ToolType, x: number, y: number): boolean {
     return true;
   }
   const entityType = tool as EntityType;
-  if (tileAt(x, y) === "void") tiles[tileIndex(x, y)] = "floor";
+  const isLinkedObject = entityType === "gate" || entityType === "gate-button";
+  const label = linkLabel.value;
+  if (isLinkedObject && !validLinkLabel(label)) {
+    status.textContent = "Enter one letter or number for the link label";
+    linkLabel.focus();
+    return false;
+  }
+  if (tileAt(x, y) !== "floor" && tileAt(x, y) !== "doorway") tiles[tileIndex(x, y)] = "floor";
   if (entityType === "player") entities = entities.filter((entity) => entity.type !== "player");
   entities = entities.filter((entity) => entity.x !== x || entity.y !== y);
-  entities.push({ id: `${entityType}-${sequence++}`, type: entityType, x, y, facing: 0 });
+  entities.push({ id: `${entityType}-${sequence++}`, type: entityType, x, y, facing: 0, ...(isLinkedObject ? { label } : {}) });
   return true;
 }
 
@@ -251,6 +327,7 @@ function selectTool(tool: ToolType): void {
   selectedTool = tool;
   document.querySelectorAll<HTMLElement>(".tool").forEach((element) => element.classList.toggle("selected", element.dataset.tool === tool));
   status.textContent = tools.find((definition) => definition.type === tool)?.label ?? tool;
+  if (tool === "gate" || tool === "gate-button") linkLabel.focus();
 }
 
 for (const definition of tools) {
@@ -264,6 +341,16 @@ for (const definition of tools) {
 selectTool(selectedTool);
 
 canvas.addEventListener("pointerdown", (event) => {
+  if (event.button === 1 || ((event.ctrlKey || event.metaKey) && event.button === 0)) {
+    event.preventDefault();
+    canvas.setPointerCapture(event.pointerId);
+    panning = true;
+    panPointerX = event.clientX;
+    panPointerY = event.clientY;
+    canvas.classList.add("panning");
+    status.textContent = "Panning view";
+    return;
+  }
   const cell = cellFromEvent(event); if (!cell) return;
   canvas.setPointerCapture(event.pointerId); drawing = true; changedDuringGesture = false;
   const existing = [...entities].reverse().find((entity) => entity.x === cell.x && entity.y === cell.y);
@@ -276,6 +363,14 @@ canvas.addEventListener("pointerdown", (event) => {
 });
 
 canvas.addEventListener("pointermove", (event) => {
+  if (panning) {
+    panX += event.clientX - panPointerX;
+    panY += event.clientY - panPointerY;
+    panPointerX = event.clientX;
+    panPointerY = event.clientY;
+    applyPan();
+    return;
+  }
   const cell = cellFromEvent(event);
   coords.textContent = cell ? `x ${cell.x}, y ${cell.y}` : "—";
   if (!drawing || !cell) return;
@@ -291,9 +386,40 @@ canvas.addEventListener("pointermove", (event) => {
   draw();
 });
 
-const finishGesture = () => { if (changedDuringGesture) recordHistory(); drawing = false; draggedEntityId = null; };
+const finishGesture = () => {
+  if (panning) {
+    panning = false;
+    canvas.classList.remove("panning");
+    status.textContent = tools.find((definition) => definition.type === selectedTool)?.label ?? selectedTool;
+    return;
+  }
+  if (changedDuringGesture) recordHistory(); drawing = false; draggedEntityId = null;
+};
 canvas.addEventListener("pointerup", finishGesture); canvas.addEventListener("pointercancel", finishGesture);
 canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+viewport.addEventListener("wheel", (event) => {
+  event.preventDefault();
+  const before = cellFromEvent(event);
+  const beforePoint = before ? gridPoint(before.x + .5, before.y + .5) : null;
+  const beforeRect = canvas.getBoundingClientRect();
+  const nextSize = Math.max(Number(zoomInput.min), Math.min(Number(zoomInput.max), cellSize + (event.deltaY < 0 ? 2 : -2)));
+  if (nextSize === cellSize) return;
+  cellSize = nextSize;
+  zoomInput.value = String(cellSize);
+  resizeCanvas();
+  if (before && beforePoint) {
+    const afterRect = canvas.getBoundingClientRect();
+    const afterPoint = gridPoint(before.x + .5, before.y + .5);
+    const beforeScreenX = beforeRect.left + beforePoint.x;
+    const beforeScreenY = beforeRect.top + beforePoint.y;
+    const afterScreenX = afterRect.left + afterPoint.x;
+    const afterScreenY = afterRect.top + afterPoint.y;
+    panX += beforeScreenX - afterScreenX;
+    panY += beforeScreenY - afterScreenY;
+    applyPan();
+  }
+  status.textContent = `Zoom ${cellSize}`;
+}, { passive: false });
 canvas.addEventListener("dragover", (event) => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = "copy"; });
 canvas.addEventListener("drop", (event) => {
   event.preventDefault(); const cell = cellFromEvent(event); if (!cell) return;
@@ -302,27 +428,33 @@ canvas.addEventListener("drop", (event) => {
   draw();
 });
 
-document.querySelector("#resize-grid")!.addEventListener("click", () => {
-  const nextWidth = Math.max(8, Math.min(100, Number(widthInput.value) || width));
-  const nextHeight = Math.max(8, Math.min(100, Number(heightInput.value) || height));
-  const oldWidth = width, oldTiles = tiles; width = nextWidth; height = nextHeight;
-  tiles = Array.from({ length: width * height }, (_, index) => {
-    const x = index % width, y = Math.floor(index / width);
-    return x < oldWidth && y < oldTiles.length / oldWidth ? oldTiles[y * oldWidth + x]! : "void";
-  });
-  entities = entities.filter((entity) => inside(entity.x, entity.y));
-  resizeCanvas(); recordHistory();
-});
-
 zoomInput.addEventListener("input", () => { cellSize = Number(zoomInput.value); resizeCanvas(); });
+function rotateView(delta: number): void {
+  viewQuarterTurns = (viewQuarterTurns + delta + 4) % 4;
+  rotationLabel.textContent = viewQuarterTurns === 0 ? "Game view" : `${viewQuarterTurns * 90}°`;
+  draw();
+  status.textContent = viewQuarterTurns === 0 ? "Game camera view" : `View rotated ${viewQuarterTurns * 90}°`;
+}
+document.querySelector("#rotate-left")!.addEventListener("click", () => rotateView(-1));
+document.querySelector("#rotate-right")!.addEventListener("click", () => rotateView(1));
+linkLabel.addEventListener("input", () => {
+  linkLabel.value = [...linkLabel.value].find((character) => /[0-9A-Za-z]/.test(character)) ?? "";
+});
 levelName.addEventListener("change", recordHistory);
 document.querySelector("#undo")!.addEventListener("click", () => restoreHistory(historyIndex - 1));
 document.querySelector("#redo")!.addEventListener("click", () => restoreHistory(historyIndex + 1));
 document.querySelector("#save")!.addEventListener("click", () => { localStorage.setItem("rpg-dungeon-editor-level", snapshot()); status.textContent = "Saved locally"; });
 document.querySelector("#play")!.addEventListener("click", async () => {
   const level = serialize();
+  if (level.tiles.length === 0) { status.textContent = "Place at least one floor tile"; return; }
+  if (!level.entities.some((entity) => entity.type === "player")) { status.textContent = "Place the player spawn first"; return; }
+  const gateLabels = new Set(level.entities.filter((entity) => entity.type === "gate").map((entity) => entity.label));
+  const buttonLabels = new Set(level.entities.filter((entity) => entity.type === "gate-button").map((entity) => entity.label));
+  const orphan = [...new Set([...gateLabels, ...buttonLabels])].find((label) => !gateLabels.has(label) || !buttonLabels.has(label));
+  if (orphan) { status.textContent = `Link ${orphan} needs both a gate and a button`; return; }
+  const seed = editorDungeonSeed(level);
   const gameWindow = window.open("about:blank", "_blank");
-  status.textContent = "Starting game…";
+  status.textContent = `Starting seed ${seed}…`;
   try {
     const response = await fetch("/api/editor-level", {
       method: "POST",
@@ -330,11 +462,12 @@ document.querySelector("#play")!.addEventListener("click", async () => {
       body: JSON.stringify(level),
     });
     if (!response.ok) throw new Error(`Server returned ${response.status}`);
-    const { id } = await response.json() as { id: string };
+    const { id, seed: serverSeed } = await response.json() as { id: string; seed: number };
     localStorage.setItem(`rpg-editor-level:${id}`, JSON.stringify(level));
-    if (gameWindow) gameWindow.location.href = `/?editor=${encodeURIComponent(id)}`;
-    else window.location.href = `/?editor=${encodeURIComponent(id)}`;
-    status.textContent = "Opened in the game";
+    const gameUrl = `/?seed=${serverSeed}&editor=${encodeURIComponent(id)}`;
+    if (gameWindow) gameWindow.location.href = gameUrl;
+    else window.location.href = gameUrl;
+    status.textContent = `Playing seed ${serverSeed}`;
   } catch (error) {
     gameWindow?.close();
     status.textContent = error instanceof Error ? error.message : "Could not start game";
@@ -363,6 +496,10 @@ document.querySelector("#clear")!.addEventListener("click", () => {
   tiles = Array.from({ length: width * height }, () => "void" as TileType); entities = []; draw(); recordHistory(); status.textContent = "Level cleared";
 });
 window.addEventListener("keydown", (event) => {
+  if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+  if (event.key.toLowerCase() === "q") { event.preventDefault(); rotateView(-1); return; }
+  if (event.key.toLowerCase() === "e") { event.preventDefault(); rotateView(1); return; }
+  if (event.key.toLowerCase() === "r") { event.preventDefault(); viewQuarterTurns = 0; rotationLabel.textContent = "Game view"; draw(); status.textContent = "Game camera view restored"; return; }
   if (!(event.ctrlKey || event.metaKey)) return;
   if (event.key.toLowerCase() === "z") { event.preventDefault(); restoreHistory(historyIndex + (event.shiftKey ? 1 : -1)); }
   if (event.key.toLowerCase() === "y") { event.preventDefault(); restoreHistory(historyIndex + 1); }

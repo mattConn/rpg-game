@@ -1,5 +1,5 @@
 import { WORLD_HEIGHT } from '../../../src/shared/constants.js';
-import { ARENA_X, ARENA_Y, TILE_PX, DUNGEON_PORTAL, PRESSURE_PLATES, ROOM_REGIONS, HALL_REGIONS, DUNGEON_ENEMIES, EDITOR_DUNGEON, regionCentre, type TacticsSnapshot } from '../shared/tactics.js';
+import { ARENA_X, ARENA_Y, TILE_PX, DUNGEON_PORTAL, EDITOR_BUTTONS, PRESSURE_PLATES, ROOM_REGIONS, HALL_REGIONS, DUNGEON_ENEMIES, EDITOR_DUNGEON, regionCentre, type TacticsSnapshot } from '../shared/tactics.js';
 import { RaycastWorld, castCameraRay, type RayHit } from './raycast-world.js';
 import { playerBiteFrame } from './attack-presentation.js';
 import { buildBarrierFrames, BARRIER_WIDTH, BARRIER_HEIGHT } from './barrier-texture.js';
@@ -153,7 +153,7 @@ export class RaycastRenderer {
       { x: this.cameraX + this.forwardX * this.cameraDistance, y: this.cameraY + this.forwardY * this.cameraDistance }).distance >= distance - 2;
   }
   private updateMarkers(snap: TacticsSnapshot) {
-    const key = snap.pressurePlates.map(p => +p.active).join('') + ':' + snap.spikeTrap?.active + ':' + snap.purpleGem.destroyed;
+    const key = snap.pressurePlates.map(p => +p.active).join('') + ':' + snap.editorButtons.map(p => +p.active).join('') + ':' + snap.spikeTrap?.active + ':' + snap.purpleGem.destroyed;
     if (key === this.markerKey) return; this.markerKey = key; this.markers.fill(0);
     const grid = this.world.grid;
     const mark = (x: number, y: number, radius: number, type: number) => {
@@ -165,6 +165,7 @@ export class RaycastRenderer {
     };
     if (!EDITOR_DUNGEON) mark(DUNGEON_PORTAL.holePosition.x, DUNGEON_PORTAL.holePosition.y, PORTAL_HALF_SIZE, 3);
     for (const plate of PRESSURE_PLATES) mark(plate.position.x, plate.position.y, 12, snap.pressurePlates.find(p => p.id === plate.id)?.active ? 2 : 1);
+    for (const button of EDITOR_BUTTONS) mark(button.position.x, button.position.y, 12, snap.editorButtons.find(p => p.id === button.id)?.active ? 2 : 1);
     if (snap.spikeTrap) {
       const room = ROOM_REGIONS[snap.spikeTrap.roomIndex];
       if (room) { const center = regionCentre(room); mark(center.x, center.y, 14, snap.spikeTrap.active ? 2 : 1); }

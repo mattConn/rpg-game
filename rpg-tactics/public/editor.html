@@ -8,7 +8,7 @@
       :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
       * { box-sizing: border-box; }
       html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d12; color: #e8e9ed; }
-      body { display: grid; grid-template-columns: 248px minmax(0, 1fr); }
+      body { display: grid; grid-template-columns: 230px minmax(0, 1fr); }
       aside { overflow-y: auto; padding: 14px; border-right: 1px solid #303541; background: #12151c; }
       h1 { margin: 0 0 4px; font: 700 20px Georgia, serif; color: #d5b76d; }
       .sub { margin: 0 0 16px; color: #9299a8; font-size: 12px; line-height: 1.4; }
@@ -19,20 +19,23 @@
       .tool.selected { border-color: #d5b76d; box-shadow: inset 0 0 0 1px #d5b76d; background: #292619; }
       .tool .icon { display: block; height: 25px; font-size: 20px; line-height: 25px; }
       .tool .label { display: block; margin-top: 3px; font-size: 11px; }
-      main { min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
-      header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border-bottom: 1px solid #303541; background: #11141a; }
+      main { min-width: 0; height: 100vh; overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr) 31px; }
+      header { position: relative; z-index: 10; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border-bottom: 1px solid #303541; background: #11141a; }
       button, input { height: 32px; border: 1px solid #3b4250; border-radius: 4px; background: #1c212b; color: #e4e6eb; }
       button { padding: 0 12px; cursor: pointer; }
       button:hover { background: #29303d; border-color: #6c768b; }
       button.danger { color: #efaaa5; }
       input[type="text"] { width: 150px; padding: 0 9px; }
+      input.link-label { width: 38px; padding: 0; text-align: center; font: 700 16px ui-monospace, SFMono-Regular, monospace; }
       input[type="number"] { width: 62px; padding: 0 7px; }
       label { display: inline-flex; align-items: center; gap: 5px; color: #aeb4c0; font-size: 12px; }
+      .grid-size { padding: 6px 9px; border: 1px solid #323946; border-radius: 4px; color: #c7ccd6; font: 12px ui-monospace, SFMono-Regular, monospace; }
       .spacer { flex: 1; }
-      #viewport { overflow: auto; position: relative; background-color: #080a0e; background-image: radial-gradient(#1e232d 1px, transparent 1px); background-size: 18px 18px; }
+      #viewport { min-height: 0; overflow: auto; position: relative; z-index: 1; contain: paint; overscroll-behavior: none; background: radial-gradient(circle at 50% 38%, #171d27 0, #0b0e14 44%, #07090d 100%); }
       #canvas-wrap { min-width: 100%; min-height: 100%; display: grid; place-items: center; padding: 64px; }
-      canvas { display: block; box-shadow: 0 0 0 1px #454b58, 0 12px 50px #000; background: #050609; cursor: crosshair; image-rendering: pixelated; }
-      footer { min-height: 31px; display: flex; align-items: center; gap: 18px; padding: 0 12px; border-top: 1px solid #303541; background: #11141a; color: #969dac; font: 12px ui-monospace, SFMono-Regular, monospace; }
+      canvas { display: block; filter: drop-shadow(0 22px 38px #000); cursor: crosshair; image-rendering: pixelated; touch-action: none; }
+      canvas.panning { cursor: grabbing; }
+      footer { position: relative; z-index: 10; height: 31px; min-height: 31px; overflow: hidden; display: flex; align-items: center; gap: 18px; padding: 0 12px; border-top: 1px solid #303541; background: #11141a; color: #969dac; font: 12px ui-monospace, SFMono-Regular, monospace; }
       #status { color: #d5b76d; }
       .hint { margin-left: auto; }
       #import-file { display: none; }
@@ -41,31 +44,34 @@
   <body>
     <aside>
       <h1>Dungeon Editor</h1>
-      <p class="sub">Drag tools onto the map, click to paint, or drag existing units to reposition them.</p>
+      <p class="sub">Build at the same fixed angle as the game camera. Paint a floor, raise walls, place one spawn, then play its deterministic seed.</p>
       <h2>Tiles</h2>
       <div class="palette" id="tile-palette"></div>
-      <h2>Spawns & enemies</h2>
+      <h2>Spawn</h2>
       <div class="palette" id="entity-palette"></div>
-      <h2>Objects</h2>
+      <h2>Gates &amp; Buttons</h2>
+      <label>Link label <input id="link-label" class="link-label" type="text" maxlength="1" pattern="[0-9A-Za-z]" value="A" aria-label="Gate and button link label" /></label>
+      <p class="sub">Use one letter or number. Gates and buttons with the same label are linked.</p>
       <div class="palette" id="object-palette"></div>
     </aside>
     <main>
       <header>
-        <input id="level-name" type="text" value="Untitled Dungeon" aria-label="Level name" />
-        <label>W <input id="grid-width" type="number" min="8" max="100" value="40" /></label>
-        <label>H <input id="grid-height" type="number" min="8" max="100" value="28" /></label>
-        <button id="resize-grid">Resize</button>
+        <input id="level-name" type="text" value="Untitled Room" aria-label="Level name" />
+        <span class="grid-size">100 × 100</span>
         <span class="spacer"></span>
         <button id="undo">Undo</button><button id="redo">Redo</button>
         <button id="save">Save</button><button id="load">Load</button>
         <button id="play">▶ Play</button>
         <button id="export">Export JSON</button><button id="import">Import JSON</button>
         <button id="clear" class="danger">Clear</button>
-        <label>Zoom <input id="zoom" type="range" min="16" max="44" value="28" /></label>
+        <button id="rotate-left" title="Rotate left (Q)">↶</button>
+        <span class="grid-size" id="rotation">Game view</span>
+        <button id="rotate-right" title="Rotate right (E)">↷</button>
+        <label>Zoom <input id="zoom" type="range" min="6" max="40" value="12" /></label>
         <input id="import-file" type="file" accept="application/json,.json" />
       </header>
       <div id="viewport"><div id="canvas-wrap"><canvas id="editor"></canvas></div></div>
-      <footer><span id="status">Ready</span><span id="coords">—</span><span id="counts">—</span><span class="hint">Right-click erases · Ctrl/Cmd+Z undoes</span></footer>
+      <footer><span id="status">Ready</span><span>Seed <strong id="level-seed">—</strong></span><span id="coords">—</span><span id="counts">—</span><span class="hint">Scroll zooms · Q/E rotates · R resets view · Middle/Ctrl-drag pans · Right-click erases</span></footer>
     </main>
     <script src="/editor.js"></script>
   </body>

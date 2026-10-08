@@ -16,6 +16,7 @@ import fastifyStatic from "@fastify/static";
 import { WebSocketServer } from "ws";
 
 import { TacticsGame } from "./game.js";
+import { editorDungeonSeed } from "../shared/editor-seed.js";
 import {
   configureDungeon,
   configureEditorDungeon,
@@ -56,9 +57,10 @@ fastify.post<{ Body: EditorDungeonConfig }>("/api/editor-level", async (request,
   if (!level || level.version !== 1 || !Array.isArray(level.tiles) || !Array.isArray(level.entities)) {
     return reply.code(400).send({ error: "Invalid editor level" });
   }
-  const id = Math.random().toString(36).slice(2, 10);
+  const seed = editorDungeonSeed(level);
+  const id = String(seed);
   editorLevels.set(id, level);
-  return { id };
+  return { id, seed };
 });
 
 // Use noServer mode so Fastify doesn't intercept the upgrade request.

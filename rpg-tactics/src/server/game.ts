@@ -42,7 +42,10 @@ import {
   DUNGEON_CONNECTIONS,
   DUNGEON_ENEMIES,
   DUNGEON_PORTAL,
+  EDITOR_BUTTONS,
   EDITOR_DUNGEON,
+  EDITOR_GATES,
+  EDITOR_TILE_CELLS,
   type DoorId,
   FAR_REGION,
   HALL_REGION,
@@ -334,6 +337,8 @@ export class TacticsGame {
   private doors!: Record<DoorId, boolean>;
   private plateGateStates = new Map<string, boolean>();
   private occupiedPressurePlates = new Set<string>();
+  private editorGateClosed = new Map<string, boolean>();
+  private occupiedEditorButtons = new Set<string>();
   private spikeTrapActive = false;
   private spikePlateOccupied = false;
   private purpleGemDestroyed = false;
@@ -423,6 +428,9 @@ export class TacticsGame {
     this.plateGateStates.clear();
     for (const plate of PRESSURE_PLATES) this.plateGateStates.set(plate.id, false);
     this.occupiedPressurePlates.clear();
+    this.editorGateClosed.clear();
+    for (const gate of EDITOR_GATES) this.editorGateClosed.set(gate.label, true);
+    this.occupiedEditorButtons.clear();
     this.spikeTrapActive = false;
     this.spikePlateOccupied = false;
     this.purpleGemDestroyed = EDITOR_DUNGEON !== null;
@@ -593,6 +601,7 @@ export class TacticsGame {
     // Player movement — continuous, every tick.
     this.movePlayer(dt);
     this.updatePressurePlates();
+    this.updateEditorButtons();
     this.updateSpikeTrap();
 
     // Enemy AI — woken hounds chase and attack, others patrol. The pack picks
@@ -1488,6 +1497,22 @@ export class TacticsGame {
 
   /** A closed room gate blocks the transition between that room and any adjoining hall. */
   private gateBlocksMove(from: Point, to: Point): boolean {
+    if (EDITOR_DUNGEON) {
+      const halfSpan = EDITOR_TILE_CELLS * TILE_PX / 2;
+      return EDITOR_GATES.some((gate) => {
+        if (!this.editorGateClosed.get(gate.label)) return false;
+        const fromAxis = gate.vertical ? from.x : from.y;
+        const toAxis = gate.vertical ? to.x : to.y;
+        const delta = toAxis - fromAxis;
+        if (Math.abs(delta) < 0.001) return false;
+        const plane = gate.vertical ? gate.x : gate.y;
+        const t = (plane - fromAxis) / delta;
+        if (t < 0 || t > 1) return false;
+        const across = gate.vertical ? from.y + (to.y - from.y) * t : from.x + (to.x - from.x) * t;
+        const centre = gate.vertical ? gate.y : gate.x;
+        return across >= centre - halfSpan && across <= centre + halfSpan;
+      });
+    }
     const fromRegion = this.regionOfCell(clampToGrid(from));
     const toRegion = this.regionOfCell(clampToGrid(to));
     if (fromRegion === toRegion) return false;
@@ -1554,6 +1579,21 @@ export class TacticsGame {
         this.plateGateStates.set(plate.id, !this.plateGateStates.get(plate.id));
       } else if (!onPlate) {
         this.occupiedPressurePlates.delete(plate.id);
+      }
+    }
+  }
+
+  /** Each distinct editor button toggles every gate carrying its label. */
+  private updateEditorButtons(): void {
+    const player = this.playerAt();
+    const radius = TILE_PX * 0.9;
+    for (const button of EDITOR_BUTTONS) {
+      const onButton = distance(player, button.position) <= radius;
+      if (onButton && !this.occupiedEditorButtons.has(button.id)) {
+        this.occupiedEditorButtons.add(button.id);
+        this.editorGateClosed.set(button.label, !this.editorGateClosed.get(button.label));
+      } else if (!onButton) {
+        this.occupiedEditorButtons.delete(button.id);
       }
     }
   }
@@ -2444,6 +2484,12 @@ export class TacticsGame {
         roomIndex: plate.roomIndex,
         connectionIndex: plate.connectionIndex,
         active: this.plateGateStates.get(plate.id) ?? false,
+      })),
+      editorGates: EDITOR_GATES.map((gate) => ({
+        id: gate.id, label: gate.label, closed: this.editorGateClosed.get(gate.label) ?? true,
+      })),
+      editorButtons: EDITOR_BUTTONS.map((button) => ({
+        id: button.id, label: button.label, active: this.occupiedEditorButtons.has(button.id),
       })),
       playerHeading: { ...this.playerHeading },
       playerRunning: this.playerRunning,

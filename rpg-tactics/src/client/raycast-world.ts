@@ -1,4 +1,4 @@
-import { ARENA_X, ARENA_Y, TILE_PX, REGIONS, ROOM_REGIONS, DUNGEON_CONNECTIONS, DUNGEON_PORTAL, EDITOR_DUNGEON, PRESSURE_PLATES, regionCentre, type Region, type TacticsSnapshot } from '../shared/tactics.js';
+import { ARENA_X, ARENA_Y, TILE_PX, REGIONS, ROOM_REGIONS, DUNGEON_CONNECTIONS, DUNGEON_PORTAL, EDITOR_DUNGEON, EDITOR_GATES, EDITOR_TILE_CELLS, PRESSURE_PLATES, regionCentre, type Region, type TacticsSnapshot } from '../shared/tactics.js';
 
 export interface RayHit { distance: number; x: number; y: number; side: number; material: number }
 export interface Gate { x: number; y: number; min: number; max: number; vertical: boolean; material: number }
@@ -61,7 +61,7 @@ export class RaycastWorld {
   gates: Gate[] = [];
   private key = '';
   update(snap: TacticsSnapshot): void {
-    const key = snap.pressurePlates.map(p => Number(p.active)).join('') + ':' + snap.dungeonPortal.unlocked;
+    const key = snap.pressurePlates.map(p => Number(p.active)).join('') + ':' + snap.editorGates.map(g => Number(g.closed)).join('') + ':' + snap.dungeonPortal.unlocked;
     if (key === this.key) return;
     this.key = key; this.gates = [];
     for (const state of snap.pressurePlates) {
@@ -70,6 +70,14 @@ export class RaycastWorld {
       const connection = plate && DUNGEON_CONNECTIONS[plate.connectionIndex];
       const room = plate && ROOM_REGIONS[plate.roomIndex];
       if (room && connection) this.addGate(room, connection.hall, 1);
+    }
+    const halfSpan = EDITOR_TILE_CELLS * TILE_PX / 2;
+    for (const state of snap.editorGates) {
+      if (!state.closed) continue;
+      const gate = EDITOR_GATES.find(candidate => candidate.id === state.id);
+      if (!gate) continue;
+      const centre = gate.vertical ? gate.y : gate.x;
+      this.gates.push({ x: gate.x, y: gate.y, vertical: gate.vertical, material: 1, min: centre - halfSpan, max: centre + halfSpan });
     }
     if (!EDITOR_DUNGEON && !snap.dungeonPortal.unlocked) {
       const room = ROOM_REGIONS[DUNGEON_PORTAL.roomIndex];
