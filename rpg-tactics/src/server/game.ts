@@ -44,6 +44,7 @@ import {
   DUNGEON_PORTAL,
   EDITOR_BUTTONS,
   EDITOR_DUNGEON,
+  EDITOR_EXIT,
   EDITOR_GATES,
   EDITOR_TILE_CELLS,
   type DoorId,
@@ -593,7 +594,8 @@ export class TacticsGame {
       this.player.pos = { x: this.player.x, y: this.player.y };
       this.player.cell = clampToGrid(this.player.pos);
       if (this.simNow - this.dungeonFallStartedAt >= 1100) {
-        this.nextDungeonSeed ??= (Math.floor(Math.random() * 0xffffffff) >>> 0) || 1;
+        this.nextDungeonSeed ??= EDITOR_EXIT?.destinationSeed
+          ?? ((Math.floor(Math.random() * 0xffffffff) >>> 0) || 1);
       }
       return;
     }
@@ -699,7 +701,7 @@ export class TacticsGame {
     if (!EDITOR_DUNGEON && !this.purpleGemDestroyed &&
         ((fromRegion === DUNGEON_PORTAL.exitRegion && targetRegion === portalRoom) ||
          (fromRegion === portalRoom && targetRegion === DUNGEON_PORTAL.exitRegion))) return false;
-    if (!EDITOR_DUNGEON && targetRegion === portalRoom && this.purpleGemDestroyed) {
+    if ((!EDITOR_DUNGEON || EDITOR_EXIT) && targetRegion === portalRoom && this.purpleGemDestroyed) {
       if (this.insideDungeonHole(target)) {
         this.dungeonFallStartedAt = this.simNow;
         this.moveTarget = null;
@@ -1629,7 +1631,7 @@ export class TacticsGame {
 
   /** Square test matching the visible shaft opening; crossing its ledge begins a fall. */
   private insideDungeonHole(point: Point): boolean {
-    if (EDITOR_DUNGEON) return false;
+    if (EDITOR_DUNGEON && !EDITOR_EXIT) return false;
     // Trigger slightly before the actor's centre reaches the geometric lip:
     // the wolf has a footprint, and otherwise its front half can visibly walk
     // over empty space while its origin is still supported by the floor.

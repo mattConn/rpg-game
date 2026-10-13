@@ -27,6 +27,9 @@
       button.danger { color: #efaaa5; }
       input[type="text"] { width: 150px; padding: 0 9px; }
       input.link-label { width: 38px; padding: 0; text-align: center; font: 700 16px ui-monospace, SFMono-Regular, monospace; }
+      select { height: 32px; min-width: 64px; border: 1px solid #3b4250; border-radius: 4px; background: #1c212b; color: #e4e6eb; padding: 0 7px; }
+      .room-controls { display: grid; grid-template-columns: auto 1fr; gap: 7px; align-items: center; }
+      .room-controls button { padding: 0 8px; }
       input[type="number"] { width: 62px; padding: 0 7px; }
       label { display: inline-flex; align-items: center; gap: 5px; color: #aeb4c0; font-size: 12px; }
       .grid-size { padding: 6px 9px; border: 1px solid #323946; border-radius: 4px; color: #c7ccd6; font: 12px ui-monospace, SFMono-Regular, monospace; }
@@ -44,14 +47,21 @@
   <body>
     <aside>
       <h1>Dungeon Editor</h1>
-      <p class="sub">Build at the same fixed angle as the game camera. Paint a floor, raise walls, place one spawn, then play its deterministic seed.</p>
+      <p class="sub">Build connected rooms at the same angle as the game camera. Each exit hole links to the room carrying its label.</p>
+      <h2>Rooms</h2>
+      <div class="room-controls">
+        <label>Room <input id="room-label" class="link-label" type="text" maxlength="1" pattern="[0-9A-Za-z]" value="A" aria-label="Current room label" /></label>
+        <select id="room-select" aria-label="Saved rooms"></select>
+        <button id="new-room">New Room</button>
+        <button id="save-room">Save Room</button>
+      </div>
       <h2>Tiles</h2>
       <div class="palette" id="tile-palette"></div>
       <h2>Spawn</h2>
       <div class="palette" id="entity-palette"></div>
       <h2>Gates &amp; Buttons</h2>
       <label>Link label <input id="link-label" class="link-label" type="text" maxlength="1" pattern="[0-9A-Za-z]" value="A" aria-label="Gate and button link label" /></label>
-      <p class="sub">Use one letter or number. Gates and buttons with the same label are linked.</p>
+      <p class="sub">Use one letter or number. Gates and buttons with the same label are linked. An exit label names its destination room.</p>
       <div class="palette" id="object-palette"></div>
     </aside>
     <main>

@@ -6,7 +6,7 @@ type EntityType = "player" | "hellhound" | "bat" | "spider" | "gargoyle" | "snak
   | "gate" | "gate-button";
 type ToolType = TileType | EntityType | "erase";
 
-interface PlacedEntity { id: string; type: EntityType; x: number; y: number; facing: number; label?: string }
+interface PlacedEntity { id: string; type: EntityType; x: number; y: number; facing: number; label?: string; destinationSeed?: number }
 interface LevelData {
   version: 1;
   name: string;
@@ -14,6 +14,11 @@ interface LevelData {
   height: number;
   tiles: Array<{ x: number; y: number; type: Exclude<TileType, "void"> }>;
   entities: PlacedEntity[];
+}
+interface ProjectData {
+  version: 1;
+  activeRoom: string;
+  rooms: Record<string, LevelData>;
 }
 
 interface ToolDefinition { type: ToolType; label: string; icon: string; group: "tile" | "entity" | "object" }
@@ -25,6 +30,7 @@ const tools: ToolDefinition[] = [
   { type: "player", label: "Player spawn", icon: "▲", group: "entity" },
   { type: "gate", label: "Gate", icon: "▥", group: "object" },
   { type: "gate-button", label: "Gate button", icon: "◉", group: "object" },
+  { type: "portal-exit", label: "Exit hole", icon: "▣", group: "object" },
 ];
 
 const entityTypes = new Set<EntityType>(tools.filter((tool) => tool.group !== "tile").map((tool) => tool.type as EntityType));
@@ -40,7 +46,10 @@ const seedLabel = document.querySelector<HTMLElement>("#level-seed")!;
 const rotationLabel = document.querySelector<HTMLElement>("#rotation")!;
 const importFile = document.querySelector<HTMLInputElement>("#import-file")!;
 const linkLabel = document.querySelector<HTMLInputElement>("#link-label")!;
+const roomLabel = document.querySelector<HTMLInputElement>("#room-label")!;
+const roomSelect = document.querySelector<HTMLSelectElement>("#room-select")!;
 const validLinkLabel = (value: string) => /^[0-9A-Za-z]$/.test(value);
+const projectStorageKey = "rpg-dungeon-editor-project";
 
 const width = 100;
 const height = 100;
@@ -60,6 +69,8 @@ let draggedEntityId: string | null = null;
 let sequence = 1;
 let history: string[] = [];
 let historyIndex = -1;
+let activeRoomLabel = "A";
+let rooms = new Map<string, LevelData>();
 
 const tileIndex = (x: number, y: number) => y * width + x;
 const tileAt = (x: number, y: number) => tiles[tileIndex(x, y)] ?? "void";
@@ -68,6 +79,66 @@ const inside = (x: number, y: number) => x >= 0 && y >= 0 && x < width && y < he
 function blankLevel(): void {
   tiles = Array.from({ length: width * height }, () => "void" as TileType);
   entities = [];
+}
+
+function cloneLevel(level: LevelData): LevelData { return JSON.parse(JSON.stringify(level)) as LevelData; }
+
+function projectData(): ProjectData {
+  return { version: 1, activeRoom: activeRoomLabel, rooms: Object.fromEntries([...rooms].map(([label, level]) => [label, cloneLevel(level)])) };
+}
+
+function refreshRoomSelect(): void {
+  roomSelect.replaceChildren(...[...rooms.keys()].sort().map((label) => {
+    const option = document.createElement("option"); option.value = label; option.textContent = label; return option;
+  }));
+  roomSelect.value = activeRoomLabel;
+  roomLabel.value = activeRoomLabel;
+}
+
+function storeCurrentRoom(label = activeRoomLabel): boolean {
+  if (!validLinkLabel(label)) { status.textContent = "Room label must be one letter or number"; roomLabel.focus(); return false; }
+  const previous = activeRoomLabel;
+  activeRoomLabel = label;
+  if (previous !== label) rooms.delete(previous);
+  rooms.set(label, cloneLevel(serialize()));
+  refreshRoomSelect();
+  return true;
+}
+
+async function saveProject(): Promise<boolean> {
+  if (!storeCurrentRoom(roomLabel.value)) return false;
+  const project = projectData();
+  localStorage.setItem(projectStorageKey, JSON.stringify(project));
+  // Keep the original key updated so older editor builds can still recover the active room.
+  localStorage.setItem("rpg-dungeon-editor-level", snapshot());
+  try {
+    const response = await fetch("/api/editor-project", {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(project),
+    });
+    if (!response.ok) throw new Error(`Server returned ${response.status}`);
+    return true;
+  } catch (error) {
+    status.textContent = `Saved in browser only; disk save failed: ${error instanceof Error ? error.message : error}`;
+    return false;
+  }
+}
+
+function resetRoomHistory(): void {
+  history = []; historyIndex = -1; recordHistory();
+}
+
+function openRoom(label: string): void {
+  const room = rooms.get(label); if (!room) return;
+  activeRoomLabel = label; roomLabel.value = label; roomSelect.value = label;
+  applyLevel(cloneLevel(room), false); resetRoomHistory();
+}
+
+function applyProject(raw: Partial<ProjectData>): void {
+  if (!raw.rooms || typeof raw.rooms !== "object") throw new Error("Invalid room project");
+  rooms = new Map(Object.entries(raw.rooms).filter(([label]) => validLinkLabel(label)).map(([label, level]) => [label, normalizeLevel(level)]));
+  const target = raw.activeRoom && rooms.has(raw.activeRoom) ? raw.activeRoom : rooms.keys().next().value;
+  if (!target) throw new Error("The project has no rooms");
+  refreshRoomSelect(); openRoom(target);
 }
 
 function serialize(): LevelData {
@@ -103,7 +174,7 @@ function normalizeLevel(value: unknown): LevelData {
   const nextEntities = raw.entities.filter((entity): entity is PlacedEntity =>
     !!entity && typeof entity.id === "string" && entityTypes.has(entity.type)
     && Number.isInteger(entity.x) && Number.isInteger(entity.y)
-    && ((entity.type !== "gate" && entity.type !== "gate-button") || validLinkLabel(entity.label ?? "")));
+    && ((entity.type !== "gate" && entity.type !== "gate-button" && entity.type !== "portal-exit") || validLinkLabel(entity.label ?? "")));
   return { version: 1, name: typeof raw.name === "string" ? raw.name : "Imported Dungeon", width, height, tiles: nextTiles, entities: nextEntities };
 }
 
@@ -252,6 +323,13 @@ function drawEntity(entity: PlacedEntity): void {
     context.fillStyle = "#fff3b2"; context.font = `700 ${Math.max(10, cellSize * .82)}px ui-monospace`; context.textAlign = "center"; context.textBaseline = "middle"; context.fillText(entity.label ?? "?", 0, cellSize * .08);
     context.restore(); return;
   }
+  if (entity.type === "portal-exit") {
+    const opening = diamond(entity.x, entity.y, cellSize * .04);
+    context.save(); context.fillStyle = "#020306"; context.strokeStyle = "#8b6fe8"; context.lineWidth = Math.max(1, cellSize * .12);
+    pathPolygon(opening); context.fill(); context.stroke();
+    context.fillStyle = "#d9ceff"; context.font = `700 ${Math.max(10, cellSize * .9)}px ui-monospace`; context.textAlign = "center"; context.textBaseline = "middle";
+    context.fillText(entity.label ?? "?", centre.x, centre.y - cellSize * .08); context.restore(); return;
+  }
   if (entity.type !== "player") return;
   const size = cellSize * .48;
   context.save(); context.translate(centre.x, centre.y - cellSize * .36);
@@ -309,7 +387,7 @@ function placeTool(tool: ToolType, x: number, y: number): boolean {
     return true;
   }
   const entityType = tool as EntityType;
-  const isLinkedObject = entityType === "gate" || entityType === "gate-button";
+  const isLinkedObject = entityType === "gate" || entityType === "gate-button" || entityType === "portal-exit";
   const label = linkLabel.value;
   if (isLinkedObject && !validLinkLabel(label)) {
     status.textContent = "Enter one letter or number for the link label";
@@ -318,6 +396,7 @@ function placeTool(tool: ToolType, x: number, y: number): boolean {
   }
   if (tileAt(x, y) !== "floor" && tileAt(x, y) !== "doorway") tiles[tileIndex(x, y)] = "floor";
   if (entityType === "player") entities = entities.filter((entity) => entity.type !== "player");
+  if (entityType === "portal-exit") entities = entities.filter((entity) => entity.type !== "portal-exit");
   entities = entities.filter((entity) => entity.x !== x || entity.y !== y);
   entities.push({ id: `${entityType}-${sequence++}`, type: entityType, x, y, facing: 0, ...(isLinkedObject ? { label } : {}) });
   return true;
@@ -327,7 +406,7 @@ function selectTool(tool: ToolType): void {
   selectedTool = tool;
   document.querySelectorAll<HTMLElement>(".tool").forEach((element) => element.classList.toggle("selected", element.dataset.tool === tool));
   status.textContent = tools.find((definition) => definition.type === tool)?.label ?? tool;
-  if (tool === "gate" || tool === "gate-button") linkLabel.focus();
+  if (tool === "gate" || tool === "gate-button" || tool === "portal-exit") linkLabel.focus();
 }
 
 for (const definition of tools) {
@@ -443,43 +522,75 @@ linkLabel.addEventListener("input", () => {
 levelName.addEventListener("change", recordHistory);
 document.querySelector("#undo")!.addEventListener("click", () => restoreHistory(historyIndex - 1));
 document.querySelector("#redo")!.addEventListener("click", () => restoreHistory(historyIndex + 1));
-document.querySelector("#save")!.addEventListener("click", () => { localStorage.setItem("rpg-dungeon-editor-level", snapshot()); status.textContent = "Saved locally"; });
+document.querySelector("#save-room")!.addEventListener("click", async () => {
+  if (await saveProject()) status.textContent = `Saved room ${activeRoomLabel} to disk`;
+});
+document.querySelector("#new-room")!.addEventListener("click", () => {
+  if (!storeCurrentRoom(activeRoomLabel)) return;
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const nextLabel = [...alphabet].find((label) => !rooms.has(label));
+  if (!nextLabel) { status.textContent = "All room labels are in use"; return; }
+  activeRoomLabel = nextLabel; blankLevel(); levelName.value = `Room ${nextLabel}`;
+  rooms.set(nextLabel, serialize()); refreshRoomSelect(); resetRoomHistory(); draw();
+  status.textContent = `Created room ${nextLabel}`;
+});
+roomSelect.addEventListener("change", () => {
+  const target = roomSelect.value;
+  rooms.set(activeRoomLabel, cloneLevel(serialize()));
+  openRoom(target); status.textContent = `Editing room ${target}`;
+});
+roomLabel.addEventListener("input", () => {
+  roomLabel.value = [...roomLabel.value].find((character) => /[0-9A-Za-z]/.test(character)) ?? "";
+});
+document.querySelector("#save")!.addEventListener("click", async () => { if (await saveProject()) status.textContent = `Saved ${rooms.size} room${rooms.size === 1 ? "" : "s"} to disk`; });
 document.querySelector("#play")!.addEventListener("click", async () => {
-  const level = serialize();
-  if (level.tiles.length === 0) { status.textContent = "Place at least one floor tile"; return; }
-  if (!level.entities.some((entity) => entity.type === "player")) { status.textContent = "Place the player spawn first"; return; }
-  const gateLabels = new Set(level.entities.filter((entity) => entity.type === "gate").map((entity) => entity.label));
-  const buttonLabels = new Set(level.entities.filter((entity) => entity.type === "gate-button").map((entity) => entity.label));
-  const orphan = [...new Set([...gateLabels, ...buttonLabels])].find((label) => !gateLabels.has(label) || !buttonLabels.has(label));
-  if (orphan) { status.textContent = `Link ${orphan} needs both a gate and a button`; return; }
-  const seed = editorDungeonSeed(level);
+  if (!await saveProject()) return;
+  for (const [label, level] of rooms) {
+    if (level.tiles.length === 0) { status.textContent = `Room ${label} needs at least one floor tile`; return; }
+    if (!level.entities.some((entity) => entity.type === "player")) { status.textContent = `Room ${label} needs a player spawn`; return; }
+    const gateLabels = new Set(level.entities.filter((entity) => entity.type === "gate").map((entity) => entity.label));
+    const buttonLabels = new Set(level.entities.filter((entity) => entity.type === "gate-button").map((entity) => entity.label));
+    const orphan = [...new Set([...gateLabels, ...buttonLabels])].find((link) => !gateLabels.has(link) || !buttonLabels.has(link));
+    if (orphan) { status.textContent = `Room ${label}: link ${orphan} needs both a gate and a button`; return; }
+    const exit = level.entities.find((entity) => entity.type === "portal-exit");
+    if (exit && !rooms.has(exit.label ?? "")) { status.textContent = `Room ${label}: exit ${exit.label} has no destination room`; return; }
+  }
+  const roomSeeds = new Map([...rooms].map(([label, level]) => [label, editorDungeonSeed(level)]));
+  const seed = roomSeeds.get(activeRoomLabel)!;
   const gameWindow = window.open("about:blank", "_blank");
-  status.textContent = `Starting seed ${seed}…`;
+  status.textContent = `Preparing ${rooms.size} linked room${rooms.size === 1 ? "" : "s"}…`;
   try {
-    const response = await fetch("/api/editor-level", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(level),
-    });
-    if (!response.ok) throw new Error(`Server returned ${response.status}`);
-    const { id, seed: serverSeed } = await response.json() as { id: string; seed: number };
-    localStorage.setItem(`rpg-editor-level:${id}`, JSON.stringify(level));
-    const gameUrl = `/?seed=${serverSeed}&editor=${encodeURIComponent(id)}`;
+    for (const [label, level] of rooms) {
+      const compiled = cloneLevel(level);
+      for (const entity of compiled.entities) if (entity.type === "portal-exit") entity.destinationSeed = roomSeeds.get(entity.label ?? "");
+      const response = await fetch("/api/editor-level", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(compiled),
+      });
+      if (!response.ok) throw new Error(`Could not prepare room ${label} (${response.status})`);
+      const result = await response.json() as { id: string; seed: number };
+      localStorage.setItem(`rpg-editor-level:${result.id}`, JSON.stringify(compiled));
+    }
+    const gameUrl = `/?seed=${seed}&editor=${encodeURIComponent(String(seed))}`;
     if (gameWindow) gameWindow.location.href = gameUrl;
     else window.location.href = gameUrl;
-    status.textContent = `Playing seed ${serverSeed}`;
+    status.textContent = `Playing room ${activeRoomLabel}`;
   } catch (error) {
     gameWindow?.close();
     status.textContent = error instanceof Error ? error.message : "Could not start game";
   }
 });
-document.querySelector("#load")!.addEventListener("click", () => {
-  const saved = localStorage.getItem("rpg-dungeon-editor-level");
-  if (!saved) { status.textContent = "No local save"; return; }
-  try { applyLevel(normalizeLevel(JSON.parse(saved))); status.textContent = "Loaded local save"; } catch (error) { status.textContent = String(error); }
+document.querySelector("#load")!.addEventListener("click", async () => {
+  try {
+    const response = await fetch("/api/editor-project");
+    if (!response.ok) throw new Error(response.status === 404 ? "No project has been saved to disk" : `Server returned ${response.status}`);
+    const raw = await response.json() as Partial<ProjectData>;
+    applyProject(raw); localStorage.setItem(projectStorageKey, JSON.stringify(raw));
+    status.textContent = `Loaded ${rooms.size} rooms from disk`;
+  } catch (error) { status.textContent = error instanceof Error ? error.message : String(error); }
 });
 document.querySelector("#export")!.addEventListener("click", () => {
-  const blob = new Blob([JSON.stringify(serialize(), null, 2)], { type: "application/json" });
+  if (!storeCurrentRoom(roomLabel.value)) return;
+  const blob = new Blob([JSON.stringify(projectData(), null, 2)], { type: "application/json" });
   const link = document.createElement("a"); link.href = URL.createObjectURL(blob);
   link.download = `${(levelName.value || "dungeon").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "dungeon"}.json`;
   link.click(); URL.revokeObjectURL(link.href); status.textContent = "Exported JSON";
@@ -487,7 +598,15 @@ document.querySelector("#export")!.addEventListener("click", () => {
 document.querySelector("#import")!.addEventListener("click", () => importFile.click());
 importFile.addEventListener("change", async () => {
   const file = importFile.files?.[0]; if (!file) return;
-  try { applyLevel(normalizeLevel(JSON.parse(await file.text()))); status.textContent = `Imported ${file.name}`; }
+  try {
+    const raw = JSON.parse(await file.text()) as Partial<ProjectData & LevelData>;
+    if (raw.rooms && typeof raw.rooms === "object") {
+      applyProject(raw);
+    } else {
+      const level = normalizeLevel(raw); activeRoomLabel = "A"; rooms = new Map([["A", level]]); refreshRoomSelect(); openRoom("A");
+    }
+    status.textContent = `Imported ${file.name}`;
+  }
   catch (error) { status.textContent = error instanceof Error ? error.message : String(error); }
   importFile.value = "";
 });
@@ -505,4 +624,22 @@ window.addEventListener("keydown", (event) => {
   if (event.key.toLowerCase() === "y") { event.preventDefault(); restoreHistory(historyIndex + 1); }
 });
 
-blankLevel(); resizeCanvas(); recordHistory();
+const savedProject = localStorage.getItem(projectStorageKey);
+if (savedProject) {
+  try {
+    applyProject(JSON.parse(savedProject) as Partial<ProjectData>);
+  } catch { blankLevel(); rooms.set("A", serialize()); refreshRoomSelect(); resizeCanvas(); recordHistory(); }
+} else {
+  const legacy = localStorage.getItem("rpg-dungeon-editor-level");
+  if (legacy) { try { const level = normalizeLevel(JSON.parse(legacy)); rooms.set("A", level); refreshRoomSelect(); applyLevel(level, false); resetRoomHistory(); } catch { blankLevel(); rooms.set("A", serialize()); refreshRoomSelect(); resizeCanvas(); recordHistory(); } }
+  else { blankLevel(); rooms.set("A", serialize()); refreshRoomSelect(); resizeCanvas(); recordHistory(); }
+}
+
+// Disk is authoritative across browser profiles and cleared site data. Load it
+// after the immediate browser cache so the editor still paints without waiting.
+fetch("/api/editor-project").then(async (response) => {
+  if (!response.ok) return;
+  const raw = await response.json() as Partial<ProjectData>;
+  applyProject(raw); localStorage.setItem(projectStorageKey, JSON.stringify(raw));
+  status.textContent = `Loaded ${rooms.size} rooms from disk`;
+}).catch(() => { /* The local cache remains usable when the server is unavailable. */ });

@@ -159,6 +159,7 @@ function connectWebSocket() {
       if (snap.nextDungeonSeed !== null) {
         const next = new URL(location.href);
         next.searchParams.set("seed", String(snap.nextDungeonSeed));
+        if (editorLevelId) next.searchParams.set("editor", String(snap.nextDungeonSeed));
         next.searchParams.delete("health");
         sessionStorage.setItem(carriedHealthStorageKey, String(Math.max(1, Math.round(snap.stats.health))));
         location.replace(next.toString());

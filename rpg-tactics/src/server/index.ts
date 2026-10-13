@@ -10,6 +10,7 @@
 
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
@@ -32,6 +33,10 @@ const HOST = process.env.HOST ?? "0.0.0.0";
 const publicDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "public");
 const sharedTextureDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "public", "textures");
 const sharedModelDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "public", "models");
+const defaultEditorDataDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "data");
+const editorProjectPath = process.env.EDITOR_PROJECT_PATH ?? join(defaultEditorDataDir, "editor-project.json");
+const editorDataDir = dirname(editorProjectPath);
+const editorProjectTempPath = `${editorProjectPath}.tmp`;
 
 const fastify = Fastify({ logger: true });
 
@@ -51,6 +56,46 @@ let game: TacticsGame | null = null;
 let activeSeed: number | null = null;
 let activeEditorLevel: string | null = null;
 const editorLevels = new Map<string, EditorDungeonConfig>();
+
+interface EditorProject {
+  version: 1;
+  activeRoom: string;
+  rooms: Record<string, EditorDungeonConfig>;
+}
+
+const validEditorProject = (value: unknown): value is EditorProject => {
+  if (!value || typeof value !== "object") return false;
+  const project = value as Partial<EditorProject>;
+  if (project.version !== 1 || !/^[0-9A-Za-z]$/.test(project.activeRoom ?? "") || !project.rooms || typeof project.rooms !== "object") return false;
+  const entries = Object.entries(project.rooms);
+  return entries.length > 0 && entries.every(([label, room]) => /^[0-9A-Za-z]$/.test(label)
+    && room?.version === 1 && Array.isArray(room.tiles) && Array.isArray(room.entities));
+};
+
+fastify.get("/api/editor-project", async (_request, reply) => {
+  try {
+    const project = JSON.parse(await readFile(editorProjectPath, "utf8")) as unknown;
+    if (!validEditorProject(project)) return reply.code(500).send({ error: "Saved editor project is invalid" });
+    return project;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return reply.code(404).send({ error: "No editor project saved" });
+    fastify.log.error(error, "could not read editor project");
+    return reply.code(500).send({ error: "Could not read editor project" });
+  }
+});
+
+fastify.put<{ Body: unknown }>("/api/editor-project", async (request, reply) => {
+  if (!validEditorProject(request.body)) return reply.code(400).send({ error: "Invalid editor project" });
+  try {
+    await mkdir(editorDataDir, { recursive: true });
+    await writeFile(editorProjectTempPath, `${JSON.stringify(request.body, null, 2)}\n`, "utf8");
+    await rename(editorProjectTempPath, editorProjectPath);
+    return { saved: true, path: editorProjectPath, rooms: Object.keys(request.body.rooms).length };
+  } catch (error) {
+    fastify.log.error(error, "could not save editor project");
+    return reply.code(500).send({ error: "Could not save editor project" });
+  }
+});
 
 fastify.post<{ Body: EditorDungeonConfig }>("/api/editor-level", async (request, reply) => {
   const level = request.body;

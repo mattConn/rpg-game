@@ -137,6 +137,7 @@ export interface EditorDungeonEntity {
   y: number;
   facing: number;
   label?: string;
+  destinationSeed?: number;
 }
 export interface EditorDungeonConfig {
   version: 1;
@@ -156,6 +157,10 @@ export interface EditorButtonDefinition {
 }
 export let EDITOR_GATES: readonly EditorGateDefinition[] = [];
 export let EDITOR_BUTTONS: readonly EditorButtonDefinition[] = [];
+export interface EditorExitDefinition {
+  id: string; label: string; position: Point; destinationSeed: number;
+}
+export let EDITOR_EXIT: EditorExitDefinition | null = null;
 /** One safe spawn chamber followed by six procedurally populated rooms. */
 const ROOM_COUNT = 7;
 const PORTAL_ROOM_INDEX = ROOM_COUNT - 1;
@@ -458,6 +463,7 @@ export function configureDungeon(seed: number): void {
   EDITOR_DUNGEON = null;
   EDITOR_GATES = [];
   EDITOR_BUTTONS = [];
+  EDITOR_EXIT = null;
   BOARD_REGION.col = 0;
   BOARD_REGION.row = 0;
   BOARD_REGION.cols = GRID_COLS;
@@ -606,10 +612,16 @@ export function configureEditorDungeon(config: EditorDungeonConfig): void {
   EDITOR_BUTTONS = config.entities.filter((entity) => entity.type === "gate-button" && /^[0-9A-Za-z]$/.test(entity.label ?? "")).map((entity) => ({
     id: entity.id, label: entity.label!, position: editorPosition(entity.x, entity.y),
   }));
+  const exit = config.entities.find((entity) => entity.type === "portal-exit"
+    && /^[0-9A-Za-z]$/.test(entity.label ?? "") && Number.isSafeInteger(entity.destinationSeed));
+  EDITOR_EXIT = exit ? {
+    id: exit.id, label: exit.label!, position: editorPosition(exit.x, exit.y), destinationSeed: exit.destinationSeed!,
+  } : null;
   SPIKE_TRAP_ROOM = null;
+  const portalPosition = EDITOR_EXIT?.position ?? regionCentre(BOARD_REGION);
   DUNGEON_PORTAL = {
     roomIndex: 0, side: "south", exitRegion: BOARD_REGION,
-    position: regionCentre(BOARD_REGION), holePosition: regionCentre(BOARD_REGION),
+    position: portalPosition, holePosition: portalPosition,
   };
   PURPLE_GEM = { roomIndex: 0, position: regionCentre(BOARD_REGION) };
 }

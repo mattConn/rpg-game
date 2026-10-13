@@ -8,3 +8,7 @@ public/editor-play.js.map
 
 # Local rendering checks and screenshots
 work/
+
+# Durable local level-editor data (managed by the tactics server)
+data/editor-project.json
+data/editor-project.json.tmp

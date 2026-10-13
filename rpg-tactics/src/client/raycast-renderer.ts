@@ -1,5 +1,5 @@
 import { WORLD_HEIGHT } from '../../../src/shared/constants.js';
-import { ARENA_X, ARENA_Y, TILE_PX, DUNGEON_PORTAL, EDITOR_BUTTONS, PRESSURE_PLATES, ROOM_REGIONS, HALL_REGIONS, DUNGEON_ENEMIES, EDITOR_DUNGEON, regionCentre, type TacticsSnapshot } from '../shared/tactics.js';
+import { ARENA_X, ARENA_Y, TILE_PX, DUNGEON_PORTAL, EDITOR_BUTTONS, EDITOR_EXIT, PRESSURE_PLATES, ROOM_REGIONS, HALL_REGIONS, DUNGEON_ENEMIES, EDITOR_DUNGEON, regionCentre, type TacticsSnapshot } from '../shared/tactics.js';
 import { RaycastWorld, castCameraRay, type RayHit } from './raycast-world.js';
 import { playerBiteFrame } from './attack-presentation.js';
 import { buildBarrierFrames, BARRIER_WIDTH, BARRIER_HEIGHT } from './barrier-texture.js';
@@ -163,7 +163,7 @@ export class RaycastRenderer {
         if (grid.at(col, row)) this.markers[(row - grid.minRow) * grid.width + col - grid.minCol] = type;
       }
     };
-    if (!EDITOR_DUNGEON) mark(DUNGEON_PORTAL.holePosition.x, DUNGEON_PORTAL.holePosition.y, PORTAL_HALF_SIZE, 3);
+    if (!EDITOR_DUNGEON || EDITOR_EXIT) mark(DUNGEON_PORTAL.holePosition.x, DUNGEON_PORTAL.holePosition.y, PORTAL_HALF_SIZE, 3);
     for (const plate of PRESSURE_PLATES) mark(plate.position.x, plate.position.y, 12, snap.pressurePlates.find(p => p.id === plate.id)?.active ? 2 : 1);
     for (const button of EDITOR_BUTTONS) mark(button.position.x, button.position.y, 12, snap.editorButtons.find(p => p.id === button.id)?.active ? 2 : 1);
     if (snap.spikeTrap) {
@@ -278,7 +278,7 @@ export class RaycastRenderer {
     }
   }
   private drawPortalShaft(snap: TacticsSnapshot, now: number) {
-    if (EDITOR_DUNGEON) return;
+    if (EDITOR_DUNGEON && !EDITOR_EXIT) return;
     const wall = this.textures.get('wall'); if (!wall) return;
     const center = DUNGEON_PORTAL.holePosition;
     const half = PORTAL_HALF_SIZE;
