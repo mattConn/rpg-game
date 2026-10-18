@@ -46,13 +46,26 @@ import { RaycastRenderer } from '../src/client/raycast-renderer.js';
 const camera = Object.create(RaycastRenderer.prototype) as RaycastRenderer;
 camera.resetView();
 const defaultYaw = camera.yaw;
-camera.look(2, .5); camera.look(-2, -2); camera.zoom(120); camera.flip();
-assert.equal(camera.yaw, defaultYaw, 'Camera orientation stays fixed');
-assert.equal(Reflect.get(camera, 'cameraAngle'), Math.PI * 30 / 180, 'Camera remains at 30 degrees');
-assert.equal(Reflect.get(camera, 'cameraDistance'), 600, 'Zoom remains fixed at reference distance');
+camera.look(100, 10000);
+assert.equal(camera.yaw, defaultYaw - .6, 'Horizontal drag orbits opposite the pointer pan');
+assert.equal(Reflect.get(camera, 'cameraAngle'), Math.PI * 18 / 180, 'Pitch clamps above the floor');
+camera.look(0, -10000);
+assert.equal(Reflect.get(camera, 'cameraAngle'), Math.PI * 45 / 180, 'Pitch stays below the distortion-prone overhead view');
+camera.zoom(10000);
+assert.equal(Reflect.get(camera, 'cameraDistance'), 1400, 'Zoom-out distance is bounded');
+camera.zoom(-10000);
+assert.equal(Reflect.get(camera, 'cameraDistance'), 260, 'Zoom-in distance is bounded');
+camera.flip();
+assert.equal(camera.yaw, defaultYaw - .6 + Math.PI, 'Half-turn rotates the camera');
 camera.resetView();
 assert.equal(camera.yaw, defaultYaw);
-console.log('PASS: fixed camera framing.');
+assert.equal(Reflect.get(camera, 'cameraAngle'), Math.PI * 30 / 180);
+assert.equal(Reflect.get(camera, 'cameraDistance'), 600);
+for (const [key, value] of Object.entries({ width: 100, height: 100, horizon: 25, eye: 100, focal: 100,
+  cameraX: 0, cameraY: 0, forwardX: 1, forwardY: 0, rightX: 0, rightY: 1 })) Reflect.set(camera, key, value);
+assert.deepEqual(camera.groundAt(.5, .75), { x: 200, y: 0 }, 'Screen position projects onto the dungeon floor');
+assert.equal(camera.groundAt(.5, .25), null, 'Sky cannot become a movement target');
+console.log('PASS: camera orbit, pitch, zoom clamps, half-turn, reset, and floor projection.');
 
 import { bloodHits } from '../src/client/blood-effects.js';
 const beforeHit = { player: { x: 0, y: 0 }, stats: { health: 100 }, corpses: [],

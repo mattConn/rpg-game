@@ -131,13 +131,19 @@ wss.on("connection", (ws, request) => {
   const initialHealth = Number.isFinite(requestedHealth) && requestedHealth > 0
     ? Math.min(PLAYER_MAX_HEALTH, Math.round(requestedHealth))
     : PLAYER_MAX_HEALTH;
-  if (!game || activeSeed !== validSeed || activeEditorLevel !== editorLevelId) {
+  // A self-linked authored exit reconnects with the same seed and editor id.
+  // Never reuse the completed instance in that case: its first snapshot still
+  // carries nextDungeonSeed and would immediately redirect the client forever.
+  const completedTransition = game?.snapshot().nextDungeonSeed !== null;
+  if (!game || activeSeed !== validSeed || activeEditorLevel !== editorLevelId || completedTransition) {
     if (editorLevel) configureEditorDungeon(editorLevel);
     else configureDungeon(validSeed);
     game = new TacticsGame(Date.now(), initialHealth);
     activeSeed = validSeed;
     activeEditorLevel = editorLevel ? editorLevelId : null;
-    fastify.log.info(editorLevel ? { editorLevelId } : { seed: validSeed }, editorLevel ? "loaded editor dungeon" : "generated dungeon");
+    fastify.log.info(editorLevel
+      ? { editorLevelId, resetAfterTransition: completedTransition }
+      : { seed: validSeed, resetAfterTransition: completedTransition }, editorLevel ? "loaded editor dungeon" : "generated dungeon");
   }
   fastify.log.info("client connected");
 

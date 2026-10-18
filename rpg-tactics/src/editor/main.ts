@@ -3,7 +3,8 @@ import { editorDungeonSeed } from "../shared/editor-seed.js";
 type TileType = "void" | "floor" | "wall" | "doorway";
 type EntityType = "player" | "hellhound" | "bat" | "spider" | "gargoyle" | "snake"
   | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue"
-  | "gate" | "gate-button";
+  | "gate" | "gate-button" | "rock-1" | "rock-2" | "rock-3" | "rock-4"
+  | "rock-5" | "rock-6" | "rock-7" | "rock-8";
 type ToolType = TileType | EntityType | "erase";
 
 interface PlacedEntity { id: string; type: EntityType; x: number; y: number; facing: number; label?: string; destinationSeed?: number }
@@ -21,7 +22,7 @@ interface ProjectData {
   rooms: Record<string, LevelData>;
 }
 
-interface ToolDefinition { type: ToolType; label: string; icon: string; group: "tile" | "entity" | "object" }
+interface ToolDefinition { type: ToolType; label: string; icon: string; group: "tile" | "entity" | "object" | "scenery" }
 
 const tools: ToolDefinition[] = [
   { type: "floor", label: "Floor tile", icon: "◇", group: "tile" },
@@ -31,6 +32,12 @@ const tools: ToolDefinition[] = [
   { type: "gate", label: "Gate", icon: "▥", group: "object" },
   { type: "gate-button", label: "Gate button", icon: "◉", group: "object" },
   { type: "portal-exit", label: "Exit hole", icon: "▣", group: "object" },
+  ...Array.from({ length: 8 }, (_, index) => ({
+    type: `rock-${index + 1}` as EntityType,
+    label: `${index < 4 ? "Small" : "Large"} rock ${index % 4 + 1}`,
+    icon: ["◒", "◓", "◑", "◐"][index % 4]!,
+    group: "scenery" as const,
+  })),
 ];
 
 const entityTypes = new Set<EntityType>(tools.filter((tool) => tool.group !== "tile").map((tool) => tool.type as EntityType));
@@ -54,12 +61,17 @@ const projectStorageKey = "rpg-dungeon-editor-project";
 const width = 100;
 const height = 100;
 let cellSize = 12;
-let viewQuarterTurns = 0;
+let viewRotation = 0;
 let tiles: TileType[] = [];
 let entities: PlacedEntity[] = [];
 let selectedTool: ToolType = "floor";
 let drawing = false;
 let panning = false;
+let rotating = false;
+let rotationDragX = 0;
+let rotationPressX = 0;
+let rotationPressY = 0;
+let rotationDragMoved = false;
 let panX = 0;
 let panY = 0;
 let panPointerX = 0;
@@ -226,34 +238,26 @@ const canvasDimensions = () => ({
   width: (width + height) * tileWidth() / 2 + canvasPadding() * 2,
   height: (width + height) * tileHeight() / 2 + canvasPadding() * 2 + wallHeight(),
 });
-const gridOrigin = () => ({ x: height * tileWidth() / 2 + canvasPadding(), y: canvasPadding() + wallHeight() });
+const gridOrigin = () => ({ x: canvasDimensions().width / 2, y: canvasDimensions().height / 2 + wallHeight() / 2 });
 const rotateGridPoint = (x: number, y: number) => {
-  switch (viewQuarterTurns) {
-    case 1: return { x: height - y, y: x };
-    case 2: return { x: width - x, y: height - y };
-    case 3: return { x: y, y: width - x };
-    default: return { x, y };
-  }
+  const dx = x - width / 2, dy = y - height / 2;
+  const cosine = Math.cos(viewRotation), sine = Math.sin(viewRotation);
+  return { x: dx * cosine - dy * sine, y: dx * sine + dy * cosine };
 };
 const unrotateGridPoint = (x: number, y: number) => {
-  switch (viewQuarterTurns) {
-    case 1: return { x: y, y: height - x };
-    case 2: return { x: width - x, y: height - y };
-    case 3: return { x: width - y, y: x };
-    default: return { x, y };
-  }
+  const cosine = Math.cos(viewRotation), sine = Math.sin(viewRotation);
+  return { x: x * cosine + y * sine + width / 2, y: -x * sine + y * cosine + height / 2 };
 };
-const drawOrders = new Map<number, Array<{ x: number; y: number }>>();
+let drawOrderRotation = Number.NaN;
+let drawOrder: Array<{ x: number; y: number }> = [];
 function cellsInDrawOrder(): Array<{ x: number; y: number }> {
-  const cached = drawOrders.get(viewQuarterTurns);
-  if (cached) return cached;
+  if (drawOrderRotation === viewRotation) return drawOrder;
   const cells = Array.from({ length: width * height }, (_, index) => ({ x: index % width, y: Math.floor(index / width) }));
   cells.sort((a, b) => {
     const ar = rotateGridPoint(a.x + .5, a.y + .5), br = rotateGridPoint(b.x + .5, b.y + .5);
     return ar.x + ar.y - br.x - br.y;
   });
-  drawOrders.set(viewQuarterTurns, cells);
-  return cells;
+  drawOrderRotation = viewRotation; drawOrder = cells; return drawOrder;
 }
 const gridPoint = (x: number, y: number) => {
   const origin = gridOrigin();
@@ -261,14 +265,8 @@ const gridPoint = (x: number, y: number) => {
   return { x: origin.x + (rotated.x - rotated.y) * tileWidth() / 2, y: origin.y + (rotated.x + rotated.y) * tileHeight() / 2 };
 };
 const diamond = (x: number, y: number, lift = 0) => {
-  const centre = gridPoint(x + .5, y + .5);
-  const halfW = tileWidth() / 2, halfH = tileHeight() / 2;
-  return [
-    { x: centre.x, y: centre.y - halfH - lift },
-    { x: centre.x + halfW, y: centre.y - lift },
-    { x: centre.x, y: centre.y + halfH - lift },
-    { x: centre.x - halfW, y: centre.y - lift },
-  ];
+  return [gridPoint(x, y), gridPoint(x + 1, y), gridPoint(x + 1, y + 1), gridPoint(x, y + 1)]
+    .map((point) => ({ x: point.x, y: point.y - lift }));
 };
 function pathPolygon(points: Array<{ x: number; y: number }>): void {
   context.beginPath(); context.moveTo(points[0]!.x, points[0]!.y);
@@ -287,8 +285,15 @@ function drawTile(x: number, y: number, type: TileType): void {
   const base = diamond(x, y);
   if (type === "wall") {
     const top = diamond(x, y, wallHeight());
-    context.fillStyle = "#242a34"; pathPolygon([top[3]!, top[2]!, base[2]!, base[3]!]); context.fill();
-    context.fillStyle = "#343c48"; pathPolygon([top[1]!, top[2]!, base[2]!, base[1]!]); context.fill();
+    const visibleEdges = [0, 1, 2, 3].sort((a, b) => {
+      const aNext = (a + 1) % 4, bNext = (b + 1) % 4;
+      return (base[b]!.y + base[bNext]!.y) - (base[a]!.y + base[aNext]!.y);
+    }).slice(0, 2);
+    for (const [face, edge] of visibleEdges.entries()) {
+      const next = (edge + 1) % 4;
+      context.fillStyle = face ? "#343c48" : "#242a34";
+      pathPolygon([top[edge]!, top[next]!, base[next]!, base[edge]!]); context.fill();
+    }
     context.fillStyle = "#596372"; pathPolygon(top); context.fill();
     context.strokeStyle = "#737f90"; pathPolygon(top); context.stroke();
     context.strokeStyle = "rgba(10,12,16,.72)";
@@ -305,6 +310,18 @@ function drawTile(x: number, y: number, type: TileType): void {
 }
 function drawEntity(entity: PlacedEntity): void {
   const centre = gridPoint(entity.x + .5, entity.y + .5);
+  if (/^rock-[1-8]$/.test(entity.type)) {
+    const variant = Number(entity.type.slice("rock-".length)) - 1;
+    const scale = variant < 4 ? .62 : .88;
+    const angle = variant * Math.PI / 4 - viewRotation;
+    context.save(); context.translate(centre.x, centre.y - cellSize * .16); context.rotate(angle);
+    context.fillStyle = variant < 4 ? "#646b72" : "#737b83"; context.strokeStyle = "#a8b0b7"; context.lineWidth = Math.max(1, cellSize * .08);
+    context.beginPath();
+    context.moveTo(-cellSize * scale, cellSize * .2); context.lineTo(-cellSize * scale * .58, -cellSize * scale * .52);
+    context.lineTo(cellSize * scale * .28, -cellSize * scale * .72); context.lineTo(cellSize * scale, -cellSize * .02);
+    context.lineTo(cellSize * scale * .62, cellSize * .42); context.closePath(); context.fill(); context.stroke();
+    context.restore(); return;
+  }
   if (entity.type === "gate-button") {
     const base = diamond(entity.x, entity.y, cellSize * .08);
     context.save();
@@ -357,9 +374,11 @@ function cellFromEvent(event: Pick<MouseEvent, "clientX" | "clientY">): { x: num
     .reverse();
   for (const { x, y } of wallCells) {
     const top = diamond(x, y, wallHeight()), base = diamond(x, y);
-    if (pointInPolygon(px, py, top)
-        || pointInPolygon(px, py, [top[3]!, top[2]!, base[2]!, base[3]!])
-        || pointInPolygon(px, py, [top[1]!, top[2]!, base[2]!, base[1]!])) return { x, y };
+    if (pointInPolygon(px, py, top)) return { x, y };
+    for (let edge = 0; edge < 4; edge++) {
+      const next = (edge + 1) % 4;
+      if (pointInPolygon(px, py, [top[edge]!, top[next]!, base[next]!, base[edge]!])) return { x, y };
+    }
   }
   const origin = gridOrigin();
   const diagonalX = (px - origin.x) / (tileWidth() / 2);
@@ -420,6 +439,11 @@ for (const definition of tools) {
 selectTool(selectedTool);
 
 canvas.addEventListener("pointerdown", (event) => {
+  if (event.button === 2) {
+    event.preventDefault(); canvas.setPointerCapture(event.pointerId); rotating = true;
+    rotationDragX = rotationPressX = event.clientX; rotationPressY = event.clientY; rotationDragMoved = false;
+    canvas.classList.add("panning"); status.textContent = "Right-click erases · drag rotates"; return;
+  }
   if (event.button === 1 || ((event.ctrlKey || event.metaKey) && event.button === 0)) {
     event.preventDefault();
     canvas.setPointerCapture(event.pointerId);
@@ -436,12 +460,19 @@ canvas.addEventListener("pointerdown", (event) => {
   if (existing && event.button === 0 && selectedTool !== "erase") {
     draggedEntityId = existing.id;
   } else {
-    changedDuringGesture = placeTool(event.button === 2 ? "erase" : selectedTool, cell.x, cell.y);
+    changedDuringGesture = placeTool(selectedTool, cell.x, cell.y);
   }
   draw();
 });
 
 canvas.addEventListener("pointermove", (event) => {
+  if (rotating) {
+    const delta = event.clientX - rotationDragX; rotationDragX = event.clientX;
+    if (rotationDragMoved || Math.hypot(event.clientX - rotationPressX, event.clientY - rotationPressY) >= 5) {
+      rotationDragMoved = true; setViewRotation(viewRotation - delta * .01);
+    }
+    return;
+  }
   if (panning) {
     panX += event.clientX - panPointerX;
     panY += event.clientY - panPointerY;
@@ -460,12 +491,25 @@ canvas.addEventListener("pointermove", (event) => {
       entity.x = cell.x; entity.y = cell.y; changedDuringGesture = true;
     }
   } else if (!entityTypes.has(selectedTool as EntityType)) {
-    changedDuringGesture = placeTool(event.buttons === 2 ? "erase" : selectedTool, cell.x, cell.y) || changedDuringGesture;
+    changedDuringGesture = placeTool(selectedTool, cell.x, cell.y) || changedDuringGesture;
   }
   draw();
 });
 
-const finishGesture = () => {
+const finishGesture = (event: PointerEvent) => {
+  if (rotating) {
+    let erased = false;
+    if (!rotationDragMoved && event.type === "pointerup") {
+      const cell = cellFromEvent(event);
+      erased = !!cell && placeTool("erase", cell.x, cell.y);
+      if (erased) { draw(); recordHistory(); }
+    }
+    rotating = false; canvas.classList.remove("panning");
+    status.textContent = rotationDragMoved
+      ? (Math.abs(viewRotation) < .001 ? "Game camera view" : `View rotated ${Math.round(viewRotation * 180 / Math.PI)}°`)
+      : erased ? "Erased tile" : "Nothing to erase";
+    return;
+  }
   if (panning) {
     panning = false;
     canvas.classList.remove("panning");
@@ -508,12 +552,13 @@ canvas.addEventListener("drop", (event) => {
 });
 
 zoomInput.addEventListener("input", () => { cellSize = Number(zoomInput.value); resizeCanvas(); });
-function rotateView(delta: number): void {
-  viewQuarterTurns = (viewQuarterTurns + delta + 4) % 4;
-  rotationLabel.textContent = viewQuarterTurns === 0 ? "Game view" : `${viewQuarterTurns * 90}°`;
+function setViewRotation(rotation: number): void {
+  viewRotation = Math.atan2(Math.sin(rotation), Math.cos(rotation));
+  rotationLabel.textContent = Math.abs(viewRotation) < .001 ? "Game view" : `${Math.round(viewRotation * 180 / Math.PI)}°`;
   draw();
-  status.textContent = viewQuarterTurns === 0 ? "Game camera view" : `View rotated ${viewQuarterTurns * 90}°`;
+  status.textContent = Math.abs(viewRotation) < .001 ? "Game camera view" : `View rotated ${Math.round(viewRotation * 180 / Math.PI)}°`;
 }
+function rotateView(delta: number): void { setViewRotation(viewRotation + delta * Math.PI / 2); }
 document.querySelector("#rotate-left")!.addEventListener("click", () => rotateView(-1));
 document.querySelector("#rotate-right")!.addEventListener("click", () => rotateView(1));
 linkLabel.addEventListener("input", () => {
@@ -618,7 +663,7 @@ window.addEventListener("keydown", (event) => {
   if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
   if (event.key.toLowerCase() === "q") { event.preventDefault(); rotateView(-1); return; }
   if (event.key.toLowerCase() === "e") { event.preventDefault(); rotateView(1); return; }
-  if (event.key.toLowerCase() === "r") { event.preventDefault(); viewQuarterTurns = 0; rotationLabel.textContent = "Game view"; draw(); status.textContent = "Game camera view restored"; return; }
+  if (event.key.toLowerCase() === "r") { event.preventDefault(); setViewRotation(0); status.textContent = "Game camera view restored"; return; }
   if (!(event.ctrlKey || event.metaKey)) return;
   if (event.key.toLowerCase() === "z") { event.preventDefault(); restoreHistory(historyIndex + (event.shiftKey ? 1 : -1)); }
   if (event.key.toLowerCase() === "y") { event.preventDefault(); restoreHistory(historyIndex + 1); }

@@ -63,6 +63,9 @@
       <label>Link label <input id="link-label" class="link-label" type="text" maxlength="1" pattern="[0-9A-Za-z]" value="A" aria-label="Gate and button link label" /></label>
       <p class="sub">Use one letter or number. Gates and buttons with the same label are linked. An exit label names its destination room.</p>
       <div class="palette" id="object-palette"></div>
+      <h2>Rocks</h2>
+      <p class="sub">Eight baked orientations in small and large variants.</p>
+      <div class="palette" id="scenery-palette"></div>
     </aside>
     <main>
       <header>
@@ -81,7 +84,7 @@
         <input id="import-file" type="file" accept="application/json,.json" />
       </header>
       <div id="viewport"><div id="canvas-wrap"><canvas id="editor"></canvas></div></div>
-      <footer><span id="status">Ready</span><span>Seed <strong id="level-seed">—</strong></span><span id="coords">—</span><span id="counts">—</span><span class="hint">Scroll zooms · Q/E rotates · R resets view · Middle/Ctrl-drag pans · Right-click erases</span></footer>
+      <footer><span id="status">Ready</span><span>Seed <strong id="level-seed">—</strong></span><span id="coords">—</span><span id="counts">—</span><span class="hint">Scroll zooms · Right-click erases · Right-drag/Q/E rotates · R resets · Middle/Ctrl-drag pans</span></footer>
     </main>
     <script src="/editor.js"></script>
   </body>

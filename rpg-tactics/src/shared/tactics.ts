@@ -132,7 +132,8 @@ export interface EditorDungeonEntity {
   id: string;
   type: "player" | "hellhound" | "bat" | "spider" | "gargoyle" | "snake"
     | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue"
-    | "gate" | "gate-button";
+    | "gate" | "gate-button" | "rock-1" | "rock-2" | "rock-3" | "rock-4"
+    | "rock-5" | "rock-6" | "rock-7" | "rock-8";
   x: number;
   y: number;
   facing: number;

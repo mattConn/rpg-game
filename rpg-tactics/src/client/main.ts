@@ -387,12 +387,47 @@ function toOverlay(event: MouseEvent): Point {
 let uiCursor: Point | null = null;
 let groundCursor: Point | null = null;
 document.getElementById("play-help")!.textContent =
-  "WASD move · left-click bite · E eat · Shift run";
-document.addEventListener("mousemove", (event) => {
-  if (event.target === uiCanvas) uiCursor = toOverlay(event);
+  "WASD move · right-click walk · right-drag orbit · wheel zoom · left-click/Space bite · E eat · Shift run";
+let cameraDragging = false;
+let cameraPointerId: number | null = null;
+let cameraPointerX = 0;
+let cameraPointerY = 0;
+let cameraPressX = 0;
+let cameraPressY = 0;
+let cameraDragMoved = false;
+function groundPoint(event: Pick<PointerEvent, "clientX" | "clientY">): Point | null {
+  const bounds = uiCanvas.getBoundingClientRect();
+  return stage.groundAt((event.clientX - bounds.left) / bounds.width, (event.clientY - bounds.top) / bounds.height);
+}
+uiCanvas.addEventListener("pointerdown", (event) => {
+  if (event.button !== 2 && !(event.ctrlKey && event.button === 0)) return;
+  event.preventDefault(); cameraDragging = true; cameraPointerId = event.pointerId;
+  cameraPointerX = cameraPressX = event.clientX; cameraPointerY = cameraPressY = event.clientY;
+  cameraDragMoved = false;
+  uiCanvas.setPointerCapture(event.pointerId); uiCanvas.style.cursor = "grabbing";
 });
+uiCanvas.addEventListener("pointermove", (event) => {
+  if (cameraDragging) {
+    const dx = event.clientX - cameraPointerX, dy = event.clientY - cameraPointerY;
+    cameraPointerX = event.clientX; cameraPointerY = event.clientY;
+    if (cameraDragMoved || Math.hypot(event.clientX - cameraPressX, event.clientY - cameraPressY) >= 5) {
+      cameraDragMoved = true; stage.look(dx, dy);
+      if (heldKeys.size > 0) sendMoveDir();
+    }
+    return;
+  }
+  if (event.target === uiCanvas) { uiCursor = toOverlay(event); groundCursor = groundPoint(event); }
+});
+const finishCameraDrag = (event: PointerEvent) => {
+  if (!cameraDragging || (cameraPointerId !== null && event.pointerId !== cameraPointerId)) return;
+  const walkTarget = !cameraDragMoved ? groundPoint(event) : null;
+  cameraDragging = false; cameraPointerId = null; uiCanvas.style.cursor = "";
+  if (walkTarget) send({ type: "click", x: walkTarget.x, y: walkTarget.y });
+};
+uiCanvas.addEventListener("pointerup", finishCameraDrag);
+uiCanvas.addEventListener("pointercancel", finishCameraDrag);
 uiCanvas.addEventListener("mouseleave", () => { uiCursor = null; groundCursor = null; });
-uiCanvas.addEventListener("wheel", event => event.preventDefault(), { passive: false });
+uiCanvas.addEventListener("wheel", event => { event.preventDefault(); stage.zoom(event.deltaY); }, { passive: false });
 uiCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
 // ----------------------------------------------------------------- clicking
@@ -424,8 +459,8 @@ uiCanvas.addEventListener("click", (event) => {
     return;
   }
 
-  // Left click bites. The server's forward cone determines
-  // whether an enemy is close enough and sufficiently in front to be hit.
+  // Left click bites. The server's forward cone determines whether an enemy
+  // is close enough and sufficiently in front to be hit.
   send({ type: "useSlot", index: 0 });
 });
 

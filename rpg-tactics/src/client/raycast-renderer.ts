@@ -65,14 +65,19 @@ export class RaycastRenderer {
       for (const plane of [west, east]) for (const along of [north + 100, south - 100])
         this.wallWebs.push({ side: 0, plane, along, width: 180 });
     }
-    const prop = (image: 'boulder' | 'angel', x: number, y: number, direction = 0) => {
+    const prop = (image: 'boulder' | 'angel', x: number, y: number, direction = 0, scale = 1) => {
       const meta = SPRITE_META[image];
-      this.scenery.push({ x, y, z: meta.center - (image === 'boulder' ? 6 : 0), span: meta.span, image, direction: image === 'angel' ? (direction + 4) % 8 : direction, frame: 0 });
+      this.scenery.push({ x, y, z: (meta.center - (image === 'boulder' ? 6 : 0)) * scale, span: meta.span * scale, image, direction: image === 'angel' ? (direction + 4) % 8 : direction, frame: 0 });
     };
     if (EDITOR_DUNGEON) {
       for (const entity of EDITOR_DUNGEON.entities) {
         if (entity.type === 'boulder' || entity.type === 'angel-statue')
           prop(entity.type === 'boulder' ? 'boulder' : 'angel', ARENA_X + (entity.x + .5) * 90, ARENA_Y + (entity.y + .5) * 90);
+        else if (/^rock-[1-8]$/.test(entity.type)) {
+          const variant = Number(entity.type.slice('rock-'.length)) - 1;
+          prop('boulder', ARENA_X + (entity.x + .5) * 90, ARENA_Y + (entity.y + .5) * 90,
+            variant, variant < 4 ? .72 : 1.08);
+        }
       }
     } else ROOM_REGIONS.forEach((room, i) => {
       prop('boulder', ARENA_X + (room.col + 2) * TILE_PX, ARENA_Y + (room.row + 2) * TILE_PX, i % 8);
@@ -117,11 +122,28 @@ export class RaycastRenderer {
     this.portalOpeningMask = new Uint8Array(this.width * this.height);
   }
   setQuality(quality: GraphicsQuality): void { this.quality = quality; }
-  // Camera framing stays fixed.
-  look(_dx: number, _dy: number): void {}
-  zoom(_delta: number): void {}
-  flip(): void {}
+  look(dx: number, dy: number): void {
+    this.yaw -= dx * .006;
+    this.cameraAngle = Math.max(Math.PI * 18 / 180, Math.min(Math.PI * 45 / 180, this.cameraAngle - dy * .003));
+  }
+  zoom(delta: number): void {
+    this.cameraDistance = Math.max(260, Math.min(1400, this.cameraDistance * Math.exp(delta * .0012)));
+  }
+  flip(): void { this.yaw += Math.PI; }
   resetView(): void { this.yaw = CAMERA_YAW; this.cameraAngle = CAMERA_ANGLE; this.cameraDistance = CAMERA_DEFAULT; }
+
+  /** Project a normalized canvas position onto the z=0 dungeon floor. */
+  groundAt(u: number, v: number): { x: number; y: number } | null {
+    const screenX = u * this.width, screenY = v * this.height;
+    if (screenY <= this.horizon + 0.001) return null;
+    const depth = this.eye * this.focal / (screenY - this.horizon);
+    if (!Number.isFinite(depth) || depth <= 0 || depth > 6000) return null;
+    const across = (screenX - this.width / 2) * depth / this.focal;
+    return {
+      x: this.cameraX + this.forwardX * depth + this.rightX * across,
+      y: this.cameraY + this.forwardY * depth + this.rightY * across,
+    };
+  }
 
   private updateCamera(snap: TacticsSnapshot) {
     this.forwardX = -Math.sin(this.yaw); this.forwardY = -Math.cos(this.yaw);
@@ -457,7 +479,10 @@ export class RaycastRenderer {
     }
   }
   private drawSprites(snap: TacticsSnapshot, now: number) {
-    const sprites: Billboard[] = this.scenery.map(sprite => ({ ...sprite }));
+    const sceneryDirectionOffset = Math.round((this.yaw - CAMERA_YAW) / (Math.PI / 4));
+    const sprites: Billboard[] = this.scenery.map(sprite => ({
+      ...sprite, direction: ((sprite.direction - sceneryDirectionOffset) % 8 + 8) % 8,
+    }));
     const addActor = (actor: { x: number; y: number; facing: number; heading?: { x: number; y: number }; altitude?: number }, name: keyof typeof SPRITE_META, moving: boolean) => {
       const meta = SPRITE_META[name];
       const angle = Math.atan2(this.cameraY - actor.y, this.cameraX - actor.x) - Math.atan2(actor.heading?.y ?? 0, actor.heading?.x ?? actor.facing);
