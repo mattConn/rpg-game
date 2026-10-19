@@ -718,12 +718,16 @@ export function createStage(canvas: HTMLCanvasElement, maxAnisotropy = Infinity)
       const x = toX(centre.x);
       const z = toZ(centre.y);
       const size = toX(TILE_PX * EDITOR_TILE_CELLS);
-      if (tile.type === "floor" || tile.type === "doorway") {
-        const floor = stoneFloor(size, size, true);
-        floor.position.set(x, 0, z);
-        scene.add(floor);
-      } else {
-        addWall(size, size, x, z);
+      if (tile.type === "wall") addWall(size, size, x, z);
+      else if (tile.type === "grass") {
+        const grass = new THREE.Mesh(
+          new THREE.PlaneGeometry(size, size).rotateX(-Math.PI / 2),
+          new THREE.MeshLambertMaterial({ color: 0x415934 }),
+        );
+        grass.position.set(x, .012, z); grass.receiveShadow = true; scene.add(grass);
+      } else if (tile.type === "floor" || tile.type === "doorway") {
+        const stone = stoneFloor(size, size, true);
+        stone.position.set(x, .012, z); scene.add(stone);
       }
     }
   } else ROOM_REGIONS.forEach((region, index) => {

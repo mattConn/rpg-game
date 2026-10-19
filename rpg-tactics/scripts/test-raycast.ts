@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { FloorGrid, castRay } from '../src/client/raycast-world.js';
-import { ARENA_X, ARENA_Y, TILE_PX } from '../src/shared/tactics.js';
+import { FloorGrid, RaycastWorld, castRay } from '../src/client/raycast-world.js';
+import { ARENA_X, ARENA_Y, TILE_PX, configureEditorDungeon, inGrid } from '../src/shared/tactics.js';
 const grid = new FloorGrid([{ col: -3, row: -2, cols: 8, rows: 6 }]);
 const x = ARENA_X + TILE_PX, y = ARENA_Y + TILE_PX;
 assert.equal(castRay(grid, x, y, 1, 0).distance, 4 * TILE_PX);
@@ -48,9 +48,9 @@ camera.resetView();
 const defaultYaw = camera.yaw;
 camera.look(100, 10000);
 assert.equal(camera.yaw, defaultYaw - .6, 'Horizontal drag orbits opposite the pointer pan');
-assert.equal(Reflect.get(camera, 'cameraAngle'), Math.PI * 18 / 180, 'Pitch clamps above the floor');
+assert.equal(Reflect.get(camera, 'cameraAngle'), Math.PI * 45 / 180, 'Downward drag raises the inverted camera pitch');
 camera.look(0, -10000);
-assert.equal(Reflect.get(camera, 'cameraAngle'), Math.PI * 45 / 180, 'Pitch stays below the distortion-prone overhead view');
+assert.equal(Reflect.get(camera, 'cameraAngle'), Math.PI * 18 / 180, 'Upward drag lowers the inverted camera pitch');
 camera.zoom(10000);
 assert.equal(Reflect.get(camera, 'cameraDistance'), 1400, 'Zoom-out distance is bounded');
 camera.zoom(-10000);
@@ -135,3 +135,18 @@ const closePlane = castCameraRay(twoRooms, ARENA_X + 90, ARENA_Y + 90, 1, 0, [],
   { x: ARENA_X + 360, y: ARENA_Y + 90 });
 assert.equal(closePlane.veils[0]!.distance, 90, 'Camera-side wall retains grey overlay');
 assert.equal(closePlane.distance, 360, 'Wall beyond player remains opaque');
+
+configureEditorDungeon({
+  version: 1, name: 'Open editor map', width: 4, height: 3,
+  tiles: [{ x: 1, y: 1, type: 'wall' }, { x: 2, y: 1, type: 'grass' }],
+  entities: [{ id: 'player-1', type: 'player', x: 0, y: 0, facing: 0 }],
+});
+assert.equal(inGrid({ col: 0, row: 0 }), true, 'Unpainted editor cells are walkable');
+assert.equal(inGrid({ col: 19, row: 14 }), true, 'The full authored map is walkable');
+assert.equal(inGrid({ col: 5, row: 5 }), false, 'Deliberately placed walls remain solid');
+assert.equal(inGrid({ col: 10, row: 5 }), true, 'Grass remains ordinary walkable ground');
+assert.equal(inGrid({ col: -1, row: 0 }), false, 'The authored map edge remains a movement boundary');
+const editorWorld = new RaycastWorld();
+assert.equal(editorWorld.grid.at(-1, 0), 1, 'Rendered floor continues across the invisible map boundary');
+assert.equal(editorWorld.grid.at(5, 5), 0, 'Authored walls remain visible in the raycast grid');
+console.log('PASS: open editor floor, explicit wall collision, and invisible map boundary.');

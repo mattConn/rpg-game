@@ -1,5 +1,5 @@
 import { WORLD_HEIGHT } from '../../../src/shared/constants.js';
-import { ARENA_X, ARENA_Y, TILE_PX, DUNGEON_PORTAL, EDITOR_BUTTONS, EDITOR_EXIT, PRESSURE_PLATES, ROOM_REGIONS, HALL_REGIONS, DUNGEON_ENEMIES, EDITOR_DUNGEON, regionCentre, type TacticsSnapshot } from '../shared/tactics.js';
+import { ARENA_X, ARENA_Y, TILE_PX, DUNGEON_PORTAL, EDITOR_BUTTONS, EDITOR_EXIT, EDITOR_TILE_CELLS, PRESSURE_PLATES, ROOM_REGIONS, HALL_REGIONS, DUNGEON_ENEMIES, EDITOR_DUNGEON, regionCentre, type TacticsSnapshot } from '../shared/tactics.js';
 import { RaycastWorld, castCameraRay, type RayHit } from './raycast-world.js';
 import { playerBiteFrame } from './attack-presentation.js';
 import { buildBarrierFrames, BARRIER_WIDTH, BARRIER_HEIGHT } from './barrier-texture.js';
@@ -48,11 +48,18 @@ export class RaycastRenderer {
   private snakeMotion = new Map<string, { x: number; y: number; headingX: number; headingY: number; movedAt: number; turnedAt: number }>();
   private snakeTurnStartedAt = new Map<string, number>();
   private snakeAttackStartedAt = new Map<string, number>();
+  /** 0 = invisible default, 1 = stone, 2 = grass. O(1), allocation-free lookup per rendered pixel. */
+  private readonly editorGround = EDITOR_DUNGEON ? new Uint8Array(EDITOR_DUNGEON.width * EDITOR_DUNGEON.height) : null;
   private previousPlayerX = NaN; private previousPlayerY = NaN;
 
   constructor(private readonly canvas: HTMLCanvasElement, private quality: GraphicsQuality) {
     this.ctx = canvas.getContext('2d', { alpha: false })!;
     this.markers = new Uint8Array(this.world.grid.cells.length);
+    if (EDITOR_DUNGEON && this.editorGround) for (const tile of EDITOR_DUNGEON.tiles) {
+      if (tile.x < 0 || tile.y < 0 || tile.x >= EDITOR_DUNGEON.width || tile.y >= EDITOR_DUNGEON.height) continue;
+      if (tile.type === 'floor' || tile.type === 'doorway') this.editorGround[tile.y * EDITOR_DUNGEON.width + tile.x] = 1;
+      else if (tile.type === 'grass') this.editorGround[tile.y * EDITOR_DUNGEON.width + tile.x] = 2;
+    }
     this.proceduralSprites();
     // Spawn-room decoration persists after its spiders die. Sample it on wall
     // surfaces, so webs share the wall perspective and never float across doors.
@@ -124,7 +131,7 @@ export class RaycastRenderer {
   setQuality(quality: GraphicsQuality): void { this.quality = quality; }
   look(dx: number, dy: number): void {
     this.yaw -= dx * .006;
-    this.cameraAngle = Math.max(Math.PI * 18 / 180, Math.min(Math.PI * 45 / 180, this.cameraAngle - dy * .003));
+    this.cameraAngle = Math.max(Math.PI * 18 / 180, Math.min(Math.PI * 45 / 180, this.cameraAngle + dy * .003));
   }
   zoom(delta: number): void {
     this.cameraDistance = Math.max(260, Math.min(1400, this.cameraDistance * Math.exp(delta * .0012)));
@@ -280,11 +287,23 @@ export class RaycastRenderer {
         const row = Math.floor((yWorld - ARENA_Y) / TILE_PX) - grid.minRow;
         const inside = col >= 0 && row >= 0 && col < grid.width && row < grid.height
           && grid.cells[row * grid.width + col] === 1;
-        const ground = inside ? texture : grass;
+        const editorTileSize = TILE_PX * EDITOR_TILE_CELLS;
+        const editorX = Math.floor((xWorld - ARENA_X) / editorTileSize);
+        const editorY = Math.floor((yWorld - ARENA_Y) / editorTileSize);
+        const editorMaterial = EDITOR_DUNGEON && this.editorGround && editorX >= 0 && editorY >= 0
+          && editorX < EDITOR_DUNGEON.width && editorY < EDITOR_DUNGEON.height
+          ? this.editorGround[editorY * EDITOR_DUNGEON.width + editorX]! : 0;
+        const marker = col >= 0 && row >= 0 && col < grid.width && row < grid.height ? this.markers[row * grid.width + col] : 0;
+        // The unpainted editor floor exists for collision only. Leave the
+        // framebuffer's black background untouched unless an object marker
+        // (button/portal) needs to be drawn on this pixel.
+        if (EDITOR_DUNGEON && editorMaterial === 0 && marker === 0) continue;
+        const ground = EDITOR_DUNGEON ? (editorMaterial === 2 ? grass : texture) : (inside ? texture : grass);
         const tx = Math.floor(xWorld / 90 * ground.width) & (ground.width - 1);
         const ty = Math.floor(yWorld / 90 * ground.height) & (ground.height - 1);
-        let color = (inside ? stoneShades : grassShades)[ty * ground.width + tx]!;
-        const marker = col >= 0 && row >= 0 && col < grid.width && row < grid.height ? this.markers[row * grid.width + col] : 0;
+        let color = (EDITOR_DUNGEON
+          ? (editorMaterial === 2 ? grassShades : stoneShades)
+          : (inside ? stoneShades : grassShades))[ty * ground.width + tx]!;
         if (marker === 3) {
           const portalDx = xWorld - DUNGEON_PORTAL.holePosition.x;
           const portalDy = yWorld - DUNGEON_PORTAL.holePosition.y;

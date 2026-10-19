@@ -145,7 +145,7 @@ export interface EditorDungeonConfig {
   name: string;
   width: number;
   height: number;
-  tiles: Array<{ x: number; y: number; type: "floor" | "wall" | "doorway" }>;
+  tiles: Array<{ x: number; y: number; type: "floor" | "grass" | "wall" | "doorway" }>;
   entities: EditorDungeonEntity[];
 }
 /** Present only when the real game was launched from the level editor. */
@@ -497,7 +497,10 @@ export function configureDungeon(seed: number): void {
 export function configureEditorDungeon(config: EditorDungeonConfig): void {
   EDITOR_DUNGEON = config;
   DUNGEON_SEED = 1;
-  const walkable = config.tiles.filter((tile) => tile.type === "floor" || tile.type === "doorway");
+  const wallKeys = new Set(config.tiles.filter((tile) => tile.type === "wall").map((tile) => `${tile.x},${tile.y}`));
+  const walkable = Array.from({ length: config.width * config.height }, (_, index) => ({
+    x: index % config.width, y: Math.floor(index / config.width),
+  })).filter((tile) => !wallKeys.has(`${tile.x},${tile.y}`));
   BOARD_REGION.col = 0;
   BOARD_REGION.row = 0;
   BOARD_REGION.cols = config.width * EDITOR_TILE_CELLS;
@@ -514,8 +517,10 @@ export function configureEditorDungeon(config: EditorDungeonConfig): void {
   BAT_HALL_REGION = BOARD_REGION;
   HALL_ROWS = 0;
 
-  // Horizontal runs preserve arbitrary painted floor shapes without making
-  // every tile a separately walled chamber.
+  // Every authored-map cell is floor unless the builder deliberately placed
+  // a wall. Horizontal runs preserve those wall cut-outs without making every
+  // tile a separately walled chamber. BOARD_REGION still provides the hard,
+  // invisible outer boundary for movement.
   const rows = new Map<number, number[]>();
   for (const tile of walkable) {
     const values = rows.get(tile.y) ?? [];
@@ -558,7 +563,6 @@ export function configureEditorDungeon(config: EditorDungeonConfig): void {
   PRESSURE_PLATE_ROOMS = [];
   PRESSURE_PLATES = [];
   const walkableKeys = new Set(walkable.map((tile) => `${tile.x},${tile.y}`));
-  const wallKeys = new Set(config.tiles.filter((tile) => tile.type === "wall").map((tile) => `${tile.x},${tile.y}`));
   const gateEntities = config.entities.filter((entity) => entity.type === "gate" && /^[0-9A-Za-z]$/.test(entity.label ?? ""));
   const gateAt = new Map(gateEntities.map((gate) => [`${gate.x},${gate.y}`, gate]));
   const gateOrientations = new Map<string, boolean>();

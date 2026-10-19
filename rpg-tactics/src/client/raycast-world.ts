@@ -1,4 +1,4 @@
-import { ARENA_X, ARENA_Y, TILE_PX, REGIONS, ROOM_REGIONS, DUNGEON_CONNECTIONS, DUNGEON_PORTAL, EDITOR_DUNGEON, EDITOR_GATES, EDITOR_TILE_CELLS, PRESSURE_PLATES, regionCentre, type Region, type TacticsSnapshot } from '../shared/tactics.js';
+import { ARENA_X, ARENA_Y, TILE_PX, BOARD_REGION, REGIONS, ROOM_REGIONS, DUNGEON_CONNECTIONS, DUNGEON_PORTAL, EDITOR_DUNGEON, EDITOR_GATES, EDITOR_TILE_CELLS, PRESSURE_PLATES, regionCentre, type Region, type TacticsSnapshot } from '../shared/tactics.js';
 
 export interface RayHit { distance: number; x: number; y: number; side: number; material: number }
 export interface Gate { x: number; y: number; min: number; max: number; vertical: boolean; material: number }
@@ -57,7 +57,7 @@ export function castRay(grid: FloorGrid, x: number, y: number, dx: number, dy: n
 }
 
 export class RaycastWorld {
-  readonly grid = new FloorGrid(REGIONS);
+  readonly grid = new FloorGrid(EDITOR_DUNGEON ? editorVisualRegions() : REGIONS);
   gates: Gate[] = [];
   private key = '';
   update(snap: TacticsSnapshot): void {
@@ -94,6 +94,23 @@ export class RaycastWorld {
       max: vertical ? ARENA_Y + (hall.row + hall.rows) * TILE_PX : ARENA_X + (hall.col + hall.cols) * TILE_PX });
   }
   cast(x: number, y: number, dx: number, dy: number, max = 6000, skipInitialWalls = false): RayHit { return castRay(this.grid, x, y, dx, dy, this.gates, max, skipInitialWalls); }
+}
+
+/**
+ * Gameplay stops at BOARD_REGION, but extending only the rendered floor keeps
+ * that collision boundary invisible instead of drawing a stone wall around it.
+ */
+function editorVisualRegions(): readonly Region[] {
+  const padding = Math.ceil(6000 / TILE_PX) + 2;
+  const west = BOARD_REGION.col, north = BOARD_REGION.row;
+  const east = west + BOARD_REGION.cols, south = north + BOARD_REGION.rows;
+  return [
+    ...REGIONS,
+    { col: west - padding, row: north - padding, cols: BOARD_REGION.cols + padding * 2, rows: padding, size: "medium" },
+    { col: west - padding, row: south, cols: BOARD_REGION.cols + padding * 2, rows: padding, size: "medium" },
+    { col: west - padding, row: north, cols: padding, rows: BOARD_REGION.rows, size: "medium" },
+    { col: east, row: north, cols: padding, rows: BOARD_REGION.rows, size: "medium" },
+  ];
 }
 
 /** View-only wall cutaway: solid gameplay geometry remains unchanged. */

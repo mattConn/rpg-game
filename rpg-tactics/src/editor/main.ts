@@ -1,6 +1,6 @@
 import { editorDungeonSeed } from "../shared/editor-seed.js";
 
-type TileType = "void" | "floor" | "wall" | "doorway";
+type TileType = "void" | "floor" | "grass" | "wall" | "doorway";
 type EntityType = "player" | "hellhound" | "bat" | "spider" | "gargoyle" | "snake"
   | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue"
   | "gate" | "gate-button" | "rock-1" | "rock-2" | "rock-3" | "rock-4"
@@ -25,10 +25,12 @@ interface ProjectData {
 interface ToolDefinition { type: ToolType; label: string; icon: string; group: "tile" | "entity" | "object" | "scenery" }
 
 const tools: ToolDefinition[] = [
-  { type: "floor", label: "Floor tile", icon: "◇", group: "tile" },
+  { type: "floor", label: "Stone tile", icon: "◇", group: "tile" },
+  { type: "grass", label: "Grass tile", icon: "♧", group: "tile" },
   { type: "wall", label: "Wall block", icon: "◆", group: "tile" },
   { type: "erase", label: "Erase", icon: "⌫", group: "tile" },
   { type: "player", label: "Player spawn", icon: "▲", group: "entity" },
+  { type: "spider", label: "Spider spawn", icon: "✣", group: "entity" },
   { type: "gate", label: "Gate", icon: "▥", group: "object" },
   { type: "gate-button", label: "Gate button", icon: "◉", group: "object" },
   { type: "portal-exit", label: "Exit hole", icon: "▣", group: "object" },
@@ -180,7 +182,7 @@ function normalizeLevel(value: unknown): LevelData {
   if (!Array.isArray(raw.tiles) || !Array.isArray(raw.entities)) {
     throw new Error("Invalid level dimensions, tiles, or entities.");
   }
-  const validTiles = new Set<TileType>(["floor", "wall", "doorway"]);
+  const validTiles = new Set<TileType>(["floor", "grass", "wall", "doorway"]);
   const nextTiles = raw.tiles.filter((tile): tile is LevelData["tiles"][number] =>
     !!tile && Number.isInteger(tile.x) && Number.isInteger(tile.y) && validTiles.has(tile.type));
   const nextEntities = raw.entities.filter((entity): entity is PlacedEntity =>
@@ -302,10 +304,15 @@ function drawTile(x: number, y: number, type: TileType): void {
     }
     return;
   }
-  context.fillStyle = type === "floor" || type === "doorway"
-    ? ((x + y) % 2 ? "#323943" : "#3a424d") : "#0b0e14";
+  context.fillStyle = type === "grass"
+    ? ((x + y) % 2 ? "#334827" : "#415934")
+    : type === "floor" || type === "doorway"
+      ? ((x + y) % 2 ? "#323943" : "#3a424d")
+      : ((x + y) % 2 ? "#080a0e" : "#0d1015");
   pathPolygon(base); context.fill();
-  context.strokeStyle = type === "void" ? "rgba(104,119,142,.22)" : "#596474";
+  context.strokeStyle = type === "grass" ? "#61744c"
+    : type === "floor" || type === "doorway" ? "#596474"
+      : type === "void" ? "rgba(104,119,142,.22)" : "#29303a";
   pathPolygon(base); context.stroke();
 }
 function drawEntity(entity: PlacedEntity): void {
@@ -346,6 +353,21 @@ function drawEntity(entity: PlacedEntity): void {
     pathPolygon(opening); context.fill(); context.stroke();
     context.fillStyle = "#d9ceff"; context.font = `700 ${Math.max(10, cellSize * .9)}px ui-monospace`; context.textAlign = "center"; context.textBaseline = "middle";
     context.fillText(entity.label ?? "?", centre.x, centre.y - cellSize * .08); context.restore(); return;
+  }
+  if (entity.type === "spider") {
+    context.save(); context.translate(centre.x, centre.y - cellSize * .28);
+    context.strokeStyle = "#d9b8ff"; context.fillStyle = "#6d3f91"; context.lineWidth = Math.max(1.5, cellSize * .11);
+    context.lineCap = "round";
+    for (const side of [-1, 1]) for (let leg = 0; leg < 4; leg++) {
+      const y = (leg - 1.5) * cellSize * .16;
+      context.beginPath(); context.moveTo(side * cellSize * .16, y);
+      context.lineTo(side * cellSize * (.48 + Math.abs(leg - 1.5) * .06), y + (leg - 1.5) * cellSize * .13); context.stroke();
+    }
+    context.beginPath(); context.ellipse(0, cellSize * .08, cellSize * .28, cellSize * .36, 0, 0, Math.PI * 2); context.fill(); context.stroke();
+    context.beginPath(); context.arc(0, -cellSize * .27, cellSize * .19, 0, Math.PI * 2); context.fill(); context.stroke();
+    context.fillStyle = "#ffcf4b";
+    for (const x of [-.08, .08]) { context.beginPath(); context.arc(x * cellSize, -cellSize * .31, Math.max(1.2, cellSize * .035), 0, Math.PI * 2); context.fill(); }
+    context.restore(); return;
   }
   if (entity.type !== "player") return;
   const size = cellSize * .48;
@@ -413,7 +435,7 @@ function placeTool(tool: ToolType, x: number, y: number): boolean {
     linkLabel.focus();
     return false;
   }
-  if (tileAt(x, y) !== "floor" && tileAt(x, y) !== "doorway") tiles[tileIndex(x, y)] = "floor";
+  if (tileAt(x, y) !== "floor" && tileAt(x, y) !== "grass" && tileAt(x, y) !== "doorway") tiles[tileIndex(x, y)] = "floor";
   if (entityType === "player") entities = entities.filter((entity) => entity.type !== "player");
   if (entityType === "portal-exit") entities = entities.filter((entity) => entity.type !== "portal-exit");
   entities = entities.filter((entity) => entity.x !== x || entity.y !== y);
@@ -591,7 +613,6 @@ document.querySelector("#save")!.addEventListener("click", async () => { if (awa
 document.querySelector("#play")!.addEventListener("click", async () => {
   if (!await saveProject()) return;
   for (const [label, level] of rooms) {
-    if (level.tiles.length === 0) { status.textContent = `Room ${label} needs at least one floor tile`; return; }
     if (!level.entities.some((entity) => entity.type === "player")) { status.textContent = `Room ${label} needs a player spawn`; return; }
     const gateLabels = new Set(level.entities.filter((entity) => entity.type === "gate").map((entity) => entity.label));
     const buttonLabels = new Set(level.entities.filter((entity) => entity.type === "gate-button").map((entity) => entity.label));

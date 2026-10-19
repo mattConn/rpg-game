@@ -387,21 +387,24 @@ function toOverlay(event: MouseEvent): Point {
 let uiCursor: Point | null = null;
 let groundCursor: Point | null = null;
 document.getElementById("play-help")!.textContent =
-  "WASD move · right-click walk · right-drag orbit · wheel zoom · left-click/Space bite · E eat · Shift run";
+  "WASD move · right-click walk · left-drag orbit · wheel zoom · left-click/Space bite · E eat · Shift run";
 let cameraDragging = false;
 let cameraPointerId: number | null = null;
+let cameraButton = -1;
 let cameraPointerX = 0;
 let cameraPointerY = 0;
 let cameraPressX = 0;
 let cameraPressY = 0;
 let cameraDragMoved = false;
+let suppressNextClick = false;
 function groundPoint(event: Pick<PointerEvent, "clientX" | "clientY">): Point | null {
   const bounds = uiCanvas.getBoundingClientRect();
   return stage.groundAt((event.clientX - bounds.left) / bounds.width, (event.clientY - bounds.top) / bounds.height);
 }
 uiCanvas.addEventListener("pointerdown", (event) => {
-  if (event.button !== 2 && !(event.ctrlKey && event.button === 0)) return;
+  if (event.button !== 0 && event.button !== 2) return;
   event.preventDefault(); cameraDragging = true; cameraPointerId = event.pointerId;
+  cameraButton = event.button;
   cameraPointerX = cameraPressX = event.clientX; cameraPointerY = cameraPressY = event.clientY;
   cameraDragMoved = false;
   uiCanvas.setPointerCapture(event.pointerId); uiCanvas.style.cursor = "grabbing";
@@ -411,8 +414,11 @@ uiCanvas.addEventListener("pointermove", (event) => {
     const dx = event.clientX - cameraPointerX, dy = event.clientY - cameraPointerY;
     cameraPointerX = event.clientX; cameraPointerY = event.clientY;
     if (cameraDragMoved || Math.hypot(event.clientX - cameraPressX, event.clientY - cameraPressY) >= 5) {
-      cameraDragMoved = true; stage.look(dx, dy);
-      if (heldKeys.size > 0) sendMoveDir();
+      cameraDragMoved = true;
+      if (cameraButton === 0) {
+        stage.look(dx, dy);
+        if (heldKeys.size > 0) sendMoveDir();
+      }
     }
     return;
   }
@@ -420,8 +426,9 @@ uiCanvas.addEventListener("pointermove", (event) => {
 });
 const finishCameraDrag = (event: PointerEvent) => {
   if (!cameraDragging || (cameraPointerId !== null && event.pointerId !== cameraPointerId)) return;
-  const walkTarget = !cameraDragMoved ? groundPoint(event) : null;
-  cameraDragging = false; cameraPointerId = null; uiCanvas.style.cursor = "";
+  const walkTarget = cameraButton === 2 && !cameraDragMoved && event.type === "pointerup" ? groundPoint(event) : null;
+  if (cameraButton === 0 && cameraDragMoved && event.type === "pointerup") suppressNextClick = true;
+  cameraDragging = false; cameraPointerId = null; cameraButton = -1; uiCanvas.style.cursor = "";
   if (walkTarget) send({ type: "click", x: walkTarget.x, y: walkTarget.y });
 };
 uiCanvas.addEventListener("pointerup", finishCameraDrag);
@@ -433,6 +440,7 @@ uiCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
 // ----------------------------------------------------------------- clicking
 
 uiCanvas.addEventListener("click", (event) => {
+  if (suppressNextClick) { suppressNextClick = false; return; }
   const uiPoint = toOverlay(event);
   if (SHOW_ACTION_BAR && hits(actionBarHandleRect(barOrigin), uiPoint)) return;
 
