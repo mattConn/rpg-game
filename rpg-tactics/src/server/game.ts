@@ -694,6 +694,7 @@ export class TacticsGame {
     // original doorway X and were therefore stopped by an invisible wall.
     const target = clampPointToFloor(raw);
     if (this.gateBlocksMove(from, target)) return false;
+    if (this.gargoyleBlocksMove(from, target)) return false;
     if (this.spikeFieldBlocksMove(from, target)) return false;
     const fromRegion = this.regionOfCell(clampToGrid(from));
     const targetRegion = this.regionOfCell(clampToGrid(target));
@@ -822,6 +823,7 @@ export class TacticsGame {
     if (this.gateBlocksMove(this.at(enemy), wanted)) {
       wanted = this.at(enemy);
     }
+    if (enemy.kind !== "bat" && this.gargoyleBlocksMove(this.at(enemy), wanted)) wanted = this.at(enemy);
     let target = wanted;
 
     if (this.crowds(enemy, wanted)) {
@@ -841,6 +843,7 @@ export class TacticsGame {
     if (this.gateBlocksMove(this.at(enemy), target)) {
       target = this.at(enemy);
     }
+    if (enemy.kind !== "bat" && this.gargoyleBlocksMove(this.at(enemy), target)) target = this.at(enemy);
 
     enemy.pos = { ...target };
     enemy.x = target.x;
@@ -1526,6 +1529,35 @@ export class TacticsGame {
         (((fromRegion === room && toRegion === connection.hall) ||
           (toRegion === room && fromRegion === connection.hall)) ||
          this.segmentCrossesGate(from, to, plate.roomIndex, connection));
+    });
+  }
+
+  /** Editor gargoyle statues are scenery, but still occupy their stone footprint. */
+  private gargoyleBlocksMove(from: Point, to: Point): boolean {
+    if (!EDITOR_DUNGEON) return false;
+    // The statue sprite is broad higher up, but its feet occupy only a compact
+    // patch of floor. Keep collision close to that base instead of reusing the
+    // old enemy gargoyle's generous combat hitbox.
+    const radius = MIN_SEPARATION;
+    const segmentX = to.x - from.x;
+    const segmentY = to.y - from.y;
+    const segmentLengthSquared = segmentX * segmentX + segmentY * segmentY;
+    return EDITOR_DUNGEON.entities.some((entity) => {
+      if (entity.type !== "gargoyle") return false;
+      const centre = {
+        x: ARENA_X + (entity.x + .5) * EDITOR_TILE_CELLS * TILE_PX,
+        y: ARENA_Y + (entity.y + .5) * EDITOR_TILE_CELLS * TILE_PX,
+      };
+      const fromGap = distance(from, centre);
+      const toGap = distance(to, centre);
+      // A migrated room may spawn an actor within the footprint. Let it move
+      // outward instead of permanently trapping it inside the statue.
+      if (fromGap < radius) return toGap < fromGap;
+      if (segmentLengthSquared < .001) return toGap < radius;
+      const projection = Math.max(0, Math.min(1,
+        ((centre.x - from.x) * segmentX + (centre.y - from.y) * segmentY) / segmentLengthSquared));
+      const nearest = { x: from.x + segmentX * projection, y: from.y + segmentY * projection };
+      return distance(nearest, centre) < radius;
     });
   }
 

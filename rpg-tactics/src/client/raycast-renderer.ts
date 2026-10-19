@@ -1,5 +1,5 @@
 import { WORLD_HEIGHT } from '../../../src/shared/constants.js';
-import { ARENA_X, ARENA_Y, TILE_PX, DUNGEON_PORTAL, EDITOR_BUTTONS, EDITOR_EXIT, EDITOR_TILE_CELLS, PRESSURE_PLATES, ROOM_REGIONS, HALL_REGIONS, DUNGEON_ENEMIES, EDITOR_DUNGEON, regionCentre, type TacticsSnapshot } from '../shared/tactics.js';
+import { ARENA_X, ARENA_Y, TILE_PX, DUNGEON_PORTAL, EDITOR_BUTTONS, EDITOR_EXIT, EDITOR_TILE_CELLS, PRESSURE_PLATES, ROOM_REGIONS, HALL_REGIONS, DUNGEON_ENEMIES, EDITOR_DUNGEON, configureEditorDungeon, regionCentre, type EditorDungeonConfig, type TacticsSnapshot } from '../shared/tactics.js';
 import { RaycastWorld, castCameraRay, type RayHit } from './raycast-world.js';
 import { playerBiteFrame } from './attack-presentation.js';
 import { buildBarrierFrames, BARRIER_WIDTH, BARRIER_HEIGHT } from './barrier-texture.js';
@@ -22,20 +22,30 @@ export class RaycastRenderer {
   yaw = CAMERA_YAW;
   private cameraAngle = CAMERA_ANGLE;
   private cameraDistance = CAMERA_DEFAULT;
+  // Normal editing should cost roughly the same regardless of total map size.
+  // Pulling back to the full-map view expands the horizon only as needed.
+  private get renderDistance(): number {
+    return this.editorGrid ? Math.min(30000, Math.max(6000, this.cameraDistance * 2.25)) : 6000;
+  }
   private width = 480; private height = 270; private viewWidth = 1600;
   private image!: ImageData; private pixels!: Uint32Array;
   private depths = new Float32Array(480);
   private wallVeils: { x: number; hit: RayHit }[] = [];
+  private gateOverlays: { x: number; hit: RayHit }[] = [];
   private wallBottoms = new Float32Array(480);
   private portalForeground = new Uint32Array(480 * 270);
   private portalOpeningMask = new Uint8Array(480 * 270);
+  private gateDepths = new Float32Array(480);
+  private gatePixelMask = new Uint8Array(480 * 270);
   private portalFallProgress = 0;
   private cameraX = 0; private cameraY = 0; private eye = CAMERA_DEFAULT * Math.tan(CAMERA_ANGLE);
+  private editorFocusX = 0; private editorFocusY = 0;
   private forwardX = 1; private forwardY = 0; private rightX = 0; private rightY = 1;
   private focal = 1; private horizon = 0;
   private readonly barrierFrames = buildBarrierFrames();
   private textures = new Map<string, Pixels>();
   private scenery: Billboard[] = [];
+  private gargoyleStatues: { x: number; y: number; facing: number }[] = [];
   private wallWebs: { side: number; plane: number; along: number; width: number }[] = [];
   private markers: Uint8Array;
   private markerKey = '';
@@ -49,10 +59,12 @@ export class RaycastRenderer {
   private snakeTurnStartedAt = new Map<string, number>();
   private snakeAttackStartedAt = new Map<string, number>();
   /** 0 = invisible default, 1 = stone, 2 = grass. O(1), allocation-free lookup per rendered pixel. */
-  private readonly editorGround = EDITOR_DUNGEON ? new Uint8Array(EDITOR_DUNGEON.width * EDITOR_DUNGEON.height) : null;
+  private editorGround = EDITOR_DUNGEON ? new Uint8Array(EDITOR_DUNGEON.width * EDITOR_DUNGEON.height) : null;
+  private editorLevel: EditorDungeonConfig | null = EDITOR_DUNGEON;
+  private editorTopologyKey = EDITOR_DUNGEON ? this.topologyKey(EDITOR_DUNGEON) : '';
   private previousPlayerX = NaN; private previousPlayerY = NaN;
 
-  constructor(private readonly canvas: HTMLCanvasElement, private quality: GraphicsQuality) {
+  constructor(private readonly canvas: HTMLCanvasElement, private quality: GraphicsQuality, private readonly editorGrid = false) {
     this.ctx = canvas.getContext('2d', { alpha: false })!;
     this.markers = new Uint8Array(this.world.grid.cells.length);
     if (EDITOR_DUNGEON && this.editorGround) for (const tile of EDITOR_DUNGEON.tiles) {
@@ -80,6 +92,8 @@ export class RaycastRenderer {
       for (const entity of EDITOR_DUNGEON.entities) {
         if (entity.type === 'boulder' || entity.type === 'angel-statue')
           prop(entity.type === 'boulder' ? 'boulder' : 'angel', ARENA_X + (entity.x + .5) * 90, ARENA_Y + (entity.y + .5) * 90);
+        else if (entity.type === 'gargoyle')
+          this.gargoyleStatues.push({ x: ARENA_X + (entity.x + .5) * 90, y: ARENA_Y + (entity.y + .5) * 90, facing: entity.facing });
         else if (/^rock-[1-8]$/.test(entity.type)) {
           const variant = Number(entity.type.slice('rock-'.length)) - 1;
           prop('boulder', ARENA_X + (entity.x + .5) * 90, ARENA_Y + (entity.y + .5) * 90,
@@ -95,8 +109,57 @@ export class RaycastRenderer {
     this.ready = Promise.all([
       this.load('wall', `/graphics/${quality === 'high' || quality === 'max' ? 'med' : quality}/textures/dungeon-wall-stone.png`, size),
       this.load('floor', `/graphics/${quality === 'high' || quality === 'max' ? 'med' : quality}/textures/dungeon-floor-stone.png`, size),
+      this.load('gate', '/textures/gate-weathered-iron.png'),
       ...Object.keys(SPRITE_META).map(name => this.load(name, `/sprites/${name}.png`)),
     ]).then(() => undefined);
+  }
+  /** Apply tile edits without replacing this renderer or disturbing its camera. */
+  updateEditorLevel(level: EditorDungeonConfig): void {
+    const topologyKey = this.topologyKey(level);
+    const topologyChanged = topologyKey !== this.editorTopologyKey;
+    this.editorTopologyKey = topologyKey;
+    this.editorLevel = level;
+    configureEditorDungeon(level);
+    // Entity, grass, and stone edits do not change raycast walls. Avoid
+    // rebuilding the multi-million-cell full-map visibility grid for them.
+    this.world.rebuildEditor(topologyChanged);
+    this.editorGround = new Uint8Array(level.width * level.height);
+    for (const tile of level.tiles) {
+      if (tile.x < 0 || tile.y < 0 || tile.x >= level.width || tile.y >= level.height) continue;
+      if (tile.type === 'floor' || tile.type === 'doorway') this.editorGround[tile.y * level.width + tile.x] = 1;
+      else if (tile.type === 'grass') this.editorGround[tile.y * level.width + tile.x] = 2;
+    }
+    this.markers = new Uint8Array(this.world.grid.cells.length);
+    this.markerKey = '';
+    this.rebuildEditorDecorations(level);
+  }
+  private topologyKey(level: EditorDungeonConfig): string {
+    let hash = 2166136261;
+    for (const tile of level.tiles) {
+      if (tile.type !== 'wall') continue;
+      hash ^= tile.x + tile.y * level.width;
+      hash = Math.imul(hash, 16777619);
+    }
+    return `${level.width}x${level.height}:${hash >>> 0}`;
+  }
+  private rebuildEditorDecorations(level: EditorDungeonConfig): void {
+    this.scenery = [];
+    this.gargoyleStatues = [];
+    const prop = (image: 'boulder' | 'angel', x: number, y: number, direction = 0, scale = 1) => {
+      const meta = SPRITE_META[image];
+      this.scenery.push({ x, y, z: (meta.center - (image === 'boulder' ? 6 : 0)) * scale,
+        span: meta.span * scale, image, direction: image === 'angel' ? (direction + 4) % 8 : direction, frame: 0 });
+    };
+    for (const entity of level.entities) {
+      const x = ARENA_X + (entity.x + .5) * EDITOR_TILE_CELLS * TILE_PX;
+      const y = ARENA_Y + (entity.y + .5) * EDITOR_TILE_CELLS * TILE_PX;
+      if (entity.type === 'boulder' || entity.type === 'angel-statue') prop(entity.type === 'boulder' ? 'boulder' : 'angel', x, y);
+      else if (entity.type === 'gargoyle') this.gargoyleStatues.push({ x, y, facing: entity.facing });
+      else if (/^rock-[1-8]$/.test(entity.type)) {
+        const variant = Number(entity.type.slice('rock-'.length)) - 1;
+        prop('boulder', x, y, variant, variant < 4 ? .72 : 1.08);
+      }
+    }
   }
   private async load(key: string, path: string, size?: number): Promise<void> {
     const img = new Image(); img.src = path;
@@ -127,24 +190,42 @@ export class RaycastRenderer {
     this.wallBottoms = new Float32Array(this.width);
     this.portalForeground = new Uint32Array(this.width * this.height);
     this.portalOpeningMask = new Uint8Array(this.width * this.height);
+    this.gateDepths = new Float32Array(this.width);
+    this.gatePixelMask = new Uint8Array(this.width * this.height);
   }
   setQuality(quality: GraphicsQuality): void { this.quality = quality; }
   look(dx: number, dy: number): void {
     this.yaw -= dx * .006;
     this.cameraAngle = Math.max(Math.PI * 18 / 180, Math.min(Math.PI * 45 / 180, this.cameraAngle + dy * .003));
   }
+  pan(dx: number, dy: number): void {
+    const scale = this.cameraDistance / Math.max(240, this.width);
+    this.editorFocusX += (-this.rightX * dx + this.forwardX * dy) * scale;
+    this.editorFocusY += (-this.rightY * dx + this.forwardY * dy) * scale;
+  }
   zoom(delta: number): void {
-    this.cameraDistance = Math.max(260, Math.min(1400, this.cameraDistance * Math.exp(delta * .0012)));
+    this.cameraDistance = Math.max(260, Math.min(this.editorGrid ? 18000 : 1400, this.cameraDistance * Math.exp(delta * .0012)));
+  }
+  showFullEditorMap(): void {
+    if (!this.editorGrid || !EDITOR_DUNGEON) return;
+    const centerX = ARENA_X + EDITOR_DUNGEON.width * EDITOR_TILE_CELLS * TILE_PX / 2;
+    const centerY = ARENA_Y + EDITOR_DUNGEON.height * EDITOR_TILE_CELLS * TILE_PX / 2;
+    if (Number.isFinite(this.previousPlayerX)) {
+      this.editorFocusX = centerX - this.previousPlayerX;
+      this.editorFocusY = centerY - this.previousPlayerY;
+    }
+    this.cameraDistance = 16000;
+    this.cameraAngle = Math.PI * 45 / 180;
   }
   flip(): void { this.yaw += Math.PI; }
-  resetView(): void { this.yaw = CAMERA_YAW; this.cameraAngle = CAMERA_ANGLE; this.cameraDistance = CAMERA_DEFAULT; }
+  resetView(): void { this.yaw = CAMERA_YAW; this.cameraAngle = CAMERA_ANGLE; this.cameraDistance = CAMERA_DEFAULT; this.editorFocusX = this.editorFocusY = 0; }
 
   /** Project a normalized canvas position onto the z=0 dungeon floor. */
   groundAt(u: number, v: number): { x: number; y: number } | null {
     const screenX = u * this.width, screenY = v * this.height;
     if (screenY <= this.horizon + 0.001) return null;
     const depth = this.eye * this.focal / (screenY - this.horizon);
-    if (!Number.isFinite(depth) || depth <= 0 || depth > 6000) return null;
+    if (!Number.isFinite(depth) || depth <= 0 || depth > this.renderDistance) return null;
     const across = (screenX - this.width / 2) * depth / this.focal;
     return {
       x: this.cameraX + this.forwardX * depth + this.rightX * across,
@@ -157,8 +238,8 @@ export class RaycastRenderer {
     this.rightX = Math.cos(this.yaw); this.rightY = -Math.sin(this.yaw);
     // Camera freely passes through geometry; player collision remains server-controlled.
     const distance = this.cameraDistance;
-    this.cameraX = snap.player.x - this.forwardX * distance;
-    this.cameraY = snap.player.y - this.forwardY * distance;
+    this.cameraX = snap.player.x + this.editorFocusX - this.forwardX * distance;
+    this.cameraY = snap.player.y + this.editorFocusY - this.forwardY * distance;
     // Preserve the selected viewing angle across zoom levels.
     const slope = Math.tan(this.cameraAngle);
     this.eye = distance * slope + 25;
@@ -171,6 +252,27 @@ export class RaycastRenderer {
     if (depth < 1 || !this.isPointVisible(x, y)) return { x: -10000, y: -10000 };
     return { x: (this.width / 2 + (dx * this.rightX + dy * this.rightY) * this.focal / depth) / this.width * this.viewWidth,
       y: (this.horizon + (this.eye - height * 30) * this.focal / depth) / this.height * WORLD_HEIGHT };
+  }
+  /** Unoccluded normalized projection used by the live level-editor grid. */
+  editorProject(x: number, y: number, height = 0): { x: number; y: number } | null {
+    const dx = x - this.cameraX, dy = y - this.cameraY;
+    const depth = dx * this.forwardX + dy * this.forwardY;
+    if (depth < 1) return null;
+    return {
+      x: (this.width / 2 + (dx * this.rightX + dy * this.rightY) * this.focal / depth) / this.width,
+      y: (this.horizon + (this.eye - height * 30) * this.focal / depth) / this.height,
+    };
+  }
+  /** The player billboard clamps near-camera depth; return its actual drawn anchor. */
+  editorPlayerProject(x: number, y: number): { x: number; y: number } | null {
+    const dx = x - this.cameraX, dy = y - this.cameraY;
+    const worldDepth = dx * this.forwardX + dy * this.forwardY;
+    if (worldDepth < 1) return null;
+    const depth = Math.max(120, worldDepth);
+    return {
+      x: (this.width / 2 + (dx * this.rightX + dy * this.rightY) * this.focal / depth) / this.width,
+      y: (this.horizon + this.eye * this.focal / depth) / this.height,
+    };
   }
   isPointVisible(x: number, y: number): boolean {
     const dx = x - this.cameraX, dy = y - this.cameraY;
@@ -202,12 +304,23 @@ export class RaycastRenderer {
   }
   render(snap: TacticsSnapshot, now: number): void {
     const start = performance.now();
+    if (this.editorGrid && this.editorLevel) {
+      const player = this.editorLevel.entities.find(entity => entity.type === 'player');
+      const x = player ? ARENA_X + (player.x + .5) * EDITOR_TILE_CELLS * TILE_PX : snap.player.x;
+      const y = player ? ARENA_Y + (player.y + .5) * EDITOR_TILE_CELLS * TILE_PX : snap.player.y;
+      const facing = player && Math.cos(player.facing) < 0 ? -1 : 1;
+      snap = { ...snap, enemies: [], corpses: [], projectiles: [], tombstones: [], dead: false,
+        purpleGem: { ...snap.purpleGem, destroyed: true }, player: { ...snap.player, x, y, facing }, playerHeading: player
+          ? { x: Math.cos(player.facing), y: Math.sin(player.facing) } : snap.playerHeading };
+    }
     this.world.update(snap); this.updateCamera(snap); this.updateMarkers(snap);
     this.pixels.fill(rgba(0, 0, 0));
     this.portalForeground.fill(0);
     this.portalOpeningMask.fill(0);
+    this.gateDepths.fill(Infinity);
+    this.gatePixelMask.fill(0);
     this.portalFallProgress = snap.dungeonPortal.fallProgress;
-    this.drawFloor(snap, now); this.drawWalls(now); this.drawPortalShaft(snap, now); this.drawSprites(snap, now);
+    this.drawFloor(snap, now); this.drawWalls(now); this.drawPortalShaft(snap, now); this.drawGateOverlays(); this.drawSprites(snap, now);
     this.drawPortalForeground(); this.drawWallVeils(now);
     this.previousPlayerX = snap.player.x; this.previousPlayerY = snap.player.y;
     this.ctx.putImageData(this.image, 0, 0);
@@ -272,9 +385,9 @@ export class RaycastRenderer {
       const distance = this.eye * this.focal / (y - this.horizon);
       // Fade out before the ray limit instead of stretching its last texture row
       // across the horizon. Nearby grass stays visible when zoomed out.
-      if (distance >= 6000) continue;
+      if (distance >= this.renderDistance) continue;
       const fogStart = this.cameraDistance + 2400;
-      const fog = Math.max(0, Math.min(1, (distance - fogStart) / (6000 - fogStart)));
+      const fog = Math.max(0, Math.min(1, (distance - fogStart) / (this.renderDistance - fogStart)));
       const visibility = 1 - fog * fog * (3 - 2 * fog);
       const light = Math.max(.35, Math.min(.9, 1.05 - Math.max(0, distance - this.cameraDistance) / 5000));
       const level = Math.max(0, Math.min(23, Math.floor(light * 24) - 1));
@@ -293,11 +406,23 @@ export class RaycastRenderer {
         const editorMaterial = EDITOR_DUNGEON && this.editorGround && editorX >= 0 && editorY >= 0
           && editorX < EDITOR_DUNGEON.width && editorY < EDITOR_DUNGEON.height
           ? this.editorGround[editorY * EDITOR_DUNGEON.width + editorX]! : 0;
+        const insideEditorMap = !!EDITOR_DUNGEON && editorX >= 0 && editorY >= 0
+          && editorX < EDITOR_DUNGEON.width && editorY < EDITOR_DUNGEON.height;
         const marker = col >= 0 && row >= 0 && col < grid.width && row < grid.height ? this.markers[row * grid.width + col] : 0;
+        const localGridX = ((xWorld - ARENA_X) % editorTileSize + editorTileSize) % editorTileSize;
+        const localGridY = ((yWorld - ARENA_Y) % editorTileSize + editorTileSize) % editorTileSize;
+        const gridThickness = Math.max(1.5, Math.hypot(stepX, stepY) * 1.15);
+        const onEditorGrid = this.editorGrid && insideEditorMap && (Math.min(localGridX, editorTileSize - localGridX) < gridThickness
+          || Math.min(localGridY, editorTileSize - localGridY) < gridThickness);
         // The unpainted editor floor exists for collision only. Leave the
         // framebuffer's black background untouched unless an object marker
         // (button/portal) needs to be drawn on this pixel.
-        if (EDITOR_DUNGEON && editorMaterial === 0 && marker === 0) continue;
+        if (EDITOR_DUNGEON && editorMaterial === 0 && marker === 0 && !onEditorGrid) continue;
+        if (EDITOR_DUNGEON && editorMaterial === 0 && onEditorGrid) {
+          const gridColor = shade(rgba(112, 151, 174), light * .72);
+          this.pixels[offset + x] = fog > 0 ? shade(gridColor, visibility) : gridColor;
+          continue;
+        }
         const ground = EDITOR_DUNGEON ? (editorMaterial === 2 ? grass : texture) : (inside ? texture : grass);
         const tx = Math.floor(xWorld / 90 * ground.width) & (ground.width - 1);
         const ty = Math.floor(yWorld / 90 * ground.height) & (ground.height - 1);
@@ -313,6 +438,12 @@ export class RaycastRenderer {
           if (edge <= 1) color = rgba(2, 2, snap.dungeonPortal.unlocked ? 7 + Math.sin(now / 220) * 2 : 3);
         }
         else if (marker) color = marker === 2 ? rgba(130, 77, 24) : rgba(20 + ((tx ^ ty) & 7), 23, 26);
+        else if (onEditorGrid) {
+          const gridColor = shade(rgba(142, 183, 207), light);
+          color = rgba((color & 255) * .42 + (gridColor & 255) * .58,
+            ((color >>> 8) & 255) * .42 + ((gridColor >>> 8) & 255) * .58,
+            ((color >>> 16) & 255) * .42 + ((gridColor >>> 16) & 255) * .58);
+        }
         const groundColor = marker ? shade(color, light) : color;
         this.pixels[offset + x] = fog > 0 ? shade(groundColor, visibility) : groundColor;
       }
@@ -421,19 +552,32 @@ export class RaycastRenderer {
   }
   private drawWalls(now: number) {
     this.wallVeils = [];
+    this.gateOverlays = [];
     const barrier = this.barrierFrames[Math.floor(now / 140) % 4]!;
     const texture = this.textures.get('wall');
     const webTexture = this.textures.get('web');
     for (let x = 0; x < this.width; x++) {
       const plane = (2 * (x + .5) / this.width - 1) * FOV;
-      const hit = castCameraRay(this.world.grid, this.cameraX, this.cameraY,
-        this.forwardX + this.rightX * plane, this.forwardY + this.rightY * plane, this.world.gates, this.cameraDistance, 6000,
+      const rayX = this.forwardX + this.rightX * plane, rayY = this.forwardY + this.rightY * plane;
+      let hit = castCameraRay(this.world.grid, this.cameraX, this.cameraY,
+        rayX, rayY, this.world.gates, this.cameraDistance, this.renderDistance,
         { x: this.cameraX + this.forwardX * this.cameraDistance, y: this.cameraY + this.forwardY * this.cameraDistance });
       for (const veil of hit.veils) {
         this.wallVeils.push({ x, hit: veil });
       }
-      this.depths[x] = hit.distance >= 6000 ? Infinity : hit.distance;
-      if (hit.distance >= 6000) continue;
+      if (hit.material === 1) {
+        // A gate blocks movement, not sight. Trace the same column without
+        // gates so walls and sprites behind it receive their real depth, then
+        // composite only the iron pixels after actors have rendered.
+        this.gateOverlays.push({ x, hit });
+        this.gateDepths[x] = hit.distance;
+        hit = castCameraRay(this.world.grid, this.cameraX, this.cameraY,
+          rayX, rayY, [], this.cameraDistance, this.renderDistance,
+          { x: this.cameraX + this.forwardX * this.cameraDistance, y: this.cameraY + this.forwardY * this.cameraDistance });
+        for (const veil of hit.veils) this.wallVeils.push({ x, hit: veil });
+      }
+      this.depths[x] = hit.distance >= this.renderDistance ? Infinity : hit.distance;
+      if (hit.distance >= this.renderDistance) continue;
       const top = this.horizon + (this.eye - WALL_HEIGHT) * this.focal / hit.distance;
       const bottom = this.horizon + this.eye * this.focal / hit.distance;
       this.wallBottoms[x] = bottom;
@@ -451,7 +595,6 @@ export class RaycastRenderer {
         const v = (y - top) / (bottom - top);
         let color = rgba(99, 86, 67);
         if (texture) { const ty = Math.max(0, Math.floor(v * WALL_HEIGHT / 90 * texture.height)) & (texture.height - 1); color = shaded![ty * texture.width + tx]!; }
-        if (hit.material === 1) color = Math.floor(u * 12) % 2 === 0 || Math.floor(v * 12) % 6 === 0 ? rgba(81, 88, 94) : rgba(13, 16, 19);
         if (hit.material === 2) color = barrier[Math.min(BARRIER_HEIGHT - 1, Math.max(0, Math.floor(v * BARRIER_HEIGHT))) * BARRIER_WIDTH + Math.floor(u * BARRIER_WIDTH)]!;
         if (web && webTexture) {
           const worldHeight = WALL_HEIGHT * (1 - v);
@@ -464,13 +607,47 @@ export class RaycastRenderer {
               ((color >>> 16) & 255) * (1 - alpha) + strand * alpha);
           }
         }
-        this.pixels[y * this.width + x] = hit.material === 2 ? shade(color, Math.max(.7, light))
+        const litColor = hit.material === 2 ? shade(color, Math.max(.7, light))
           : hit.material || !texture ? shade(color, light) : color;
+        this.pixels[y * this.width + x] = litColor;
+      }
+    }
+  }
+  private drawGateOverlays() {
+    const gateTexture = this.textures.get('gate');
+    for (const { x, hit } of this.gateOverlays) {
+      const depth = Math.max(1, hit.distance);
+      const top = this.horizon + (this.eye - WALL_HEIGHT) * this.focal / depth;
+      const bottom = this.horizon + this.eye * this.focal / depth;
+      const along = hit.side ? hit.x : hit.y;
+      const u = ((along / 90) % 1 + 1) % 1;
+      const light = Math.max(.4, Math.min(1, 1.15 - Math.max(0, depth - this.cameraDistance) / 5500)) * (hit.side ? .75 : 1);
+      for (let y = Math.max(0, Math.floor(top)); y < Math.min(this.height, Math.ceil(bottom)); y++) {
+        const v = (y - top) / (bottom - top);
+        let color: number, alpha = 1;
+        if (gateTexture) {
+          const tx = Math.min(gateTexture.width - 1, Math.floor(u * gateTexture.width));
+          const ty = Math.min(gateTexture.height - 1, Math.max(0, Math.floor(v * gateTexture.height)));
+          color = gateTexture.data[ty * gateTexture.width + tx]!;
+          alpha = (color >>> 24) / 255;
+          if (alpha <= .01) continue;
+        } else {
+          if (Math.floor(u * 12) % 2 !== 0 && Math.floor(v * 12) % 6 !== 0) continue;
+          color = rgba(81, 88, 94);
+        }
+        const iron = shade(color, light);
+        const behind = this.pixels[y * this.width + x]!;
+        this.gatePixelMask[y * this.width + x] = 1;
+        this.pixels[y * this.width + x] = alpha >= .995 ? iron : rgba(
+          (behind & 255) * (1 - alpha) + (iron & 255) * alpha,
+          ((behind >>> 8) & 255) * (1 - alpha) + ((iron >>> 8) & 255) * alpha,
+          ((behind >>> 16) & 255) * (1 - alpha) + ((iron >>> 16) & 255) * alpha);
       }
     }
   }
   private drawWallVeils(now: number) {
     const barrier = this.barrierFrames[Math.floor(now / 140) % 4]!;
+    const gateTexture = this.textures.get('gate');
     for (const { x, hit } of this.wallVeils) {
       const depth = Math.max(1, hit.distance);
       const top = this.horizon + (this.eye - WALL_HEIGHT) * this.focal / depth;
@@ -480,16 +657,25 @@ export class RaycastRenderer {
       for (let y = Math.max(0, Math.floor(top)); y < Math.min(this.height, Math.ceil(bottom)); y++) {
         const v = (y - top) / (bottom - top);
         let color: number;
+        let materialAlpha = 1;
         if (hit.material === 0) {
           color = rgba(15, 15, 15);
         } else if (hit.material === 1) {
-          // Keep the openings clear and the iron bars translucent.
-          if (Math.floor(u * 12) % 2 !== 0 && Math.floor(v * 12) % 6 !== 0) continue;
-          color = rgba(81, 88, 94);
+          if (gateTexture) {
+            const gateX = Math.min(gateTexture.width - 1, Math.floor(u * gateTexture.width));
+            const gateY = Math.min(gateTexture.height - 1, Math.max(0, Math.floor(v * gateTexture.height)));
+            const gatePixel = gateTexture.data[gateY * gateTexture.width + gateX]!;
+            materialAlpha = (gatePixel >>> 24) / 255;
+            if (materialAlpha <= .01) continue;
+            color = gatePixel;
+          } else {
+            if (Math.floor(u * 12) % 2 !== 0 && Math.floor(v * 12) % 6 !== 0) continue;
+            color = rgba(81, 88, 94);
+          }
         } else {
           color = barrier[Math.min(BARRIER_HEIGHT - 1, Math.max(0, Math.floor(v * BARRIER_HEIGHT))) * BARRIER_WIDTH + Math.floor(u * BARRIER_WIDTH)]!;
         }
-        const alpha = .45;
+        const alpha = .45 * materialAlpha;
         const pixel = this.pixels[y * this.width + x]!;
         this.pixels[y * this.width + x] = rgba((pixel & 255) * (1 - alpha) + (color & 255) * alpha,
           ((pixel >>> 8) & 255) * (1 - alpha) + ((color >>> 8) & 255) * alpha,
@@ -499,7 +685,14 @@ export class RaycastRenderer {
   }
   private drawSprites(snap: TacticsSnapshot, now: number) {
     const sceneryDirectionOffset = Math.round((this.yaw - CAMERA_YAW) / (Math.PI / 4));
-    const sprites: Billboard[] = this.scenery.map(sprite => ({
+    // Keep a generous ring beyond the visible ground so objects enter without
+    // popping, while map size no longer determines per-frame sprite work.
+    const cullRadius = Math.min(this.renderDistance, Math.max(1800, this.cameraDistance * 2.75 + 900));
+    const nearPlayer = (point: { x: number; y: number }, margin = 0) =>
+      Math.abs(point.x - snap.player.x) <= cullRadius + margin
+      && Math.abs(point.y - snap.player.y) <= cullRadius + margin
+      && Math.hypot(point.x - snap.player.x, point.y - snap.player.y) <= cullRadius + margin;
+    const sprites: Billboard[] = this.scenery.filter(sprite => nearPlayer(sprite, sprite.span)).map(sprite => ({
       ...sprite, direction: ((sprite.direction - sceneryDirectionOffset) % 8 + 8) % 8,
     }));
     const addActor = (actor: { x: number; y: number; facing: number; heading?: { x: number; y: number }; altitude?: number }, name: keyof typeof SPRITE_META, moving: boolean) => {
@@ -510,9 +703,23 @@ export class RaycastRenderer {
       sprites.push(sprite);
       return sprite;
     };
+    for (const statue of this.gargoyleStatues) if (nearPlayer(statue, 180)) addActor({
+      ...statue, heading: { x: Math.cos(statue.facing), y: Math.sin(statue.facing) },
+    }, 'gargoyle', false);
+    if (this.editorGrid && this.editorLevel) {
+      for (const entity of this.editorLevel.entities) {
+        if (entity.type !== 'hellhound' && entity.type !== 'bat' && entity.type !== 'spider' && entity.type !== 'snake') continue;
+        const x = ARENA_X + (entity.x + .5) * EDITOR_TILE_CELLS * TILE_PX;
+        const y = ARENA_Y + (entity.y + .5) * EDITOR_TILE_CELLS * TILE_PX;
+        if (!nearPlayer({ x, y }, 180)) continue;
+        addActor({ x, y, facing: 1, heading: { x: Math.cos(entity.facing), y: Math.sin(entity.facing) },
+          altitude: entity.type === 'bat' ? 4 : 0 }, entity.type, false);
+      }
+    }
     const houndIds = new Set<string>();
     const spiderIds = new Set<string>();
     for (const enemy of snap.enemies) {
+      if (!nearPlayer(enemy, 240)) continue;
       const kind = enemy.kind ?? 'hellhound';
       let moving = enemy.aggro || kind === 'bat';
       if (kind === 'hellhound') {
@@ -581,14 +788,16 @@ export class RaycastRenderer {
     for (const id of this.snakeMotion.keys()) if (!snakeIds.has(id)) this.snakeMotion.delete(id);
     for (const id of this.snakeAttackStartedAt.keys()) if (!snakeIds.has(id)) this.snakeAttackStartedAt.delete(id);
     for (const id of this.snakeTurnStartedAt.keys()) if (!snakeIds.has(id)) this.snakeTurnStartedAt.delete(id);
-    for (const corpse of snap.corpses) if (!corpse.eaten) addActor({ ...corpse, altitude: 0 }, `${corpse.kind ?? 'hellhound'}-dead` as keyof typeof SPRITE_META, false);
+    for (const corpse of snap.corpses) if (!corpse.eaten && nearPlayer(corpse, 180)) addActor({ ...corpse, altitude: 0 }, `${corpse.kind ?? 'hellhound'}-dead` as keyof typeof SPRITE_META, false);
     let playerSprite: Billboard | undefined;
-    if (!snap.dead) playerSprite = addActor({
+    const showPlayer = !this.editorGrid || !this.editorLevel
+      || this.editorLevel.entities.some(entity => entity.type === 'player');
+    if (!snap.dead && showPlayer) playerSprite = addActor({
       ...snap.player,
       heading: snap.playerHeading,
       altitude: -snap.dungeonPortal.fallProgress * 5.5,
     }, 'player', Math.hypot(snap.player.x - this.previousPlayerX, snap.player.y - this.previousPlayerY) > .05);
-    else addActor({ ...snap.player, altitude: 0 }, 'player-dead', false);
+    else if (snap.dead && showPlayer) addActor({ ...snap.player, altitude: 0 }, 'player-dead', false);
     if (playerSprite && snap.dungeonPortal.fallProgress > 0) {
       playerSprite.span *= 1 - snap.dungeonPortal.fallProgress * .48;
     }
@@ -607,9 +816,9 @@ export class RaycastRenderer {
       if (player) { player.image = 'player-bite'; player.frame = bite; }
     }
 
-    if (!snap.purpleGem.destroyed) sprites.push({ x: snap.purpleGem.x, y: snap.purpleGem.y, z: 32 + Math.sin(now / 400) * 3, span: SPRITE_META.gem.span, image: 'gem', direction: Math.floor(now / 180) % 8, frame: 0 });
-    for (const p of snap.projectiles) sprites.push({ x: p.x, y: p.y, z: 35, span: 28, image: 'dagger', direction: 0, frame: 0 });
-    for (const stone of snap.tombstones) sprites.push({ x: stone.x, y: stone.y, z: SPRITE_META.cross.center - 3.6, span: SPRITE_META.cross.span, image: 'cross', direction: 0, frame: 0 });
+    if (!snap.purpleGem.destroyed && nearPlayer(snap.purpleGem, 120)) sprites.push({ x: snap.purpleGem.x, y: snap.purpleGem.y, z: 32 + Math.sin(now / 400) * 3, span: SPRITE_META.gem.span, image: 'gem', direction: Math.floor(now / 180) % 8, frame: 0 });
+    for (const p of snap.projectiles) if (nearPlayer(p, 100)) sprites.push({ x: p.x, y: p.y, z: 35, span: 28, image: 'dagger', direction: 0, frame: 0 });
+    for (const stone of snap.tombstones) if (nearPlayer(stone, 120)) sprites.push({ x: stone.x, y: stone.y, z: SPRITE_META.cross.center - 3.6, span: SPRITE_META.cross.span, image: 'cross', direction: 0, frame: 0 });
     if (snap.spikeTrap?.active) {
       const room = ROOM_REGIONS[snap.spikeTrap.roomIndex];
       if (room) { const center = regionCentre(room);
@@ -634,8 +843,9 @@ export class RaycastRenderer {
     for (const sprite of sprites) this.drawBillboard(sprite);
   }
   private drawBillboard(sprite: Billboard) {
-    const depth = sprite.image.startsWith("player") ? Math.max(120, sprite.depth!) : sprite.depth!;
-    if (depth < 4 || depth > 6000) return;
+    const worldDepth = sprite.depth!;
+    const depth = sprite.image.startsWith("player") ? Math.max(120, worldDepth) : worldDepth;
+    if (depth < 4 || depth > this.renderDistance) return;
     const image = this.textures.get(sprite.image); if (!image) return;
     const across = (sprite.x - this.cameraX) * this.rightX + (sprite.y - this.cameraY) * this.rightY;
     const size = sprite.span * this.focal / depth;
@@ -657,6 +867,10 @@ export class RaycastRenderer {
       for (let y = y0; y < y1; y++) {
         const sy = sprite.frame * frameSize + Math.min(frameSize - 1, Math.max(0, Math.floor((y - top) / size * frameSize)));
         const pixel = image.data[sy * image.width + sx]!;
+        // Gates are see-through depth surfaces. A sprite on the camera side
+        // paints over their bars; one on the far side remains behind the bars
+        // but is still visible through the transparent openings.
+        if (worldDepth > this.gateDepths[x]! && this.gatePixelMask[y * this.width + x]) continue;
         if (sprite.image.startsWith('player') && this.portalFallProgress > 0
             && !this.portalOpeningMask[y * this.width + x]) continue;
         if ((pixel >>> 24) > 100) this.pixels[y * this.width + x] = sprite.image === 'shadow'

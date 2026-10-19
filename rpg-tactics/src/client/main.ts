@@ -26,6 +26,7 @@ import { GRAPHICS_PRESETS, readGraphicsQuality, setupGraphicsControl } from "./g
 // ------------------------------------------------------------------ canvases
 
 const pageUrl = new URL(location.href);
+const editingMode = pageUrl.searchParams.has("editing");
 const carriedHealthStorageKey = "rpg-next-dungeon-health";
 const carriedHealth = sessionStorage.getItem(carriedHealthStorageKey)
   ?? pageUrl.searchParams.get("health"); // Migrate links produced by older builds once.
@@ -60,7 +61,7 @@ const uiCanvas = document.getElementById("ui") as HTMLCanvasElement;
 const ctx = uiCanvas.getContext("2d")!;
 
 let graphicsQuality = readGraphicsQuality();
-const stage = new RaycastRenderer(sceneCanvas, graphicsQuality);
+const stage = new RaycastRenderer(sceneCanvas, graphicsQuality, editingMode);
 const connectionStatus = document.getElementById("connection-status")!;
 let assetsReady = false;
 stage.ready.then(() => { assetsReady = true; connectionStatus.textContent = ""; }).catch(() => {
@@ -115,6 +116,21 @@ setupGraphicsControl(graphicsQuality, (quality) => {
 });
 window.addEventListener("resize", resize);
 resize();
+
+if (editingMode) {
+  document.body.classList.add("editing-mode");
+  Object.assign(window, { rpgEditorBridge: {
+    groundAt: (u: number, v: number) => stage.groundAt(u, v),
+    project: (x: number, y: number, height = 0) => stage.editorProject(x, y, height),
+    projectPlayer: (x: number, y: number) => stage.editorPlayerProject(x, y),
+    look: (dx: number, dy: number) => stage.look(dx, dy),
+    pan: (dx: number, dy: number) => stage.pan(dx, dy),
+    zoom: (delta: number) => stage.zoom(delta),
+    reset: () => stage.resetView(),
+    fullMap: () => stage.showFullEditorMap(),
+    updateLevel: (level: EditorDungeonConfig) => stage.updateEditorLevel(level),
+  } });
+}
 
 // ---------------------------------------------------------------- websocket
 
@@ -186,6 +202,7 @@ function connectWebSocket() {
       // Ignore malformed messages.
     }
   });
+  if (editingMode) ws.addEventListener("open", () => ws.send(JSON.stringify({ type: "wait", held: true })));
 
   ws.addEventListener("close", () => {
     connectionStatus.textContent = "Reconnecting…";

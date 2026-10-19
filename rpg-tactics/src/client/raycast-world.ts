@@ -57,9 +57,13 @@ export function castRay(grid: FloorGrid, x: number, y: number, dx: number, dy: n
 }
 
 export class RaycastWorld {
-  readonly grid = new FloorGrid(EDITOR_DUNGEON ? editorVisualRegions() : REGIONS);
+  grid = new FloorGrid(EDITOR_DUNGEON ? editorVisualRegions() : REGIONS);
   gates: Gate[] = [];
   private key = '';
+  rebuildEditor(topologyChanged = true): void {
+    if (topologyChanged) this.grid = new FloorGrid(editorVisualRegions());
+    this.key = '';
+  }
   update(snap: TacticsSnapshot): void {
     const key = snap.pressurePlates.map(p => Number(p.active)).join('') + ':' + snap.editorGates.map(g => Number(g.closed)).join('') + ':' + snap.dungeonPortal.unlocked;
     if (key === this.key) return;
@@ -72,10 +76,9 @@ export class RaycastWorld {
       if (room && connection) this.addGate(room, connection.hall, 1);
     }
     const halfSpan = EDITOR_TILE_CELLS * TILE_PX / 2;
-    for (const state of snap.editorGates) {
-      if (!state.closed) continue;
-      const gate = EDITOR_GATES.find(candidate => candidate.id === state.id);
-      if (!gate) continue;
+    for (const gate of EDITOR_GATES) {
+      const state = snap.editorGates.find(candidate => candidate.id === gate.id);
+      if (state && !state.closed) continue;
       const centre = gate.vertical ? gate.y : gate.x;
       this.gates.push({ x: gate.x, y: gate.y, vertical: gate.vertical, material: 1, min: centre - halfSpan, max: centre + halfSpan });
     }
@@ -101,7 +104,10 @@ export class RaycastWorld {
  * that collision boundary invisible instead of drawing a stone wall around it.
  */
 function editorVisualRegions(): readonly Region[] {
-  const padding = Math.ceil(6000 / TILE_PX) + 2;
+  // The editor can pull back far enough to frame the complete 100×100 map.
+  // Extend only its view grid so the distant camera starts inside renderable
+  // space; gameplay keeps its original, much smaller ray horizon.
+  const padding = Math.ceil(18000 / TILE_PX) + 2;
   const west = BOARD_REGION.col, north = BOARD_REGION.row;
   const east = west + BOARD_REGION.cols, south = north + BOARD_REGION.rows;
   return [

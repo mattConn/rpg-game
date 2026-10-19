@@ -277,32 +277,6 @@ const generateEnemies = (seed: number, rooms: readonly Region[]): readonly Dunge
       });
     }
   });
-  // A single rare statue occupies a free corner in one ordinary combat room.
-  // Keep the established four-enemy room cap by choosing only a room with room
-  // for it; the dedicated spawn and portal chambers remain quiet.
-  if (enemyRandom() < 0.1) {
-    const eligible = rooms.map((room, roomIndex) => ({ room, roomIndex })).filter(({ roomIndex }) =>
-      roomIndex !== 0 && roomIndex !== PORTAL_ROOM_INDEX);
-    const chosen = eligible[Math.floor(enemyRandom() * eligible.length)];
-    if (chosen) {
-      const roomEnemies = result.filter((enemy) => enemy.roomIndex === chosen.roomIndex);
-      if (roomEnemies.length >= 4) {
-        const replaced = result.lastIndexOf(roomEnemies.at(-1)!);
-        if (replaced >= 0) result.splice(replaced, 1);
-      }
-      const corner = Math.floor(enemyRandom() * 4);
-      const across = corner % 2 === 0 ? 0.16 : 0.84;
-      const down = corner < 2 ? 0.16 : 0.84;
-      result.push({
-        kind: "gargoyle",
-        roomIndex: chosen.roomIndex,
-        cell: {
-          col: chosen.room.col + Math.floor(chosen.room.cols * across),
-          row: chosen.room.row + Math.floor(chosen.room.rows * down),
-        },
-      });
-    }
-  }
   // Thirty percent of floors contain a snake encounter. Ten percent of those
   // encounters are a pair; both use free-looking positions in one combat room.
   if (enemyRandom() < 0.3) {
@@ -554,7 +528,7 @@ export function configureEditorDungeon(config: EditorDungeonConfig): void {
   const editorPosition = (x: number, y: number) => cellCenter({ col: editorCell(x), row: editorCell(y) });
   PLAYER_START.col = editorCell(player?.x ?? fallback.x);
   PLAYER_START.row = editorCell(player?.y ?? fallback.y);
-  const enemyKinds = new Set(["hellhound", "bat", "spider", "gargoyle", "snake"]);
+  const enemyKinds = new Set(["hellhound", "bat", "spider", "snake"]);
   DUNGEON_ENEMIES = config.entities.filter((entity) => enemyKinds.has(entity.type)).map((entity) => ({
     kind: entity.type as DungeonEnemySpawn["kind"],
     roomIndex: 0,
