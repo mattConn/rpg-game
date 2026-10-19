@@ -59,6 +59,7 @@
       </div>
       <h2>Tiles</h2>
       <div class="palette" id="tile-palette"></div>
+      <p class="sub">The fill bucket uses the last selected stone, grass, or wall tile.</p>
       <h2>Spawn</h2>
       <div class="palette" id="entity-palette"></div>
       <h2>Gates &amp; Buttons</h2>
@@ -78,13 +79,20 @@
           <option value="-2.356194490192345">North-west</option>
         </select>
       </label>
-      <p class="sub">Choose a facing direction for actors and gargoyles. Rocks use their baked orientations.</p>
+      <p class="sub">Choose a facing direction for actors, statues, and dead trees. Rocks use their baked orientations.</p>
       <div class="palette" id="scenery-palette"></div>
     </aside>
     <main>
       <header>
         <input id="level-name" type="text" value="Untitled Room" aria-label="Level name" />
         <span class="grid-size">100 × 100</span>
+        <label>Layer
+          <select id="editor-layer" aria-label="Editor layer">
+            <option value="terrain">Terrain &amp; objects</option>
+            <option value="rain">Rain region</option>
+            <option value="shadow">Shadow regions</option>
+          </select>
+        </label>
         <span class="spacer"></span>
         <button id="undo">Undo</button><button id="redo">Redo</button>
         <button id="save">Save</button><button id="load">Load</button>

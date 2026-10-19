@@ -183,16 +183,16 @@ const PLAYER_HEAD_FORWARD = SQUARE_PX * 0.5;
 const PLAYER_HEAD_RADIUS = SQUARE_PX * 0.28;
 const JUMP_SPEED_MULTIPLIER = 1.8;
 const BAT_PATROL_RADIUS = SQUARE_PX * 1.35;
-const BAT_PATROL_ANGULAR_SPEED = 0.72;
-const BAT_PURSUIT_SPEED = 92;
-const BAT_STRIKE_AT_MS = 600;
+const BAT_PATROL_ANGULAR_SPEED = 1.44;
+const BAT_PURSUIT_SPEED = 184;
+/** Fast enough that walking stays in bite range; sprinting can clear the locked dive target. */
+const BAT_STRIKE_AT_MS = 300;
 const BAT_DIVE_LINGER_MS = 500;
 const BAT_DIVE_RECOVERY_MS = 500;
 const BAT_DIVE_MS = BAT_STRIKE_AT_MS + BAT_DIVE_LINGER_MS + BAT_DIVE_RECOVERY_MS;
 const BAT_ATTACK_INTERVAL_MS = 1800;
 const BAT_DIVE_TRIGGER_RANGE = MELEE_RANGE * 2.0;
 const BAT_BITE_RANGE = MELEE_RANGE;
-const BAT_ATTACK_CONE_DOT = Math.cos(Math.PI / 4);
 /** Broad ellipse covering the bat's body and extended wings. */
 const BAT_BODY_HALF_LENGTH = SQUARE_PX * 1.75;
 const BAT_BODY_HALF_WIDTH = SQUARE_PX * 1.5;
@@ -277,6 +277,8 @@ interface Hound extends Actor {
   patrolDir: 1 | -1;
   heading: Point;
   patrolAngle?: number;
+  /** Authored bats orbit their placed spawn instead of the full editor-map centre. */
+  patrolCentre?: Point;
   diveAt?: number | null;
   diveHit?: boolean;
   diveOrigin?: Point;
@@ -293,6 +295,10 @@ interface Hound extends Actor {
   gargoyleSneakArmed?: boolean;
   movementStartsAt: number;
   roomIndex: number;
+  /** Side currently chosen while steering around a solid obstacle. */
+  pathTurn?: 1 | -1;
+  /** Keeps a hound from changing its mind at every tick on a symmetric obstacle. */
+  pathTurnUntil?: number;
 }
 
 interface DamageNumber {
@@ -463,6 +469,7 @@ export class TacticsGame {
           patrolLeft: center.x, patrolRight: center.x, patrolDir: 1 as const,
           heading: { x: -Math.sin(orbitPhase), y: Math.cos(orbitPhase) },
           patrolAngle: orbitPhase, diveAt: null,
+          patrolCentre: EDITOR_DUNGEON ? { ...center } : undefined,
           diveHit: false, diveOrigin: undefined, diveTarget: undefined, orbitAngle: orbitPhase,
           movementStartsAt,
           roomIndex: spawn.roomIndex,
@@ -694,7 +701,7 @@ export class TacticsGame {
     // original doorway X and were therefore stopped by an invisible wall.
     const target = clampPointToFloor(raw);
     if (this.gateBlocksMove(from, target)) return false;
-    if (this.gargoyleBlocksMove(from, target)) return false;
+    if (this.editorSceneryBlocksMove(from, target)) return false;
     if (this.spikeFieldBlocksMove(from, target)) return false;
     const fromRegion = this.regionOfCell(clampToGrid(from));
     const targetRegion = this.regionOfCell(clampToGrid(target));
@@ -823,7 +830,7 @@ export class TacticsGame {
     if (this.gateBlocksMove(this.at(enemy), wanted)) {
       wanted = this.at(enemy);
     }
-    if (enemy.kind !== "bat" && this.gargoyleBlocksMove(this.at(enemy), wanted)) wanted = this.at(enemy);
+    if (enemy.kind !== "bat" && this.editorSceneryBlocksMove(this.at(enemy), wanted)) wanted = this.at(enemy);
     let target = wanted;
 
     if (this.crowds(enemy, wanted)) {
@@ -843,7 +850,7 @@ export class TacticsGame {
     if (this.gateBlocksMove(this.at(enemy), target)) {
       target = this.at(enemy);
     }
-    if (enemy.kind !== "bat" && this.gargoyleBlocksMove(this.at(enemy), target)) target = this.at(enemy);
+    if (enemy.kind !== "bat" && this.editorSceneryBlocksMove(this.at(enemy), target)) target = this.at(enemy);
 
     enemy.pos = { ...target };
     enemy.x = target.x;
@@ -910,7 +917,7 @@ export class TacticsGame {
 
     if (!bat.aggro) {
       bat.patrolAngle = (bat.patrolAngle ?? 0) + dt * BAT_PATROL_ANGULAR_SPEED;
-      const centre = regionCentre(ROOM_REGIONS[bat.roomIndex]!);
+      const centre = bat.patrolCentre ?? regionCentre(ROOM_REGIONS[bat.roomIndex]!);
       const wanted = {
         x: centre.x + Math.cos(bat.patrolAngle) * BAT_PATROL_RADIUS,
         y: centre.y + Math.sin(bat.patrolAngle) * BAT_PATROL_RADIUS,
@@ -994,7 +1001,7 @@ export class TacticsGame {
     }
     if (!bat.diveHit && age >= BAT_STRIKE_AT_MS) {
       bat.diveHit = true;
-      if (distance(this.at(bat), player) <= BAT_BITE_RANGE && this.batAttackConeContains(bat, player)) {
+      if (distance(diveTarget, player) <= BAT_BITE_RANGE) {
         this.player.health = Math.max(0, this.player.health - 10);
         if (Math.random() < 0.2) {
           bat.health = Math.min(bat.maxHealth, bat.health + 10);
@@ -1469,12 +1476,83 @@ export class TacticsGame {
     ny /= len;
 
     const step = Math.min(ENEMY_SPEED * dt, gap);
+    ({ x: nx, y: ny } = this.houndPathDirection(enemy, enemyPos, { x: nx, y: ny }, goal, step, now));
     const target = this.place(enemy, { x: enemyPos.x + nx * step, y: enemyPos.y + ny * step });
     // Close enough to bite, it keeps its head on you while it shifts; crossing
     // the room, it looks where it is going, or it strafes.
     enemy.facing = biting
       ? facingToward(enemyPos, playerPos, enemy.facing)
       : facingToward(enemyPos, target, enemy.facing);
+  }
+
+  /**
+   * Test a short route against every static obstruction a grounded hound uses.
+   * Sampling the floor between the endpoints prevents a longer look-ahead
+   * probe from skipping across a narrow unpainted strip of an authored map.
+   */
+  private houndRouteClear(from: Point, to: Point): boolean {
+    const length = distance(from, to);
+    const samples = Math.max(1, Math.ceil(length / (TILE_PX * .45)));
+    for (let index = 1; index <= samples; index++) {
+      const amount = index / samples;
+      const point = {
+        x: from.x + (to.x - from.x) * amount,
+        y: from.y + (to.y - from.y) * amount,
+      };
+      if (!this.onFloor(point) || this.insideDungeonHole(point)) return false;
+    }
+    return !this.gateBlocksMove(from, to)
+      && !this.editorSceneryBlocksMove(from, to)
+      && !this.spikeFieldBlocksMove(from, to);
+  }
+
+  /**
+   * Lightweight local pathfinding for an aggroed hellhound. It normally uses
+   * the direct pursuit vector. When that route hits a wall, closed gate, rock,
+   * tree, or statue, it probes several directions around the obstruction and
+   * takes the clear route that still makes the most progress toward its goal.
+   * The chosen left/right side is retained briefly to prevent corner jitter.
+   */
+  private houndPathDirection(
+    enemy: Hound,
+    from: Point,
+    direct: Point,
+    goal: Point,
+    step: number,
+    now: number,
+  ): Point {
+    const directStep = { x: from.x + direct.x * step, y: from.y + direct.y * step };
+    if (this.houndRouteClear(from, directStep)) return direct;
+
+    const preferred: 1 | -1 = enemy.pathTurnUntil !== undefined && now < enemy.pathTurnUntil
+      ? (enemy.pathTurn ?? 1)
+      : (enemy.id.charCodeAt(enemy.id.length - 1) % 2 === 0 ? 1 : -1);
+    const angles = [
+      preferred * Math.PI / 3,
+      preferred * Math.PI / 2,
+      preferred * Math.PI * .75,
+      -preferred * Math.PI / 3,
+      -preferred * Math.PI / 2,
+      -preferred * Math.PI * .75,
+      Math.PI,
+    ];
+    const lookAhead = Math.max(step, SQUARE_PX * .9);
+    let best: { direction: Point; score: number; side: 1 | -1 } | null = null;
+    const baseAngle = Math.atan2(direct.y, direct.x);
+    for (const angle of angles) {
+      const direction = { x: Math.cos(baseAngle + angle), y: Math.sin(baseAngle + angle) };
+      const immediate = { x: from.x + direction.x * step, y: from.y + direction.y * step };
+      const probe = { x: from.x + direction.x * lookAhead, y: from.y + direction.y * lookAhead };
+      if (!this.houndRouteClear(from, immediate) || !this.houndRouteClear(from, probe)) continue;
+      const score = distance(probe, goal) + Math.abs(angle) * TILE_PX * .08;
+      if (!best || score < best.score) {
+        best = { direction, score, side: angle >= 0 ? 1 : -1 };
+      }
+    }
+    if (!best) return direct;
+    enemy.pathTurn = best.side;
+    enemy.pathTurnUntil = now + 900;
+    return best.direction;
   }
 
   private turnHoundToward(enemy: Hound, target: Point, dt: number): void {
@@ -1532,18 +1610,25 @@ export class TacticsGame {
     });
   }
 
-  /** Editor gargoyle statues are scenery, but still occupy their stone footprint. */
-  private gargoyleBlocksMove(from: Point, to: Point): boolean {
+  /** Solid editor decorations occupy a compact footprint around their base. */
+  private editorSceneryBlocksMove(from: Point, to: Point): boolean {
     if (!EDITOR_DUNGEON) return false;
     // The statue sprite is broad higher up, but its feet occupy only a compact
     // patch of floor. Keep collision close to that base instead of reusing the
     // old enemy gargoyle's generous combat hitbox.
-    const radius = MIN_SEPARATION;
     const segmentX = to.x - from.x;
     const segmentY = to.y - from.y;
     const segmentLengthSquared = segmentX * segmentX + segmentY * segmentY;
     return EDITOR_DUNGEON.entities.some((entity) => {
-      if (entity.type !== "gargoyle") return false;
+      const isTree = entity.type === "dead-tree-1" || entity.type === "dead-tree-2" || entity.type === "dead-tree-3";
+      const isStatue = entity.type === "gargoyle" || entity.type === "angel-statue" || entity.type === "spider-statue" || entity.type === "spider-wall-statue";
+      const rockMatch = /^rock-([1-8])$/.exec(entity.type);
+      const isRock = entity.type === "boulder" || rockMatch !== null;
+      if (!isStatue && !isTree && !isRock) return false;
+      const rockVariant = rockMatch ? Number(rockMatch[1]) : 8;
+      const radius = isTree ? MIN_SEPARATION * 1.44
+        : isStatue ? MIN_SEPARATION * 1.25
+          : rockVariant <= 4 ? MIN_SEPARATION * .58 : MIN_SEPARATION * .9;
       const centre = {
         x: ARENA_X + (entity.x + .5) * EDITOR_TILE_CELLS * TILE_PX,
         y: ARENA_Y + (entity.y + .5) * EDITOR_TILE_CELLS * TILE_PX,
@@ -1783,7 +1868,10 @@ export class TacticsGame {
     for (const enemy of this.enemies) {
       if (enemy.aggro) continue;
       if (enemy.kind === "gargoyle") continue;
-      if (withinAggro(this.at(enemy), player)) this.wake(enemy);
+      const noticed = enemy.kind === "hellhound"
+        ? distance(this.at(enemy), player) <= AGGRO_RANGE * 2
+        : withinAggro(this.at(enemy), player);
+      if (noticed) this.wake(enemy);
     }
   }
 
@@ -2397,15 +2485,6 @@ export class TacticsGame {
       + (across * across) / (BAT_BODY_HALF_WIDTH * BAT_BODY_HALF_WIDTH) <= 1;
   }
 
-  private batAttackConeContains(bat: Hound, point: Point): boolean {
-    const dx = point.x - bat.x;
-    const dy = point.y - bat.y;
-    const gap = Math.hypot(dx, dy);
-    if (gap < 0.001) return true;
-    const headingLength = Math.max(0.001, Math.hypot(bat.heading.x, bat.heading.y));
-    return (dx * bat.heading.x + dy * bat.heading.y) / (gap * headingLength) >= BAT_ATTACK_CONE_DOT;
-  }
-
   private nextDamageNumberId = 0;
 
   private spawnDamageNumber(x: number, y: number, amount: number | string, color: string): void {
@@ -2527,6 +2606,7 @@ export class TacticsGame {
       })),
       playerHeading: { ...this.playerHeading },
       playerRunning: this.playerRunning,
+      playerMoving: Math.hypot(this.moveDir.x, this.moveDir.y) > .001 || this.moveTarget !== null,
       playerEating: this.eating(),
       doors: { ...this.doors },
       targetDoor: this.targetDoor,

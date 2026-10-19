@@ -131,9 +131,9 @@ export let DUNGEON_SEED = 0x574f4c46;
 export interface EditorDungeonEntity {
   id: string;
   type: "player" | "hellhound" | "bat" | "spider" | "gargoyle" | "snake"
-    | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue"
+    | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue" | "spider-statue" | "spider-wall-statue"
     | "gate" | "gate-button" | "rock-1" | "rock-2" | "rock-3" | "rock-4"
-    | "rock-5" | "rock-6" | "rock-7" | "rock-8";
+    | "rock-5" | "rock-6" | "rock-7" | "rock-8" | "dead-tree-1" | "dead-tree-2" | "dead-tree-3";
   x: number;
   y: number;
   facing: number;
@@ -146,6 +146,12 @@ export interface EditorDungeonConfig {
   width: number;
   height: number;
   tiles: Array<{ x: number; y: number; type: "floor" | "grass" | "wall" | "doorway" }>;
+  rainRegions?: Array<{ x: number; y: number; width: number; height: number }>;
+  shadowRegions?: Array<{ x: number; y: number; width: number; height: number }>;
+  /** Legacy single rain rectangle, accepted when loading older saved rooms. */
+  rainRegion?: { x: number; y: number; width: number; height: number } | null;
+  /** Legacy painted rain cells, accepted when loading older saved rooms. */
+  rainTiles?: Array<{ x: number; y: number }>;
   entities: EditorDungeonEntity[];
 }
 /** Present only when the real game was launched from the level editor. */
@@ -956,6 +962,8 @@ export interface TacticsSnapshot extends GameSnapshot {
   playerHeading: Point;
   /** Whether Shift sprint is currently held. */
   playerRunning: boolean;
+  /** Whether the player is actively trying to move, even if collision prevents displacement. */
+  playerMoving: boolean;
   /** True during the one-second corpse-eating action. */
   playerEating: boolean;
   /** True means open. The two corridor doors are independently operated. */

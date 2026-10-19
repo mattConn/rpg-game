@@ -40,6 +40,14 @@ export const SPRITE_META = {
     "span": 252.28125000000009,
     "center": 22.083171773509108
   },
+  "spider-statue": {
+    "span": 252.28125000000009,
+    "center": 22.083171773509108
+  },
+  "spider-wall-statue": {
+    "span": 252.28125000000009,
+    "center": 97.03125000000003
+  },
   "spider-dead": {
     "span": 252.28125000000003,
     "center": 22.083171773509097
@@ -79,5 +87,17 @@ export const SPRITE_META = {
   "gem": {
     "span": 60.45000000000002,
     "center": 14.470243197438984
+  },
+  "dead-tree-1": {
+    "span": 288.6,
+    "center": 104.50642062391893
+  },
+  "dead-tree-2": {
+    "span": 288.6,
+    "center": 111
+  },
+  "dead-tree-3": {
+    "span": 288.6,
+    "center": 111
   }
 } as const;

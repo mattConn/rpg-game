@@ -1,0 +1,11 @@
+Model Information:
+* title:	Dead Tree
+* source:	https://sketchfab.com/3d-models/dead-tree-edb751f3e9f04670ac8feab7d9fc0c25
+* author:	Sea Land Air (https://sketchfab.com/sealandair)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Dead Tree" (https://sketchfab.com/3d-models/dead-tree-edb751f3e9f04670ac8feab7d9fc0c25) by Sea Land Air (https://sketchfab.com/sealandair) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

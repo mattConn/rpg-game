@@ -22,7 +22,6 @@ try {
   ] };
   const response = await fetch(`${base}/api/editor-level`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fixture) });
   const { id } = await response.json();
-  await page.addInitScript(({ id, fixture }) => { localStorage.setItem(`rpg-editor-level:${id}`, JSON.stringify(fixture)); }, { id, fixture });
   await page.goto(`${base}/?seed=1&editor=${id}`);
   await page.waitForFunction(() => document.getElementById('connection-status').textContent === '');
   await page.waitForTimeout(1000);

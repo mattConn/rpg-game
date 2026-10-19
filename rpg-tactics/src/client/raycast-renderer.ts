@@ -7,12 +7,16 @@ import { SPRITE_META } from './sprite-metadata.js';
 import { GRAPHICS_PRESETS, type GraphicsQuality } from './graphics.js';
 
 // A narrower lens and distant, fixed-elevation camera give an overhead ARPG view.
-const FOV = Math.tan(Math.PI * 50 / 360), WALL_HEIGHT = 168;
+const FOV = Math.tan(Math.PI * 50 / 360), WALL_HEIGHT = 336;
 const CAMERA_YAW = -Math.PI / 4, CAMERA_ANGLE = Math.PI * 30 / 180;
 const CAMERA_DEFAULT = 600;
 const PORTAL_HALF_SIZE = TILE_PX * 2.1;
 const rgba = (r: number, g: number, b: number) => (0xff000000 | (b << 16) | (g << 8) | r) >>> 0;
 const shade = (color: number, amount: number) => rgba(Math.min(255, (color & 255) * amount), Math.min(255, ((color >>> 8) & 255) * amount), Math.min(255, ((color >>> 16) & 255) * amount));
+const greyStone = (color: number, amount: number) => {
+  const luminance = ((color & 255) * .24 + ((color >>> 8) & 255) * .62 + ((color >>> 16) & 255) * .14) * amount;
+  return rgba(Math.min(255, luminance * .92), Math.min(255, luminance * .96), Math.min(255, luminance));
+};
 interface Pixels { width: number; height: number; data: Uint32Array; shades?: Uint32Array[]; bottomRows?: number[] }
 interface Billboard { x: number; y: number; z: number; span: number; image: string; direction: number; frame: number; depth?: number }
 
@@ -46,6 +50,10 @@ export class RaycastRenderer {
   private textures = new Map<string, Pixels>();
   private scenery: Billboard[] = [];
   private gargoyleStatues: { x: number; y: number; facing: number }[] = [];
+  private angelStatues: { x: number; y: number; facing: number }[] = [];
+  private spiderStatues: { x: number; y: number; facing: number }[] = [];
+  private spiderWallStatues: { x: number; y: number; facing: number }[] = [];
+  private deadTrees: { x: number; y: number; facing: number; image: 'dead-tree-1' | 'dead-tree-2' | 'dead-tree-3' }[] = [];
   private wallWebs: { side: number; plane: number; along: number; width: number }[] = [];
   private markers: Uint8Array;
   private markerKey = '';
@@ -60,6 +68,8 @@ export class RaycastRenderer {
   private snakeAttackStartedAt = new Map<string, number>();
   /** 0 = invisible default, 1 = stone, 2 = grass. O(1), allocation-free lookup per rendered pixel. */
   private editorGround = EDITOR_DUNGEON ? new Uint8Array(EDITOR_DUNGEON.width * EDITOR_DUNGEON.height) : null;
+  private editorRain = EDITOR_DUNGEON ? new Uint8Array(EDITOR_DUNGEON.width * EDITOR_DUNGEON.height) : null;
+  private editorShadow = EDITOR_DUNGEON ? new Uint8Array(EDITOR_DUNGEON.width * EDITOR_DUNGEON.height) : null;
   private editorLevel: EditorDungeonConfig | null = EDITOR_DUNGEON;
   private editorTopologyKey = EDITOR_DUNGEON ? this.topologyKey(EDITOR_DUNGEON) : '';
   private previousPlayerX = NaN; private previousPlayerY = NaN;
@@ -72,6 +82,8 @@ export class RaycastRenderer {
       if (tile.type === 'floor' || tile.type === 'doorway') this.editorGround[tile.y * EDITOR_DUNGEON.width + tile.x] = 1;
       else if (tile.type === 'grass') this.editorGround[tile.y * EDITOR_DUNGEON.width + tile.x] = 2;
     }
+    if (EDITOR_DUNGEON && this.editorRain) this.fillEditorRain(EDITOR_DUNGEON, this.editorRain);
+    if (EDITOR_DUNGEON && this.editorShadow) this.fillRegions(EDITOR_DUNGEON.shadowRegions ?? [], EDITOR_DUNGEON, this.editorShadow);
     this.proceduralSprites();
     // Spawn-room decoration persists after its spiders die. Sample it on wall
     // surfaces, so webs share the wall perspective and never float across doors.
@@ -90,10 +102,19 @@ export class RaycastRenderer {
     };
     if (EDITOR_DUNGEON) {
       for (const entity of EDITOR_DUNGEON.entities) {
-        if (entity.type === 'boulder' || entity.type === 'angel-statue')
-          prop(entity.type === 'boulder' ? 'boulder' : 'angel', ARENA_X + (entity.x + .5) * 90, ARENA_Y + (entity.y + .5) * 90);
+        if (entity.type === 'boulder')
+          prop('boulder', ARENA_X + (entity.x + .5) * 90, ARENA_Y + (entity.y + .5) * 90);
+        else if (entity.type === 'angel-statue')
+          this.angelStatues.push({ x: ARENA_X + (entity.x + .5) * 90, y: ARENA_Y + (entity.y + .5) * 90, facing: entity.facing });
+        else if (entity.type === 'spider-statue')
+          this.spiderStatues.push({ x: ARENA_X + (entity.x + .5) * 90, y: ARENA_Y + (entity.y + .5) * 90, facing: entity.facing });
+        else if (entity.type === 'spider-wall-statue')
+          this.spiderWallStatues.push({ x: ARENA_X + (entity.x + .5) * 90, y: ARENA_Y + (entity.y + .5) * 90, facing: entity.facing });
         else if (entity.type === 'gargoyle')
           this.gargoyleStatues.push({ x: ARENA_X + (entity.x + .5) * 90, y: ARENA_Y + (entity.y + .5) * 90, facing: entity.facing });
+        else if (entity.type === 'dead-tree-1' || entity.type === 'dead-tree-2' || entity.type === 'dead-tree-3')
+          this.deadTrees.push({ x: ARENA_X + (entity.x + .5) * 90, y: ARENA_Y + (entity.y + .5) * 90,
+            facing: entity.facing, image: entity.type });
         else if (/^rock-[1-8]$/.test(entity.type)) {
           const variant = Number(entity.type.slice('rock-'.length)) - 1;
           prop('boulder', ARENA_X + (entity.x + .5) * 90, ARENA_Y + (entity.y + .5) * 90,
@@ -124,14 +145,40 @@ export class RaycastRenderer {
     // rebuilding the multi-million-cell full-map visibility grid for them.
     this.world.rebuildEditor(topologyChanged);
     this.editorGround = new Uint8Array(level.width * level.height);
+    this.editorRain = new Uint8Array(level.width * level.height);
+    this.editorShadow = new Uint8Array(level.width * level.height);
     for (const tile of level.tiles) {
       if (tile.x < 0 || tile.y < 0 || tile.x >= level.width || tile.y >= level.height) continue;
       if (tile.type === 'floor' || tile.type === 'doorway') this.editorGround[tile.y * level.width + tile.x] = 1;
       else if (tile.type === 'grass') this.editorGround[tile.y * level.width + tile.x] = 2;
     }
+    this.fillEditorRain(level, this.editorRain);
+    this.fillRegions(level.shadowRegions ?? [], level, this.editorShadow);
     this.markers = new Uint8Array(this.world.grid.cells.length);
     this.markerKey = '';
     this.rebuildEditorDecorations(level);
+  }
+  private fillEditorRain(level: EditorDungeonConfig, target: Uint8Array): void {
+    const regions = level.rainRegions?.length ? level.rainRegions : level.rainRegion ? [level.rainRegion] : [];
+    if (regions.length) {
+      for (const region of regions) {
+      const x0 = Math.max(0, region.x), y0 = Math.max(0, region.y);
+      const x1 = Math.min(level.width, region.x + region.width), y1 = Math.min(level.height, region.y + region.height);
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) target[y * level.width + x] = 1;
+      }
+      return;
+    }
+    for (const tile of level.rainTiles ?? []) {
+      if (tile.x >= 0 && tile.y >= 0 && tile.x < level.width && tile.y < level.height)
+        target[tile.y * level.width + tile.x] = 1;
+    }
+  }
+  private fillRegions(regions: Array<{ x: number; y: number; width: number; height: number }>, level: EditorDungeonConfig, target: Uint8Array): void {
+    for (const region of regions) {
+      const x0 = Math.max(0, region.x), y0 = Math.max(0, region.y);
+      const x1 = Math.min(level.width, region.x + region.width), y1 = Math.min(level.height, region.y + region.height);
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) target[y * level.width + x] = 1;
+    }
   }
   private topologyKey(level: EditorDungeonConfig): string {
     let hash = 2166136261;
@@ -145,6 +192,10 @@ export class RaycastRenderer {
   private rebuildEditorDecorations(level: EditorDungeonConfig): void {
     this.scenery = [];
     this.gargoyleStatues = [];
+    this.angelStatues = [];
+    this.spiderStatues = [];
+    this.spiderWallStatues = [];
+    this.deadTrees = [];
     const prop = (image: 'boulder' | 'angel', x: number, y: number, direction = 0, scale = 1) => {
       const meta = SPRITE_META[image];
       this.scenery.push({ x, y, z: (meta.center - (image === 'boulder' ? 6 : 0)) * scale,
@@ -153,8 +204,13 @@ export class RaycastRenderer {
     for (const entity of level.entities) {
       const x = ARENA_X + (entity.x + .5) * EDITOR_TILE_CELLS * TILE_PX;
       const y = ARENA_Y + (entity.y + .5) * EDITOR_TILE_CELLS * TILE_PX;
-      if (entity.type === 'boulder' || entity.type === 'angel-statue') prop(entity.type === 'boulder' ? 'boulder' : 'angel', x, y);
+      if (entity.type === 'boulder') prop('boulder', x, y);
+      else if (entity.type === 'angel-statue') this.angelStatues.push({ x, y, facing: entity.facing });
+      else if (entity.type === 'spider-statue') this.spiderStatues.push({ x, y, facing: entity.facing });
+      else if (entity.type === 'spider-wall-statue') this.spiderWallStatues.push({ x, y, facing: entity.facing });
       else if (entity.type === 'gargoyle') this.gargoyleStatues.push({ x, y, facing: entity.facing });
+      else if (entity.type === 'dead-tree-1' || entity.type === 'dead-tree-2' || entity.type === 'dead-tree-3')
+        this.deadTrees.push({ x, y, facing: entity.facing, image: entity.type });
       else if (/^rock-[1-8]$/.test(entity.type)) {
         const variant = Number(entity.type.slice('rock-'.length)) - 1;
         prop('boulder', x, y, variant, variant < 4 ? .72 : 1.08);
@@ -170,7 +226,8 @@ export class RaycastRenderer {
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     const data = new Uint32Array(ctx.getImageData(0, 0, canvas.width, canvas.height).data.buffer);
     const shades = size ? Array.from({ length: 24 }, (_, level) => data.map(pixel => shade(pixel, (level + 1) / 24))) : undefined;
-    const bottomRows = key === 'boulder' ? Array.from({ length: 8 }, (_, direction) => {
+    const groundAnchored = key === 'boulder' || key === 'spider-wall-statue' || key.startsWith('dead-tree-');
+    const bottomRows = groundAnchored ? Array.from({ length: 8 }, (_, direction) => {
       const frame = canvas.width / 8;
       for (let y = frame - 1; y >= 0; y--) for (let x = 0; x < frame; x++)
         if ((data[y * canvas.width + direction * frame + x]! >>> 24) > 100) return y + 1;
@@ -196,7 +253,11 @@ export class RaycastRenderer {
   setQuality(quality: GraphicsQuality): void { this.quality = quality; }
   look(dx: number, dy: number): void {
     this.yaw -= dx * .006;
-    this.cameraAngle = Math.max(Math.PI * 18 / 180, Math.min(Math.PI * 45 / 180, this.cameraAngle + dy * .003));
+    // Gameplay can settle into a low, near-floor view. Keep the editor's
+    // higher minimum because its grid becomes difficult to place against at
+    // grazing angles.
+    const minimum = Math.PI * (this.editorGrid ? 18 : 5) / 180;
+    this.cameraAngle = Math.max(minimum, Math.min(Math.PI * 45 / 180, this.cameraAngle + dy * .003));
   }
   pan(dx: number, dy: number): void {
     const scale = this.cameraDistance / Math.max(240, this.width);
@@ -324,7 +385,7 @@ export class RaycastRenderer {
     this.drawPortalForeground(); this.drawWallVeils(now);
     this.previousPlayerX = snap.player.x; this.previousPlayerY = snap.player.y;
     this.ctx.putImageData(this.image, 0, 0);
-    this.drawRain(snap, now);
+    if (!this.editorGrid && this.rainingAt(snap.player.x, snap.player.y)) this.drawRain(snap, now);
     this.renderMs = performance.now() - start;
   }
   private drawRain(snap: TacticsSnapshot, now: number) {
@@ -373,6 +434,20 @@ export class RaycastRenderer {
       }
     }
     ctx.restore();
+  }
+  private rainingAt(x: number, y: number): boolean {
+    if (!this.editorLevel) return true;
+    const tileX = Math.floor((x - ARENA_X) / (EDITOR_TILE_CELLS * TILE_PX));
+    const tileY = Math.floor((y - ARENA_Y) / (EDITOR_TILE_CELLS * TILE_PX));
+    return !!this.editorRain && tileX >= 0 && tileY >= 0 && tileX < this.editorLevel.width && tileY < this.editorLevel.height
+      && this.editorRain[tileY * this.editorLevel.width + tileX] === 1;
+  }
+  private shadowedAt(x: number, y: number): boolean {
+    if (!this.editorLevel || !this.editorShadow) return false;
+    const tileX = Math.floor((x - ARENA_X) / (EDITOR_TILE_CELLS * TILE_PX));
+    const tileY = Math.floor((y - ARENA_Y) / (EDITOR_TILE_CELLS * TILE_PX));
+    return tileX >= 0 && tileY >= 0 && tileX < this.editorLevel.width && tileY < this.editorLevel.height
+      && this.editorShadow[tileY * this.editorLevel.width + tileX] === 1;
   }
   private drawFloor(snap: TacticsSnapshot, now: number) {
     const texture = this.textures.get('floor'), grass = this.textures.get('grass'), grid = this.world.grid;
@@ -444,7 +519,10 @@ export class RaycastRenderer {
             ((color >>> 8) & 255) * .42 + ((gridColor >>> 8) & 255) * .58,
             ((color >>> 16) & 255) * .42 + ((gridColor >>> 16) & 255) * .58);
         }
-        const groundColor = marker ? shade(color, light) : color;
+        const inShadowRegion = !!EDITOR_DUNGEON && !!this.editorShadow && editorX >= 0 && editorY >= 0
+          && editorX < EDITOR_DUNGEON.width && editorY < EDITOR_DUNGEON.height
+          && this.editorShadow[editorY * EDITOR_DUNGEON.width + editorX] === 1;
+        const groundColor = shade(marker ? shade(color, light) : color, inShadowRegion ? .52 : 1);
         this.pixels[offset + x] = fog > 0 ? shade(groundColor, visibility) : groundColor;
       }
     }
@@ -649,6 +727,9 @@ export class RaycastRenderer {
     const barrier = this.barrierFrames[Math.floor(now / 140) % 4]!;
     const gateTexture = this.textures.get('gate');
     for (const { x, hit } of this.wallVeils) {
+      // Camera-side stone walls use a clean cutaway. The former translucent
+      // grey veil covered the player and made low camera angles unreadable.
+      if (hit.material === 0) continue;
       const depth = Math.max(1, hit.distance);
       const top = this.horizon + (this.eye - WALL_HEIGHT) * this.focal / depth;
       const bottom = this.horizon + this.eye * this.focal / depth;
@@ -658,9 +739,7 @@ export class RaycastRenderer {
         const v = (y - top) / (bottom - top);
         let color: number;
         let materialAlpha = 1;
-        if (hit.material === 0) {
-          color = rgba(15, 15, 15);
-        } else if (hit.material === 1) {
+        if (hit.material === 1) {
           if (gateTexture) {
             const gateX = Math.min(gateTexture.width - 1, Math.floor(u * gateTexture.width));
             const gateY = Math.min(gateTexture.height - 1, Math.max(0, Math.floor(v * gateTexture.height)));
@@ -695,17 +774,29 @@ export class RaycastRenderer {
     const sprites: Billboard[] = this.scenery.filter(sprite => nearPlayer(sprite, sprite.span)).map(sprite => ({
       ...sprite, direction: ((sprite.direction - sceneryDirectionOffset) % 8 + 8) % 8,
     }));
-    const addActor = (actor: { x: number; y: number; facing: number; heading?: { x: number; y: number }; altitude?: number }, name: keyof typeof SPRITE_META, moving: boolean) => {
+    const addActor = (actor: { x: number; y: number; facing: number; heading?: { x: number; y: number }; altitude?: number }, name: keyof typeof SPRITE_META, moving: boolean, scale = 1) => {
       const meta = SPRITE_META[name];
       const angle = Math.atan2(this.cameraY - actor.y, this.cameraX - actor.x) - Math.atan2(actor.heading?.y ?? 0, actor.heading?.x ?? actor.facing);
       const direction = ((Math.round(angle / (Math.PI / 4)) % 8) + 8) % 8;
-      const sprite = { x: actor.x, y: actor.y, z: meta.center + (actor.altitude ?? 0) * 30, span: meta.span, image: name as string, direction, frame: moving ? 1 + Math.floor(now / 130) % 3 : 0 };
+      const sprite = { x: actor.x, y: actor.y, z: meta.center * scale + (actor.altitude ?? 0) * 30, span: meta.span * scale, image: name as string, direction, frame: moving ? 1 + Math.floor(now / 130) % 3 : 0 };
       sprites.push(sprite);
       return sprite;
     };
     for (const statue of this.gargoyleStatues) if (nearPlayer(statue, 180)) addActor({
       ...statue, heading: { x: Math.cos(statue.facing), y: Math.sin(statue.facing) },
-    }, 'gargoyle', false);
+    }, 'gargoyle', false, 1.5);
+    for (const statue of this.angelStatues) if (nearPlayer(statue, 180)) addActor({
+      ...statue, heading: { x: Math.cos(statue.facing), y: Math.sin(statue.facing) },
+    }, 'angel', false, 1.5);
+    for (const statue of this.spiderStatues) if (nearPlayer(statue, 220)) addActor({
+      ...statue, heading: { x: Math.cos(statue.facing), y: Math.sin(statue.facing) },
+    }, 'spider-statue', false, 2);
+    for (const statue of this.spiderWallStatues) if (nearPlayer(statue, 220)) addActor({
+      ...statue, heading: { x: Math.cos(statue.facing), y: Math.sin(statue.facing) },
+    }, 'spider-wall-statue', false, 2);
+    for (const tree of this.deadTrees) if (nearPlayer(tree, 260)) addActor({
+      ...tree, heading: { x: Math.cos(tree.facing), y: Math.sin(tree.facing) },
+    }, tree.image, false, 2);
     if (this.editorGrid && this.editorLevel) {
       for (const entity of this.editorLevel.entities) {
         if (entity.type !== 'hellhound' && entity.type !== 'bat' && entity.type !== 'spider' && entity.type !== 'snake') continue;
@@ -796,7 +887,8 @@ export class RaycastRenderer {
       ...snap.player,
       heading: snap.playerHeading,
       altitude: -snap.dungeonPortal.fallProgress * 5.5,
-    }, 'player', Math.hypot(snap.player.x - this.previousPlayerX, snap.player.y - this.previousPlayerY) > .05);
+    }, 'player', snap.playerMoving
+      || Math.hypot(snap.player.x - this.previousPlayerX, snap.player.y - this.previousPlayerY) > .05);
     else if (snap.dead && showPlayer) addActor({ ...snap.player, altitude: 0 }, 'player-dead', false);
     if (playerSprite && snap.dungeonPortal.fallProgress > 0) {
       playerSprite.span *= 1 - snap.dungeonPortal.fallProgress * .48;
@@ -838,6 +930,7 @@ export class RaycastRenderer {
     sprites.sort((a, b) => b.depth! - a.depth!);
     // Ground shadows are flattened cached sprites; they do not cast extra rays.
     for (const sprite of sprites) if (sprite.image in SPRITE_META && !['angel', 'gem', 'spider-wall'].includes(sprite.image)
+      && !sprite.image.startsWith('dead-tree-')
       && !(sprite.image.startsWith('player') && snap.dungeonPortal.fallProgress > 0))
       this.drawBillboard({ ...sprite, image: 'shadow', span: sprite.span * .6, z: 1, frame: 0, direction: 0 });
     for (const sprite of sprites) this.drawBillboard(sprite);
@@ -851,16 +944,27 @@ export class RaycastRenderer {
     const size = sprite.span * this.focal / depth;
     const left = this.width / 2 + across * this.focal / depth - size / 2;
     const groundY = this.horizon + this.eye * this.focal / depth;
-    // Anchor the visible rock silhouette, not the padded atlas or 3D bounds.
-    // Push it below that ground line, then let the floor hide the buried pixels.
-    const rockBottom = image.bottomRows?.[sprite.direction];
-    const top = rockBottom !== undefined
-      ? groundY - rockBottom / (image.width / 8) * size + 6 * this.focal / depth
+    // Anchor ground props by the lowest visible pixel in each directional
+    // frame, not the padded atlas or model bounds. Rocks retain a slight bury;
+    // tree roots sit exactly on the floor. The second tree has a narrow,
+    // uneven root mesh whose silhouette otherwise reads as hovering, so sink
+    // that variant slightly into the terrain.
+    const visibleBottom = image.bottomRows?.[sprite.direction];
+    const groundEmbed = sprite.image === 'boulder' ? 6 : sprite.image === 'dead-tree-2' ? 12 : 0;
+    const top = visibleBottom !== undefined
+      ? groundY - visibleBottom / (image.width / 8) * size
+        + groundEmbed * this.focal / depth
       : this.horizon + (this.eye - sprite.z) * this.focal / depth - size / 2;
     const x0 = Math.max(0, Math.floor(left)), x1 = Math.min(this.width, Math.ceil(left + size));
-    const y0 = Math.max(0, Math.floor(top)), y1 = Math.min(this.height, Math.ceil(top + size), rockBottom !== undefined ? Math.ceil(groundY) : this.height);
+    const y0 = Math.max(0, Math.floor(top)), y1 = Math.min(this.height, Math.ceil(top + size), visibleBottom !== undefined ? Math.ceil(groundY) : this.height);
     const frameSize = sprite.image in SPRITE_META ? image.width / 8 : image.width;
-    const light = Math.max(.45, Math.min(1.15, 1.2 - Math.max(0, depth - this.cameraDistance) / 5000));
+    const spriteLight = Math.max(.45, Math.min(1.15, 1.2 - Math.max(0, depth - this.cameraDistance) / 5000));
+    const actorReceivesRegionShadow = sprite.image.startsWith('player') || sprite.image.startsWith('hellhound')
+      || sprite.image.startsWith('bat') || sprite.image.startsWith('spider') || sprite.image.startsWith('snake')
+      || sprite.image.startsWith('gargoyle');
+    const regionShadow = actorReceivesRegionShadow && this.shadowedAt(sprite.x, sprite.y) ? .52 : 1;
+    const light = (sprite.image.startsWith('dead-tree-') ? spriteLight * .72
+      : sprite.image === 'gargoyle' ? spriteLight * .82 : spriteLight) * regionShadow;
     for (let x = x0; x < x1; x++) {
       if (!sprite.image.startsWith("player") && depth > this.depths[x]!) continue;
       const sx = sprite.direction * frameSize + Math.min(frameSize - 1, Math.max(0, Math.floor((x - left) / size * frameSize)));
@@ -874,7 +978,8 @@ export class RaycastRenderer {
         if (sprite.image.startsWith('player') && this.portalFallProgress > 0
             && !this.portalOpeningMask[y * this.width + x]) continue;
         if ((pixel >>> 24) > 100) this.pixels[y * this.width + x] = sprite.image === 'shadow'
-          ? shade(this.pixels[y * this.width + x]!, .6) : shade(pixel, light);
+          ? shade(this.pixels[y * this.width + x]!, .6)
+          : sprite.image === 'angel' ? greyStone(pixel, light * .68) : shade(pixel, light);
       }
     }
   }

@@ -37,6 +37,7 @@ const defaultEditorDataDir = join(dirname(fileURLToPath(import.meta.url)), "..",
 const editorProjectPath = process.env.EDITOR_PROJECT_PATH ?? join(defaultEditorDataDir, "editor-project.json");
 const editorDataDir = dirname(editorProjectPath);
 const editorProjectTempPath = `${editorProjectPath}.tmp`;
+const editorLevelsDir = join(editorDataDir, "editor-levels");
 
 const fastify = Fastify({ logger: true });
 
@@ -55,6 +56,7 @@ await fastify.register(fastifyStatic, {
 let game: TacticsGame | null = null;
 let activeSeed: number | null = null;
 let activeEditorLevel: string | null = null;
+let activeEditorRun: string | null = null;
 const editorLevels = new Map<string, EditorDungeonConfig>();
 
 interface EditorProject {
@@ -105,7 +107,37 @@ fastify.post<{ Body: EditorDungeonConfig }>("/api/editor-level", async (request,
   const seed = editorDungeonSeed(level);
   const id = String(seed);
   editorLevels.set(id, level);
+  try {
+    await mkdir(editorLevelsDir, { recursive: true });
+    const path = join(editorLevelsDir, `${id}.json`);
+    const tempPath = `${path}.tmp`;
+    await writeFile(tempPath, `${JSON.stringify(level)}\n`, "utf8");
+    await rename(tempPath, path);
+  } catch (error) {
+    fastify.log.error(error, "could not persist compiled editor level");
+    return reply.code(500).send({ error: "Could not persist editor level" });
+  }
   return { id, seed };
+});
+
+const loadEditorLevel = async (id: string): Promise<EditorDungeonConfig | undefined> => {
+  const cached = editorLevels.get(id);
+  if (cached) return cached;
+  if (!/^\d+$/.test(id)) return undefined;
+  try {
+    const level = JSON.parse(await readFile(join(editorLevelsDir, `${id}.json`), "utf8")) as EditorDungeonConfig;
+    if (level?.version !== 1 || !Array.isArray(level.tiles) || !Array.isArray(level.entities)) return undefined;
+    editorLevels.set(id, level);
+    return level;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") fastify.log.error(error, "could not read compiled editor level");
+    return undefined;
+  }
+};
+
+fastify.get<{ Params: { id: string } }>("/api/editor-level/:id", async (request, reply) => {
+  const level = await loadEditorLevel(request.params.id);
+  return level ?? reply.code(404).send({ error: "Editor level not found" });
 });
 
 // Use noServer mode so Fastify doesn't intercept the upgrade request.
@@ -117,10 +149,11 @@ fastify.server.on("upgrade", (request, socket, head) => {
   });
 });
 
-wss.on("connection", (ws, request) => {
+wss.on("connection", async (ws, request) => {
   const requestUrl = new URL(request.url ?? "/", "http://localhost");
   const editorLevelId = requestUrl.searchParams.get("editor");
-  const editorLevel = editorLevelId ? editorLevels.get(editorLevelId) : undefined;
+  const editorRun = requestUrl.searchParams.get("run");
+  const editorLevel = editorLevelId ? await loadEditorLevel(editorLevelId) : undefined;
   const rawSeed = requestUrl.searchParams.get("seed");
   const seed = Number(rawSeed);
   const validSeed = Number.isSafeInteger(seed) && seed >= 1 && seed <= 0xffffffff ? seed : 1;
@@ -135,12 +168,13 @@ wss.on("connection", (ws, request) => {
   // Never reuse the completed instance in that case: its first snapshot still
   // carries nextDungeonSeed and would immediately redirect the client forever.
   const completedTransition = game?.snapshot().nextDungeonSeed !== null;
-  if (!game || activeSeed !== validSeed || activeEditorLevel !== editorLevelId || completedTransition) {
+  if (!game || activeSeed !== validSeed || activeEditorLevel !== editorLevelId || activeEditorRun !== editorRun || completedTransition) {
     if (editorLevel) configureEditorDungeon(editorLevel);
     else configureDungeon(validSeed);
     game = new TacticsGame(Date.now(), initialHealth);
     activeSeed = validSeed;
     activeEditorLevel = editorLevel ? editorLevelId : null;
+    activeEditorRun = editorLevel ? editorRun : null;
     fastify.log.info(editorLevel
       ? { editorLevelId, resetAfterTransition: completedTransition }
       : { seed: validSeed, resetAfterTransition: completedTransition }, editorLevel ? "loaded editor dungeon" : "generated dungeon");

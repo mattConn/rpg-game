@@ -3,10 +3,11 @@ import { ARENA_X, ARENA_Y, EDITOR_TILE_CELLS, TILE_PX } from "../shared/tactics.
 
 type TileType = "void" | "floor" | "grass" | "wall" | "doorway";
 type EntityType = "player" | "hellhound" | "bat" | "spider" | "gargoyle" | "snake"
-  | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue"
+  | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue" | "spider-statue" | "spider-wall-statue"
   | "gate" | "gate-button" | "rock-1" | "rock-2" | "rock-3" | "rock-4"
-  | "rock-5" | "rock-6" | "rock-7" | "rock-8";
-type ToolType = TileType | EntityType | "erase";
+  | "rock-5" | "rock-6" | "rock-7" | "rock-8" | "dead-tree-1" | "dead-tree-2" | "dead-tree-3";
+type ToolType = TileType | EntityType | "rain" | "shadow" | "bucket" | "erase";
+type EditorLayer = "terrain" | "rain" | "shadow";
 
 interface PlacedEntity { id: string; type: EntityType; x: number; y: number; facing: number; label?: string; destinationSeed?: number }
 interface LevelData {
@@ -15,8 +16,13 @@ interface LevelData {
   width: number;
   height: number;
   tiles: Array<{ x: number; y: number; type: Exclude<TileType, "void"> }>;
+  rainRegions: RainRegion[];
+  shadowRegions: RainRegion[];
+  rainRegion?: RainRegion | null;
+  rainTiles?: Array<{ x: number; y: number }>;
   entities: PlacedEntity[];
 }
+interface RainRegion { x: number; y: number; width: number; height: number }
 interface ProjectData {
   version: 1;
   activeRoom: string;
@@ -29,6 +35,9 @@ const tools: ToolDefinition[] = [
   { type: "floor", label: "Stone tile", icon: "◇", group: "tile" },
   { type: "grass", label: "Grass tile", icon: "♧", group: "tile" },
   { type: "wall", label: "Wall block", icon: "◆", group: "tile" },
+  { type: "bucket", label: "Fill bucket", icon: "▰", group: "tile" },
+  { type: "rain", label: "Rain region", icon: "☂", group: "tile" },
+  { type: "shadow", label: "Shadow region", icon: "◩", group: "tile" },
   { type: "erase", label: "Delete", icon: "⌫", group: "tile" },
   { type: "player", label: "Player spawn", icon: "▲", group: "entity" },
   { type: "hellhound", label: "Hellhound spawn", icon: "◆", group: "entity" },
@@ -39,6 +48,12 @@ const tools: ToolDefinition[] = [
   { type: "gate-button", label: "Gate button", icon: "◉", group: "object" },
   { type: "portal-exit", label: "Exit hole", icon: "▣", group: "object" },
   { type: "gargoyle", label: "Gargoyle statue", icon: "♜", group: "scenery" },
+  { type: "angel-statue", label: "Angel statue", icon: "♝", group: "scenery" },
+  { type: "spider-statue", label: "Spider statue", icon: "✥", group: "scenery" },
+  { type: "spider-wall-statue", label: "Upright spider statue", icon: "✤", group: "scenery" },
+  { type: "dead-tree-1", label: "Dead tree 1", icon: "♨", group: "scenery" },
+  { type: "dead-tree-2", label: "Dead tree 2", icon: "♨", group: "scenery" },
+  { type: "dead-tree-3", label: "Dead tree 3", icon: "♨", group: "scenery" },
   ...Array.from({ length: 8 }, (_, index) => ({
     type: `rock-${index + 1}` as EntityType,
     label: `${index < 4 ? "Small" : "Large"} rock ${index % 4 + 1}`,
@@ -64,8 +79,8 @@ const linkLabel = document.querySelector<HTMLInputElement>("#link-label")!;
 const entityFacing = document.querySelector<HTMLSelectElement>("#entity-facing")!;
 const roomLabel = document.querySelector<HTMLInputElement>("#room-label")!;
 const roomSelect = document.querySelector<HTMLSelectElement>("#room-select")!;
+const editorLayer = document.querySelector<HTMLSelectElement>("#editor-layer")!;
 const validLinkLabel = (value: string) => /^[0-9A-Za-z]$/.test(value);
-const projectStorageKey = "rpg-dungeon-editor-project";
 const editorAssets = new Map<string, HTMLImageElement>();
 for (const [name, source] of Object.entries({
   floor: "/graphics/med/textures/dungeon-floor-stone.png",
@@ -73,8 +88,14 @@ for (const [name, source] of Object.entries({
   gate: "/textures/gate-weathered-iron.png",
   player: "/sprites/player.png",
   spider: "/sprites/spider.png",
+  "spider-statue": "/sprites/spider-statue.png",
+  "spider-wall-statue": "/sprites/spider-wall-statue.png",
   gargoyle: "/sprites/gargoyle.png",
+  angel: "/sprites/angel.png",
   boulder: "/sprites/boulder.png",
+  "dead-tree-1": "/sprites/dead-tree-1.png",
+  "dead-tree-2": "/sprites/dead-tree-2.png",
+  "dead-tree-3": "/sprites/dead-tree-3.png",
 })) {
   const image = new Image(); image.src = source; image.addEventListener("load", () => draw()); editorAssets.set(name, image);
 }
@@ -96,8 +117,14 @@ const height = 100;
 let cellSize = 12;
 let viewRotation = 0;
 let tiles: TileType[] = [];
+let rainRegions: RainRegion[] = [];
+let shadowRegions: RainRegion[] = [];
+let rainDragAnchor: { x: number; y: number } | null = null;
+let rainDragIndex: number | null = null;
 let entities: PlacedEntity[] = [];
 let selectedTool: ToolType = "floor";
+let selectedFillTile: Exclude<TileType, "void" | "doorway"> = "floor";
+let activeLayer: EditorLayer = "terrain";
 let drawing = false;
 let panning = false;
 let rotating = false;
@@ -143,7 +170,6 @@ async function refreshGamePreview(): Promise<void> {
     const response = await fetch("/api/editor-level", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(level) });
     if (!response.ok) return;
     const result = await response.json() as { id: string; seed: number };
-    localStorage.setItem(`rpg-editor-level:${result.id}`, JSON.stringify(level));
     gamePreview.src = `/?seed=${result.seed}&editor=${result.id}&editing=1`;
   } catch { /* The grid remains editable while the preview server is unavailable. */ }
 }
@@ -155,9 +181,19 @@ function schedulePreviewRefresh(): void {
 const tileIndex = (x: number, y: number) => y * width + x;
 const tileAt = (x: number, y: number) => tiles[tileIndex(x, y)] ?? "void";
 const inside = (x: number, y: number) => x >= 0 && y >= 0 && x < width && y < height;
+function lastRainRegionAt(x: number, y: number): number {
+  const regions = activeLayer === "shadow" ? shadowRegions : rainRegions;
+  for (let index = regions.length - 1; index >= 0; index--) {
+    const region = regions[index]!;
+    if (x >= region.x && y >= region.y && x < region.x + region.width && y < region.y + region.height) return index;
+  }
+  return -1;
+}
 
 function blankLevel(): void {
   tiles = Array.from({ length: width * height }, () => "void" as TileType);
+  rainRegions = [];
+  shadowRegions = [];
   entities = [];
 }
 
@@ -188,9 +224,6 @@ function storeCurrentRoom(label = activeRoomLabel): boolean {
 async function saveProject(): Promise<boolean> {
   if (!storeCurrentRoom(roomLabel.value)) return false;
   const project = projectData();
-  localStorage.setItem(projectStorageKey, JSON.stringify(project));
-  // Keep the original key updated so older editor builds can still recover the active room.
-  localStorage.setItem("rpg-dungeon-editor-level", snapshot());
   try {
     const response = await fetch("/api/editor-project", {
       method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(project),
@@ -227,7 +260,9 @@ function serialize(): LevelData {
     const type = tileAt(x, y);
     if (type !== "void") serializedTiles.push({ x, y, type });
   }
-  return { version: 1, name: levelName.value.trim() || "Untitled Dungeon", width, height, tiles: serializedTiles, entities: entities.map((entity) => ({ ...entity })) };
+  return { version: 1, name: levelName.value.trim() || "Untitled Dungeon", width, height, tiles: serializedTiles,
+    rainRegions: rainRegions.map((region) => ({ ...region })), shadowRegions: shadowRegions.map((region) => ({ ...region })),
+    entities: entities.map((entity) => ({ ...entity })) };
 }
 
 function snapshot(): string { return JSON.stringify(serialize()); }
@@ -256,13 +291,33 @@ function normalizeLevel(value: unknown): LevelData {
     !!entity && typeof entity.id === "string" && entityTypes.has(entity.type)
     && Number.isInteger(entity.x) && Number.isInteger(entity.y)
     && ((entity.type !== "gate" && entity.type !== "gate-button" && entity.type !== "portal-exit") || validLinkLabel(entity.label ?? "")));
-  return { version: 1, name: typeof raw.name === "string" ? raw.name : "Imported Dungeon", width, height, tiles: nextTiles, entities: nextEntities };
+  const nextRain = Array.isArray(raw.rainTiles) ? raw.rainTiles.filter((tile): tile is { x: number; y: number } =>
+    !!tile && Number.isInteger(tile.x) && Number.isInteger(tile.y) && inside(tile.x, tile.y)) : [];
+  const validRainRegion = (candidate: RainRegion | null | undefined): candidate is RainRegion => !!candidate
+    && Number.isInteger(candidate.x) && Number.isInteger(candidate.y) && candidate.x >= 0 && candidate.y >= 0
+    && candidate.x < width && candidate.y < height && Number.isInteger(candidate.width) && Number.isInteger(candidate.height)
+    && candidate.width > 0 && candidate.height > 0;
+  let nextRainRegions = Array.isArray(raw.rainRegions)
+    ? raw.rainRegions.filter(validRainRegion).map((region) => ({ ...region, width: Math.min(width - region.x, region.width), height: Math.min(height - region.y, region.height) }))
+    : [];
+  if (!nextRainRegions.length && validRainRegion(raw.rainRegion)) nextRainRegions = [{ ...raw.rainRegion }];
+  if (!nextRainRegions.length && nextRain.length) nextRainRegions = [(() => {
+      const xs = nextRain.map((tile) => tile.x), ys = nextRain.map((tile) => tile.y);
+      const x = Math.min(...xs), y = Math.min(...ys);
+      return { x, y, width: Math.max(...xs) - x + 1, height: Math.max(...ys) - y + 1 };
+    })()];
+  const nextShadowRegions = Array.isArray(raw.shadowRegions)
+    ? raw.shadowRegions.filter(validRainRegion).map((region) => ({ ...region, width: Math.min(width - region.x, region.width), height: Math.min(height - region.y, region.height) })) : [];
+  return { version: 1, name: typeof raw.name === "string" ? raw.name : "Imported Dungeon", width, height,
+    tiles: nextTiles, rainRegions: nextRainRegions, shadowRegions: nextShadowRegions, entities: nextEntities };
 }
 
 function applyLevel(level: LevelData, addHistory = true): void {
   levelName.value = level.name;
   tiles = Array.from({ length: width * height }, () => "void" as TileType);
   for (const tile of level.tiles) if (inside(tile.x, tile.y)) tiles[tileIndex(tile.x, tile.y)] = tile.type;
+  rainRegions = level.rainRegions.map((region) => ({ ...region }));
+  shadowRegions = level.shadowRegions.map((region) => ({ ...region }));
   entities = level.entities.filter((entity) => inside(entity.x, entity.y)).map((entity) => ({ ...entity }));
   sequence = Math.max(sequence, ...entities.map((entity) => Number(entity.id.split("-").at(-1)) || 0)) + 1;
   resizeCanvas();
@@ -358,7 +413,7 @@ function spriteDirection(facing: number): number {
   const cameraBearing = Math.PI * .75 - viewRotation;
   return ((Math.round((cameraBearing - facing) / (Math.PI / 4)) % 8) + 8) % 8;
 }
-function drawSprite(name: "player" | "spider" | "gargoyle" | "boulder", centre: { x: number; y: number }, direction: number, scale = 1): boolean {
+function drawSprite(name: "player" | "spider" | "spider-statue" | "spider-wall-statue" | "gargoyle" | "angel" | "boulder" | "dead-tree-1" | "dead-tree-2" | "dead-tree-3", centre: { x: number; y: number }, direction: number, scale = 1): boolean {
   const image = loadedAsset(name); if (!image) return false;
   const frameSize = image.naturalWidth / 8;
   const size = tileWidth() * scale;
@@ -477,10 +532,18 @@ function drawEntity(entity: PlacedEntity): void {
     for (const x of [-.08, .08]) { context.beginPath(); context.arc(x * cellSize, -cellSize * .31, Math.max(1.2, cellSize * .035), 0, Math.PI * 2); context.fill(); }
     context.restore(); return;
   }
+  if (entity.type === "spider-statue") {
+    drawSprite("spider-statue", centre, spriteDirection(entity.facing), 3.4);
+    return;
+  }
+  if (entity.type === "spider-wall-statue") {
+    drawSprite("spider-wall-statue", centre, spriteDirection(entity.facing), 3.4);
+    return;
+  }
   if (entity.type === "gargoyle") {
     const facing = Number.isFinite(entity.facing) ? entity.facing : 0;
     const tip = gridPoint(entity.x + .5 + Math.cos(facing) * .58, entity.y + .5 + Math.sin(facing) * .58);
-    if (!drawSprite("gargoyle", centre, spriteDirection(facing), 1.25)) {
+    if (!drawSprite("gargoyle", centre, spriteDirection(facing), 1.875)) {
       context.save(); context.translate(centre.x, centre.y - cellSize * .42);
       context.fillStyle = "#69717c"; context.strokeStyle = "#c0c7cf"; context.lineWidth = Math.max(1, cellSize * .08);
       context.beginPath(); context.moveTo(-cellSize * .42, cellSize * .45); context.lineTo(-cellSize * .28, -cellSize * .2);
@@ -494,6 +557,14 @@ function drawEntity(entity: PlacedEntity): void {
     const angle = Math.atan2(tip.y - centre.y, tip.x - centre.x);
     context.translate(tip.x, tip.y); context.rotate(angle); context.beginPath(); context.moveTo(0, 0);
     context.lineTo(-cellSize * .28, -cellSize * .16); context.lineTo(-cellSize * .28, cellSize * .16); context.closePath(); context.fill(); context.restore();
+    return;
+  }
+  if (entity.type === "angel-statue") {
+    drawSprite("angel", centre, spriteDirection(entity.facing), 2.7);
+    return;
+  }
+  if (entity.type === "dead-tree-1" || entity.type === "dead-tree-2" || entity.type === "dead-tree-3") {
+    drawSprite(entity.type, centre, spriteDirection(entity.facing), 4.8);
     return;
   }
   if (entity.type !== "player") return;
@@ -514,6 +585,21 @@ function draw(): void {
       const point = bridge.project(ARENA_X + x * editorTilePixels, ARENA_Y + y * editorTilePixels);
       return point ? { x: point.x * canvas.width, y: point.y * canvas.height } : null;
     };
+    if (activeLayer === "rain" || activeLayer === "shadow") for (const region of activeLayer === "shadow" ? shadowRegions : rainRegions) {
+      const { x, y, width: rainWidth, height: rainHeight } = region;
+      const corners = [project(x, y), project(x + rainWidth, y), project(x + rainWidth, y + rainHeight), project(x, y + rainHeight)];
+      if (corners.every((corner) => corner)) {
+        context.fillStyle = activeLayer === "shadow" ? "rgba(12, 15, 22, .58)" : "rgba(50, 157, 235, .42)";
+        context.strokeStyle = activeLayer === "shadow" ? "rgba(184, 191, 210, .95)" : "rgba(145, 220, 255, .9)";
+        context.lineWidth = 3;
+        pathPolygon(corners as Array<{ x: number; y: number }>); context.fill(); context.stroke();
+        context.fillStyle = activeLayer === "shadow" ? "#d9dce5" : "#d8f4ff";
+        context.strokeStyle = activeLayer === "shadow" ? "#4d5363" : "#197fb8"; context.lineWidth = 2;
+        for (const corner of corners) if (corner) {
+          context.beginPath(); context.arc(corner.x, corner.y, 7, 0, Math.PI * 2); context.fill(); context.stroke();
+        }
+      }
+    }
     for (const entity of entities) {
       const centre = project(entity.x + .5, entity.y + .5); if (!centre) continue;
       if (entity.label) {
@@ -521,14 +607,16 @@ function draw(): void {
         context.font = "700 15px ui-monospace"; context.textAlign = "center"; context.textBaseline = "middle";
         context.strokeText(entity.label, centre.x, centre.y - 12); context.fillText(entity.label, centre.x, centre.y - 12);
       }
-      if (entity.type === "gargoyle") {
+      if (entity.type === "gargoyle" || entity.type === "angel-statue" || entity.type === "spider-statue" || entity.type === "spider-wall-statue" || entity.type.startsWith("dead-tree-")) {
         const tip = project(entity.x + .5 + Math.cos(entity.facing) * .65, entity.y + .5 + Math.sin(entity.facing) * .65);
         if (tip) { context.strokeStyle = "#ffd553"; context.lineWidth = 2; context.beginPath(); context.moveTo(centre.x, centre.y); context.lineTo(tip.x, tip.y); context.stroke(); }
       }
     }
   }
   const level = serialize();
-  counts.textContent = `${level.tiles.length} placed tiles · ${entities.length} entities · ${entities.some(entity => entity.type === "player") ? "spawn ready" : "spawn missing"}`;
+  const rainArea = rainRegions.reduce((area, region) => area + region.width * region.height, 0);
+  const shadowArea = shadowRegions.reduce((area, region) => area + region.width * region.height, 0);
+  counts.textContent = `${level.tiles.length} tiles · ${rainRegions.length} rain (${rainArea}) · ${shadowRegions.length} shadow (${shadowArea}) · ${entities.length} entities · ${entities.some(entity => entity.type === "player") ? "spawn ready" : "spawn missing"}`;
   seedLabel.textContent = String(editorDungeonSeed(level));
 }
 function cellFromEvent(event: Pick<MouseEvent, "clientX" | "clientY">): { x: number; y: number } | null {
@@ -550,10 +638,11 @@ function entityFromEvent(event: Pick<MouseEvent, "clientX" | "clientY">): Placed
   const rect = canvas.getBoundingClientRect();
   const pointerX = event.clientX - rect.left, pointerY = event.clientY - rect.top;
   const hitHeights: Partial<Record<EntityType, number>> = {
-    gargoyle: 190, hellhound: 105, bat: 120, spider: 90, snake: 65, player: 130,
-    gate: 190, torch: 130, boulder: 100, "angel-statue": 190,
+    gargoyle: 285, hellhound: 105, bat: 120, spider: 90, snake: 65, player: 130,
+    gate: 190, torch: 130, boulder: 100, "angel-statue": 285, "spider-statue": 180, "spider-wall-statue": 260,
     "rock-1": 75, "rock-2": 75, "rock-3": 75, "rock-4": 75,
     "rock-5": 115, "rock-6": 115, "rock-7": 115, "rock-8": 115,
+    "dead-tree-1": 490, "dead-tree-2": 490, "dead-tree-3": 490,
   };
   let best: { entity: PlacedEntity; score: number } | null = null;
   for (const entity of entities) {
@@ -573,6 +662,14 @@ function entityFromEvent(event: Pick<MouseEvent, "clientX" | "clientY">): Placed
 }
 
 function deleteFromEvent(event: Pick<MouseEvent, "clientX" | "clientY">): boolean {
+  if (activeLayer === "rain" || activeLayer === "shadow") {
+    const cell = cellFromEvent(event);
+    if (!cell) return false;
+    const index = lastRainRegionAt(cell.x, cell.y);
+    if (index < 0) return false;
+    (activeLayer === "shadow" ? shadowRegions : rainRegions).splice(index, 1);
+    return true;
+  }
   const entity = entityFromEvent(event);
   if (entity) {
     entities = entities.filter((candidate) => candidate.id !== entity.id);
@@ -587,7 +684,43 @@ function previewChanged(): void {
   schedulePreviewRefresh();
 }
 
+function floodFill(x: number, y: number, replacement: Exclude<TileType, "void" | "doorway">): boolean {
+  const target = tileAt(x, y);
+  if (target === replacement) return false;
+  const visited = new Uint8Array(width * height);
+  const queueX = new Int16Array(width * height), queueY = new Int16Array(width * height);
+  let read = 0, write = 1;
+  queueX[0] = x; queueY[0] = y; visited[tileIndex(x, y)] = 1;
+  const changed = new Set<number>();
+  while (read < write) {
+    const currentX = queueX[read]!, currentY = queueY[read++]!;
+    if (tileAt(currentX, currentY) !== target) continue;
+    const index = tileIndex(currentX, currentY);
+    tiles[index] = replacement; changed.add(index);
+    const neighbours: Array<[number, number]> = [[currentX - 1, currentY], [currentX + 1, currentY], [currentX, currentY - 1], [currentX, currentY + 1]];
+    for (const [nextX, nextY] of neighbours) {
+      if (!inside(nextX, nextY)) continue;
+      const nextIndex = tileIndex(nextX, nextY);
+      if (visited[nextIndex] || tileAt(nextX, nextY) !== target) continue;
+      visited[nextIndex] = 1; queueX[write] = nextX; queueY[write] = nextY; write++;
+    }
+  }
+  if (replacement === "wall") entities = entities.filter((entity) => !changed.has(tileIndex(entity.x, entity.y)));
+  return changed.size > 0;
+}
+
 function placeTool(tool: ToolType, x: number, y: number): boolean {
+  if (activeLayer === "rain" || activeLayer === "shadow") {
+    const regions = activeLayer === "shadow" ? shadowRegions : rainRegions;
+    if (tool === "erase") {
+      const index = lastRainRegionAt(x, y);
+      if (index < 0) return false;
+      regions.splice(index, 1);
+      return true;
+    }
+    regions.push({ x, y, width: 1, height: 1 });
+    return true;
+  }
   if (tool === "erase") {
     const before = entities.length;
     entities = entities.filter((entity) => entity.x !== x || entity.y !== y);
@@ -595,6 +728,7 @@ function placeTool(tool: ToolType, x: number, y: number): boolean {
     if (tileAt(x, y) !== "void") { tiles[tileIndex(x, y)] = "void"; return true; }
     return false;
   }
+  if (tool === "bucket") return floodFill(x, y, selectedFillTile);
   if (!entityTypes.has(tool as EntityType)) {
     if (tileAt(x, y) === tool) return false;
     tiles[tileIndex(x, y)] = tool as TileType;
@@ -613,7 +747,7 @@ function placeTool(tool: ToolType, x: number, y: number): boolean {
   if (entityType === "player") entities = entities.filter((entity) => entity.type !== "player");
   if (entityType === "portal-exit") entities = entities.filter((entity) => entity.type !== "portal-exit");
   entities = entities.filter((entity) => entity.x !== x || entity.y !== y);
-  const directional = entityType === "gargoyle" || entityType === "hellhound" || entityType === "bat"
+  const directional = entityType === "gargoyle" || entityType === "angel-statue" || entityType === "spider-statue" || entityType === "spider-wall-statue" || entityType.startsWith("dead-tree-") || entityType === "hellhound" || entityType === "bat"
     || entityType === "spider" || entityType === "snake" || entityType === "player";
   const facing = directional ? Number(entityFacing.value) : 0;
   entities.push({ id: `${entityType}-${sequence++}`, type: entityType, x, y, facing, ...(isLinkedObject ? { label } : {}) });
@@ -621,11 +755,17 @@ function placeTool(tool: ToolType, x: number, y: number): boolean {
 }
 
 function selectTool(tool: ToolType): void {
+  if (tool === "floor" || tool === "grass" || tool === "wall") selectedFillTile = tool;
+  if (tool === "rain") activeLayer = "rain";
+  else if (tool === "shadow") activeLayer = "shadow";
+  else if (tool !== "erase") activeLayer = "terrain";
+  editorLayer.value = activeLayer;
   selectedTool = tool;
   document.querySelectorAll<HTMLElement>(".tool").forEach((element) => element.classList.toggle("selected", element.dataset.tool === tool));
-  status.textContent = tools.find((definition) => definition.type === tool)?.label ?? tool;
+  const label = tools.find((definition) => definition.type === tool)?.label ?? tool;
+  status.textContent = tool === "bucket" ? `${label}: ${tools.find((definition) => definition.type === selectedFillTile)?.label}` : label;
   if (tool === "gate" || tool === "gate-button" || tool === "portal-exit") linkLabel.focus();
-  entityFacing.disabled = !["gargoyle", "hellhound", "bat", "spider", "snake", "player"].includes(tool);
+  entityFacing.disabled = activeLayer !== "terrain" || !["gargoyle", "angel-statue", "spider-statue", "spider-wall-statue", "dead-tree-1", "dead-tree-2", "dead-tree-3", "hellhound", "bat", "spider", "snake", "player"].includes(tool);
 }
 
 for (const definition of tools) {
@@ -637,6 +777,13 @@ for (const definition of tools) {
   document.querySelector(`#${definition.group}-palette`)!.appendChild(button);
 }
 selectTool(selectedTool);
+editorLayer.addEventListener("change", () => {
+  activeLayer = editorLayer.value === "rain" ? "rain" : editorLayer.value === "shadow" ? "shadow" : "terrain";
+  if (activeLayer === "rain") selectTool("rain");
+  else if (activeLayer === "shadow") selectTool("shadow");
+  else selectTool(selectedTool === "rain" || selectedTool === "shadow" ? "floor" : selectedTool);
+  draw();
+});
 
 canvas.addEventListener("pointerdown", (event) => {
   if (event.button === 2) {
@@ -661,6 +808,35 @@ canvas.addEventListener("pointerdown", (event) => {
     return;
   }
   const cell = cellFromEvent(event); if (!cell) { drawing = false; return; }
+  if (activeLayer === "rain" || activeLayer === "shadow") {
+    const regions = activeLayer === "shadow" ? shadowRegions : rainRegions;
+    let best: { regionIndex: number; handleIndex: number; distance: number; corners: Array<{ x: number; y: number }> } | null = null;
+    for (let regionIndex = 0; regionIndex < regions.length; regionIndex++) {
+      const region = regions[regionIndex]!;
+      const corners = [
+        { x: region.x, y: region.y }, { x: region.x + region.width - 1, y: region.y },
+        { x: region.x + region.width - 1, y: region.y + region.height - 1 }, { x: region.x, y: region.y + region.height - 1 },
+      ];
+      for (let handleIndex = 0; handleIndex < corners.length; handleIndex++) {
+        const corner = corners[handleIndex]!;
+        const distance = Math.hypot(cell.x - corner.x, cell.y - corner.y);
+        if (!best || distance < best.distance) best = { regionIndex, handleIndex, distance, corners };
+      }
+    }
+    const selectedHandle = best as { regionIndex: number; handleIndex: number; distance: number; corners: Array<{ x: number; y: number }> } | null;
+    if (selectedHandle && selectedHandle.distance <= 1.5) {
+      rainDragIndex = selectedHandle.regionIndex;
+      rainDragAnchor = selectedHandle.corners[(selectedHandle.handleIndex + 2) % 4]!;
+      regions[selectedHandle.regionIndex] = { x: cell.x, y: cell.y, width: 1, height: 1 };
+    } else {
+      rainDragAnchor = cell;
+      regions.push({ x: cell.x, y: cell.y, width: 1, height: 1 });
+      rainDragIndex = regions.length - 1;
+    }
+    changedDuringGesture = true;
+    draw();
+    return;
+  }
   const existing = [...entities].reverse().find((entity) => entity.x === cell.x && entity.y === cell.y);
   if (existing && event.button === 0) {
     draggedEntityId = existing.id;
@@ -697,13 +873,21 @@ canvas.addEventListener("pointermove", (event) => {
     return;
   }
   if (!cell) return;
+  if ((activeLayer === "rain" || activeLayer === "shadow") && rainDragAnchor && rainDragIndex !== null) {
+    const x = Math.min(rainDragAnchor.x, cell.x), y = Math.min(rainDragAnchor.y, cell.y);
+    const regions = activeLayer === "shadow" ? shadowRegions : rainRegions;
+    regions[rainDragIndex] = { x, y, width: Math.abs(cell.x - rainDragAnchor.x) + 1, height: Math.abs(cell.y - rainDragAnchor.y) + 1 };
+    changedDuringGesture = true;
+    draw();
+    return;
+  }
   if (draggedEntityId) {
     const entity = entities.find((candidate) => candidate.id === draggedEntityId);
     if (entity && (entity.x !== cell.x || entity.y !== cell.y) && tileAt(cell.x, cell.y) !== "wall" && tileAt(cell.x, cell.y) !== "void") {
       entities = entities.filter((candidate) => candidate.id === entity.id || candidate.x !== cell.x || candidate.y !== cell.y);
       entity.x = cell.x; entity.y = cell.y; changedDuringGesture = true;
     }
-  } else if (!entityTypes.has(selectedTool as EntityType)) {
+  } else if (selectedTool !== "bucket" && !entityTypes.has(selectedTool as EntityType)) {
     changedDuringGesture = placeTool(selectedTool, cell.x, cell.y) || changedDuringGesture;
   }
   draw();
@@ -723,7 +907,7 @@ const finishGesture = (event: PointerEvent) => {
     status.textContent = tools.find((definition) => definition.type === selectedTool)?.label ?? selectedTool;
     return;
   }
-  if (changedDuringGesture) recordHistory(); drawing = false; draggedEntityId = null;
+  if (changedDuringGesture) recordHistory(); drawing = false; draggedEntityId = null; rainDragAnchor = null; rainDragIndex = null;
 };
 canvas.addEventListener("pointerup", finishGesture); canvas.addEventListener("pointercancel", finishGesture);
 canvas.addEventListener("contextmenu", (event) => event.preventDefault());
@@ -784,37 +968,53 @@ roomLabel.addEventListener("input", () => {
 });
 document.querySelector("#save")!.addEventListener("click", async () => { if (await saveProject()) status.textContent = `Saved ${rooms.size} room${rooms.size === 1 ? "" : "s"} to disk`; });
 document.querySelector("#play")!.addEventListener("click", async () => {
-  if (!await saveProject()) return;
+  const gameWindow = window.open("", "_blank");
+  if (!gameWindow) {
+    status.textContent = "Allow popups for this site so Play can open the game in a new tab";
+    return;
+  }
+  gameWindow.document.title = "Preparing dungeon…";
+  gameWindow.document.body.style.cssText = "margin:0;background:#050608;color:#d5b76d;font:16px ui-monospace,monospace;display:grid;place-items:center;height:100vh";
+  gameWindow.document.body.textContent = "Preparing dungeon…";
+  if (!await saveProject()) { gameWindow.close(); return; }
   for (const [label, level] of rooms) {
-    if (!level.entities.some((entity) => entity.type === "player")) { status.textContent = `Room ${label} needs a player spawn`; return; }
+    if (!level.entities.some((entity) => entity.type === "player")) { status.textContent = `Room ${label} needs a player spawn`; gameWindow.close(); return; }
     const gateLabels = new Set(level.entities.filter((entity) => entity.type === "gate").map((entity) => entity.label));
     const buttonLabels = new Set(level.entities.filter((entity) => entity.type === "gate-button").map((entity) => entity.label));
     const orphan = [...new Set([...gateLabels, ...buttonLabels])].find((link) => !gateLabels.has(link) || !buttonLabels.has(link));
-    if (orphan) { status.textContent = `Room ${label}: link ${orphan} needs both a gate and a button`; return; }
+    if (orphan) { status.textContent = `Room ${label}: link ${orphan} needs both a gate and a button`; gameWindow.close(); return; }
     const exit = level.entities.find((entity) => entity.type === "portal-exit");
-    if (exit && !rooms.has(exit.label ?? "")) { status.textContent = `Room ${label}: exit ${exit.label} has no destination room`; return; }
+    if (exit && !rooms.has(exit.label ?? "")) { status.textContent = `Room ${label}: exit ${exit.label} has no destination room`; gameWindow.close(); return; }
   }
-  const roomSeeds = new Map([...rooms].map(([label, level]) => [label, editorDungeonSeed(level)]));
-  const seed = roomSeeds.get(activeRoomLabel)!;
-  const gameWindow = window.open("about:blank", "_blank");
   status.textContent = `Preparing ${rooms.size} linked room${rooms.size === 1 ? "" : "s"}…`;
   try {
+    // Ask the running server for authoritative IDs first. This keeps Play
+    // correct even when the server process predates a client-side schema/hash
+    // change, and gives us every destination ID before compiling exits.
+    const roomIds = new Map<string, { id: string; seed: number }>();
+    for (const [label, level] of rooms) {
+      const response = await fetch("/api/editor-level", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(level),
+      });
+      if (!response.ok) throw new Error(`Could not prepare room ${label} (${response.status})`);
+      roomIds.set(label, await response.json() as { id: string; seed: number });
+    }
     for (const [label, level] of rooms) {
       const compiled = cloneLevel(level);
-      for (const entity of compiled.entities) if (entity.type === "portal-exit") entity.destinationSeed = roomSeeds.get(entity.label ?? "");
+      for (const entity of compiled.entities) if (entity.type === "portal-exit") entity.destinationSeed = roomIds.get(entity.label ?? "")?.seed;
       const response = await fetch("/api/editor-level", {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(compiled),
       });
       if (!response.ok) throw new Error(`Could not prepare room ${label} (${response.status})`);
       const result = await response.json() as { id: string; seed: number };
-      localStorage.setItem(`rpg-editor-level:${result.id}`, JSON.stringify(compiled));
+      roomIds.set(label, result);
     }
-    const gameUrl = `/?seed=${seed}&editor=${encodeURIComponent(String(seed))}`;
-    if (gameWindow) gameWindow.location.href = gameUrl;
-    else window.location.href = gameUrl;
+    const activeRoom = roomIds.get(activeRoomLabel)!;
+    const gameUrl = `/?seed=${activeRoom.seed}&editor=${encodeURIComponent(activeRoom.id)}&run=${Date.now().toString(36)}`;
     status.textContent = `Playing room ${activeRoomLabel}`;
+    gameWindow.location.href = gameUrl;
   } catch (error) {
-    gameWindow?.close();
+    gameWindow.close();
     status.textContent = error instanceof Error ? error.message : "Could not start game";
   }
 });
@@ -823,7 +1023,7 @@ document.querySelector("#load")!.addEventListener("click", async () => {
     const response = await fetch("/api/editor-project");
     if (!response.ok) throw new Error(response.status === 404 ? "No project has been saved to disk" : `Server returned ${response.status}`);
     const raw = await response.json() as Partial<ProjectData>;
-    applyProject(raw); localStorage.setItem(projectStorageKey, JSON.stringify(raw));
+    applyProject(raw);
     status.textContent = `Loaded ${rooms.size} rooms from disk`;
   } catch (error) { status.textContent = error instanceof Error ? error.message : String(error); }
 });
@@ -851,7 +1051,7 @@ importFile.addEventListener("change", async () => {
 });
 document.querySelector("#clear")!.addEventListener("click", () => {
   if (!confirm("Clear the entire level?")) return;
-  tiles = Array.from({ length: width * height }, () => "void" as TileType); entities = []; draw(); recordHistory(); status.textContent = "Level cleared";
+  tiles = Array.from({ length: width * height }, () => "void" as TileType); rainRegions = []; shadowRegions = []; entities = []; draw(); recordHistory(); status.textContent = "Level cleared";
 });
 window.addEventListener("keydown", (event) => {
   if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
@@ -871,22 +1071,13 @@ gamePreview.addEventListener("load", () => {
 });
 window.addEventListener("resize", resizeCanvas);
 
-const savedProject = localStorage.getItem(projectStorageKey);
-if (savedProject) {
-  try {
-    applyProject(JSON.parse(savedProject) as Partial<ProjectData>);
-  } catch { blankLevel(); rooms.set("A", serialize()); refreshRoomSelect(); resizeCanvas(); recordHistory(); }
-} else {
-  const legacy = localStorage.getItem("rpg-dungeon-editor-level");
-  if (legacy) { try { const level = normalizeLevel(JSON.parse(legacy)); rooms.set("A", level); refreshRoomSelect(); applyLevel(level, false); resetRoomHistory(); } catch { blankLevel(); rooms.set("A", serialize()); refreshRoomSelect(); resizeCanvas(); recordHistory(); } }
-  else { blankLevel(); rooms.set("A", serialize()); refreshRoomSelect(); resizeCanvas(); recordHistory(); }
-}
+blankLevel(); rooms.set("A", serialize()); refreshRoomSelect(); resizeCanvas(); recordHistory();
 
-// Disk is authoritative across browser profiles and cleared site data. Load it
-// after the immediate browser cache so the editor still paints without waiting.
+// Disk is the sole authority for editor projects. No room JSON is duplicated
+// into browser storage, which avoids quota failures on large authored maps.
 fetch("/api/editor-project").then(async (response) => {
   if (!response.ok) return;
   const raw = await response.json() as Partial<ProjectData>;
-  applyProject(raw); localStorage.setItem(projectStorageKey, JSON.stringify(raw));
+  applyProject(raw);
   status.textContent = `Loaded ${rooms.size} rooms from disk`;
 }).catch(() => { /* The local cache remains usable when the server is unavailable. */ });

@@ -15,7 +15,7 @@ const light = new THREE.DirectionalLight(0xffffff, 2.8); light.position.set(3, 5
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, .01, 100);
 const result: Record<string, { png: string; span: number; center: number }> = {};
 
-async function bake(name: string, rig: any, dead = false, bite = false, eat = false) {
+async function bake(name: string, rig: any, dead = false, bite = false, eat = false, stone = false) {
   const model: THREE.Group = rig.model;
   scene.add(model);
   model.updateMatrixWorld(true);
@@ -57,6 +57,18 @@ async function bake(name: string, rig: any, dead = false, bite = false, eat = fa
       renderer.render(scene, camera);
       ctx.drawImage(renderer.domElement, d * W, f * W);
     }
+  }
+  if (stone) {
+    const pixels = ctx.getImageData(0, 0, atlas.width, atlas.height);
+    for (let index = 0; index < pixels.data.length; index += 4) {
+      if (pixels.data[index + 3] === 0) continue;
+      const luminance = pixels.data[index]! * .24 + pixels.data[index + 1]! * .62 + pixels.data[index + 2]! * .14;
+      const value = Math.min(255, Math.round(luminance * 1.65 + 42));
+      pixels.data[index] = value;
+      pixels.data[index + 1] = value;
+      pixels.data[index + 2] = value;
+    }
+    ctx.putImageData(pixels, 0, 0);
   }
   result[name] = { png: atlas.toDataURL('image/png'), span: span * 30, center: center.y * 30 };
   scene.remove(model);
@@ -139,6 +151,23 @@ async function run() {
     if (name === 'spider') {
       rig.mixer?.stopAllAction();
       await bake('spider-wall', rig);
+      await bake('spider-statue', rig, false, false, false, true);
+      const position = rig.model.position.clone();
+      const rotation = rig.model.rotation.clone();
+      // Stand the authored +X-facing spider on its head. The regular orbiting
+      // cameras now reveal front, side, and back perspectives while world up
+      // remains screen-up; unlike rotating an overhead atlas, it never rolls.
+      rig.model.rotation.z = -Math.PI / 2;
+      rig.model.updateMatrixWorld(true);
+      const uprightBounds = new THREE.Box3().setFromObject(rig.model);
+      const uprightCenter = uprightBounds.getCenter(new THREE.Vector3());
+      rig.model.position.x -= uprightCenter.x;
+      rig.model.position.y -= uprightBounds.min.y;
+      rig.model.position.z -= uprightCenter.z;
+      await bake('spider-wall-statue', rig, false, false, false, true);
+      rig.model.position.copy(position);
+      rig.model.rotation.copy(rotation);
+      rig.model.updateMatrixWorld(true);
     }
     if (name === 'player') {
       await bake('player-bite', rig, false, true);
@@ -188,6 +217,25 @@ async function run() {
     }
     await bake(name!, { model });
     renderer.localClippingEnabled = false;
+  }
+  for (const [name, path] of [
+    ['dead-tree-1', 'dead-tree-1/scene.gltf'],
+    ['dead-tree-2', 'dead-tree-2/scene.gltf'],
+    ['dead-tree-3', 'dead-tree-3/scene.gltf'],
+  ]) {
+    const gltf = await new GLTFLoader().loadAsync(`/shared-models/${path}`);
+    const model = gltf.scene;
+    model.updateMatrixWorld(true);
+    const sourceBounds = new THREE.Box3().setFromObject(model);
+    const sourceSize = sourceBounds.getSize(new THREE.Vector3());
+    // A little shorter than the doubled dungeon walls, but broad enough for
+    // the branches to read clearly from every baked direction.
+    model.scale.setScalar(7.4 / Math.max(sourceSize.x, sourceSize.y, sourceSize.z));
+    model.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(model);
+    const center = bounds.getCenter(new THREE.Vector3());
+    model.position.set(-center.x, -bounds.min.y, -center.z);
+    await bake(name!, { model });
   }
   (window as any).spriteBake = result;
 }

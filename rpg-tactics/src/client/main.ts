@@ -19,7 +19,6 @@ import { BAR_LAYOUT, drawTacticsChrome, deathResurrectRect } from "./chrome.js";
 import { FloorStats } from "./floor-stats.js";
 import { GemExplosion } from "./gem-explosion.js";
 import { BloodEffects } from "./blood-effects.js";
-import { selectAttackReticle } from "./attack-presentation.js";
 import { RaycastRenderer } from "./raycast-renderer.js";
 import { GRAPHICS_PRESETS, readGraphicsQuality, setupGraphicsControl } from "./graphics.js";
 
@@ -45,7 +44,18 @@ if (!Number.isSafeInteger(dungeonSeed) || dungeonSeed < 1 || dungeonSeed > 0xfff
 }
 if (pageUrlChanged) history.replaceState(null, "", pageUrl);
 const editorLevelId = pageUrl.searchParams.get("editor");
-const editorLevelRaw = editorLevelId ? localStorage.getItem(`rpg-editor-level:${editorLevelId}`) : null;
+let editorLevelRaw: string | null = null;
+if (editorLevelId) {
+  // Renderer topology must be configured before constructing the stage. The
+  // compiled room is disk-backed on the server, so load it directly instead
+  // of relying on size-limited browser storage.
+  try {
+    const request = new XMLHttpRequest();
+    request.open("GET", `/api/editor-level/${encodeURIComponent(editorLevelId)}`, false);
+    request.send();
+    if (request.status === 200) editorLevelRaw = request.responseText;
+  } catch { /* The generated dungeon fallback below remains playable. */ }
+}
 if (editorLevelRaw) {
   try {
     configureEditorDungeon(JSON.parse(editorLevelRaw) as EditorDungeonConfig);
@@ -562,7 +572,6 @@ function frame(now: number) {
     showGameClock: false,
     showActionBar: SHOW_ACTION_BAR,
     compactPlayerHud: true,
-    enemyHealthBars: { whenAggroed: true, maxDistance: 360, width: 150, height: 18, worldHeight: 3.8 },
     actions: TACTICS_ACTIONS,
     viableActions: snap.viableActions,
     barLayout: BAR_LAYOUT,
@@ -571,23 +580,6 @@ function frame(now: number) {
   if (!snap.inspect) {
     blood.draw(ctx, now, viewWidth, toScreen);
     gemExplosion.draw(ctx, now, toScreen);
-  }
-  const reticle = selectAttackReticle(snap, (x, y) => stage.isPointVisible(x, y));
-  if (reticle) {
-    const enemy = reticle.enemy;
-    const height = enemy.kind === "bat" ? enemy.altitude ?? 2.25
-      : enemy.kind === "spider" ? (enemy.altitude ?? 0) + .45 : 1.35;
-    const point = stage.project(enemy.x, enemy.y, height);
-    const ready = reticle.inRange && reticle.aligned;
-    ctx.save();
-    ctx.beginPath(); ctx.arc(point.x, point.y, 19, 0, Math.PI * 2);
-    ctx.strokeStyle = "#17120e"; ctx.lineWidth = 5; ctx.stroke();
-    ctx.strokeStyle = ready ? "#ffd633" : "#c4bca9"; ctx.lineWidth = 2; ctx.stroke();
-    for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
-      ctx.beginPath(); ctx.moveTo(point.x + dx * 14, point.y + dy * 14);
-      ctx.lineTo(point.x + dx * 24, point.y + dy * 24); ctx.stroke();
-    }
-    ctx.restore();
   }
   if (!snap.dead && !snap.inspect) {
     const x = viewWidth / 2, y = WORLD_HEIGHT / 2;
