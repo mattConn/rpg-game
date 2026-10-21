@@ -40,9 +40,20 @@
         background: #000;
       }
 
+      #stage::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background: repeating-linear-gradient(to bottom, transparent 0 2px, rgb(0 0 0 / 24%) 2px 4px);
+        display: none;
+      }
+      body.scanlines-enabled:not(.editing-mode) #stage::after { display: block; }
+
       /* Transparent: an opaque backing here would hide the whole board. */
       #ui {
         position: absolute;
+        z-index: 1;
         top: 0;
         left: 0;
         background: transparent;
@@ -54,6 +65,8 @@
         right: max(16px, env(safe-area-inset-right));
         z-index: 20;
         display: flex;
+        flex-wrap: wrap;
+        max-width: calc(100vw - 56px);
         align-items: center;
         gap: 10px;
         padding: 8px 12px;
@@ -73,7 +86,9 @@
         cursor: pointer;
       }
       #export-stats { color: #ddd2bb; background: #28231d; border: 1px solid #89785a; border-radius: 4px; padding: 7px; cursor: pointer; }
-      #graphics-quality:focus-visible { outline: 2px solid #e6bf72; outline-offset: 3px; }
+      #scanlines-toggle { color: #ddd2bb; background: #28231d; border: 1px solid #89785a; border-radius: 4px; padding: 7px; cursor: pointer; font: inherit; }
+      #scanlines-toggle[aria-pressed="true"] { color: #fff1d4; border-color: #e6bf72; background: #403521; }
+      #graphics-quality:focus-visible, #scanlines-toggle:focus-visible { outline: 2px solid #e6bf72; outline-offset: 3px; }
       #play-help { position: fixed; left: 16px; bottom: 14px; color: #ddd2bb; font: 12px monospace; text-shadow: 1px 2px 2px #000; pointer-events: none; }
       #connection-status { position: fixed; top: 54px; left: 16px; color: #eccd87; font: 13px monospace; pointer-events: none; }
       #performance { color: #aaa28f; font: 11px monospace; min-width: 40px; }
@@ -89,6 +104,7 @@
     <div id="play-help">WASD move · drag to look · click attack · E eat · Shift run</div>
     <div id="connection-status">Loading dungeon…</div>
     <div id="graphics-settings">
+      <button id="scanlines-toggle" type="button" aria-pressed="true">Scanlines: On</button>
       <button id="export-stats" type="button" title="Download floor statistics as CSV">Export stats</button>
       <span id="performance"></span>
       <label for="graphics-quality">Graphics</label>

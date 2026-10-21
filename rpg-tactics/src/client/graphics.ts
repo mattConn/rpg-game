@@ -11,6 +11,27 @@ export const GRAPHICS_PRESETS = {
 
 const STORAGE_KEY = "rpg-graphics-quality";
 
+export function setupScanlinesControl(): void {
+  const control = document.getElementById("scanlines-toggle") as HTMLButtonElement;
+  const storageKey = "rpg-scanlines";
+  let enabled = true;
+  try { enabled = localStorage.getItem(storageKey) !== "off"; } catch { /* Optional persistence. */ }
+  const apply = () => {
+    document.body.classList.toggle("scanlines-enabled", enabled);
+    control.setAttribute("aria-pressed", String(enabled));
+    control.textContent = `Scanlines: ${enabled ? "On" : "Off"}`;
+  };
+  apply();
+  control.addEventListener("keydown", event => event.stopPropagation());
+  control.addEventListener("keyup", event => event.stopPropagation());
+  control.addEventListener("click", () => {
+    enabled = !enabled;
+    apply();
+    try { localStorage.setItem(storageKey, enabled ? "on" : "off"); } catch { /* Optional persistence. */ }
+    control.blur();
+  });
+}
+
 export function readGraphicsQuality(): GraphicsQuality {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);

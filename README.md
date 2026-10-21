@@ -1,5 +1,23 @@
 # rpg-game
 
+**The main game is now the Windows-native C++ version in
+[`rpg-tactics-cpp/`](rpg-tactics-cpp/README.md).** All new game development focuses
+on that version. See [AGENTS.md](AGENTS.md) for repository working guidance.
+
+```powershell
+cd rpg-tactics-cpp
+./build.ps1
+./run.ps1
+```
+
+You can also double-click `rpg-tactics-cpp/run.cmd`. The native game loads the
+existing sprite assets and saved editor maps. The browser level editor remains
+available in `rpg-tactics/`; the game itself needs no browser or Node server.
+
+## Legacy root browser game
+
+The instructions below describe the original browser app, not the main game.
+
 A 2D single-player browser RPG rendered on an HTML canvas, served by a small
 Fastify static server. Everything runs in the browser; the server only serves
 files.

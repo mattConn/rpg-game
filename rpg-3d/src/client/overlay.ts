@@ -119,6 +119,7 @@ export interface OverlayParams {
   compactPlayerHud?: boolean;
   /** Optional larger, always-visible world bars for front ends with big models. */
   enemyHealthBars?: {
+    enabled?: boolean;
     always?: boolean;
     whenAggroed?: boolean;
     width?: number;
@@ -282,7 +283,7 @@ function drawWorldLabels(
 
     const closeEnough = healthBars?.maxDistance === undefined ||
       Math.hypot(enemy.x - snap.player.x, enemy.y - snap.player.y) <= healthBars.maxDistance;
-    const showHealth = closeEnough && (healthBars?.whenAggroed
+    const showHealth = healthBars?.enabled !== false && closeEnough && (healthBars?.whenAggroed
       ? enemy.aggro
       : healthBars?.always || enemy.health < enemy.maxHealth);
     if (showHealth) {

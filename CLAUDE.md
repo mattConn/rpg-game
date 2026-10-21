@@ -1,6 +1,21 @@
 # CLAUDE.md
 
-Guidance for working in this repo.
+## Active project: native C++ (October 21, 2026)
+
+**The main game is `rpg-tactics-cpp/`. Read [AGENTS.md](AGENTS.md) first.**
+Default all new gameplay, rendering, UI, and performance work to its active
+`src/native.cpp` and `src/native_game.hpp` implementation. Build with `build.ps1`
+and launch with `run.ps1` or `run.cmd`. The C++ directory's older `src/main.cpp`
+and Makefile are a separate historical macOS prototype, not the active build.
+
+The browser project remains the editor/asset pipeline and a gameplay reference.
+This notice and `AGENTS.md` supersede all active-project and architecture claims
+in the historical notes below. Do not use those notes to redirect work back to
+the browser game or restore gargoyles as enemies.
+
+## Historical browser guidance
+
+The remainder records earlier browser implementations and is reference only.
 
 > **Active project: `rpg-tactics/`** (port 3300). This is the main game — a
 > first-person turn-based dungeon. All new work goes here unless stated

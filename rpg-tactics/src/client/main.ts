@@ -20,7 +20,7 @@ import { FloorStats } from "./floor-stats.js";
 import { GemExplosion } from "./gem-explosion.js";
 import { BloodEffects } from "./blood-effects.js";
 import { RaycastRenderer } from "./raycast-renderer.js";
-import { GRAPHICS_PRESETS, readGraphicsQuality, setupGraphicsControl } from "./graphics.js";
+import { GRAPHICS_PRESETS, readGraphicsQuality, setupGraphicsControl, setupScanlinesControl } from "./graphics.js";
 
 // ------------------------------------------------------------------ canvases
 
@@ -120,6 +120,7 @@ function resize() {
   stage.resize(fit.displayWidth, fit.displayHeight, viewWidth);
 }
 
+setupScanlinesControl();
 setupGraphicsControl(graphicsQuality, (quality) => {
   graphicsQuality = quality;
   location.reload();
@@ -530,7 +531,9 @@ let lastFrameTime = performance.now();
 let nextFrameTime = 0;
 
 function frame(now: number) {
-  requestAnimationFrame(frame);
+  // Leave a task turn between expensive canvas frames so sustained keyboard
+  // input cannot starve incoming WebSocket snapshots.
+  setTimeout(() => requestAnimationFrame(frame), 0);
 
   if (document.hidden) return;
   const interval = 1000 / GRAPHICS_PRESETS[graphicsQuality].maxFps;
@@ -569,6 +572,7 @@ function frame(now: number) {
     showResurrect: false,
     showRoomLabel: false,
     showHoverNames: false,
+    enemyHealthBars: { enabled: false },
     showGameClock: false,
     showActionBar: SHOW_ACTION_BAR,
     compactPlayerHud: true,
