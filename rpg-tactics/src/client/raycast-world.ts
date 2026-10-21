@@ -5,18 +5,33 @@ export interface Gate { x: number; y: number; min: number; max: number; vertical
 export class FloorGrid {
   readonly minCol: number; readonly minRow: number; readonly width: number; readonly height: number;
   readonly cells: Uint8Array;
+  readonly materials: Uint8Array;
   constructor(regions: readonly Region[]) {
     this.minCol = Math.min(...regions.map(r => r.col)) - 1;
     this.minRow = Math.min(...regions.map(r => r.row)) - 1;
     this.width = Math.max(...regions.map(r => r.col + r.cols)) - this.minCol + 1;
     this.height = Math.max(...regions.map(r => r.row + r.rows)) - this.minRow + 1;
     this.cells = new Uint8Array(this.width * this.height);
+    this.materials = new Uint8Array(this.width * this.height);
     for (const r of regions) for (let y = r.row; y < r.row + r.rows; y++)
       this.cells.fill(1, (y - this.minRow) * this.width + r.col - this.minCol, (y - this.minRow) * this.width + r.col + r.cols - this.minCol);
+    if (EDITOR_DUNGEON) for (const tile of EDITOR_DUNGEON.tiles) {
+      if (tile.type !== 'forest-wall') continue;
+      for (let oy = 0; oy < EDITOR_TILE_CELLS; oy++) for (let ox = 0; ox < EDITOR_TILE_CELLS; ox++) {
+        const col = tile.x * EDITOR_TILE_CELLS + ox;
+        const row = tile.y * EDITOR_TILE_CELLS + oy;
+        const x = col - this.minCol, y = row - this.minRow;
+        if (x >= 0 && y >= 0 && x < this.width && y < this.height) this.materials[y * this.width + x] = 3;
+      }
+    }
   }
   at(col: number, row: number): number {
     const x = col - this.minCol, y = row - this.minRow;
     return x < 0 || y < 0 || x >= this.width || y >= this.height ? 0 : this.cells[y * this.width + x]!;
+  }
+  materialAt(col: number, row: number): number {
+    const x = col - this.minCol, y = row - this.minRow;
+    return x < 0 || y < 0 || x >= this.width || y >= this.height ? 0 : this.materials[y * this.width + x]!;
   }
 }
 
@@ -27,7 +42,7 @@ export function castRay(grid: FloorGrid, x: number, y: number, dx: number, dy: n
   const deltaX = Math.abs(TILE_PX / dx), deltaY = Math.abs(TILE_PX / dy);
   let tx = dx === 0 ? Infinity : (ARENA_X + (col + (sx > 0 ? 1 : 0)) * TILE_PX - x) / dx;
   let ty = dy === 0 ? Infinity : (ARENA_Y + (row + (sy > 0 ? 1 : 0)) * TILE_PX - y) / dy;
-  let distance = 0, side = 0;
+  let distance = 0, side = 0, material = 0;
   let enteredFloor = !skipInitialWalls || !!grid.at(col, row);
   let floorEntry = 0;
   if (dx === 0 && dy === 0) return { distance: max, x, y, side, material: 0 };
@@ -40,10 +55,9 @@ export function castRay(grid: FloorGrid, x: number, y: number, dx: number, dy: n
     const floor = !!grid.at(col, row);
     if (!enteredFloor) {
       if (floor) { enteredFloor = true; floorEntry = distance; }
-    } else if (!floor) break;
+    } else if (!floor) { material = grid.materialAt(col, row); break; }
   }
   distance = enteredFloor ? Math.min(max, Math.max(.01, distance)) : max;
-  let material = 0;
   for (const gate of gates) {
     const axis = gate.vertical ? dx : dy;
     if (Math.abs(axis) < 1e-9) continue;
@@ -138,7 +152,7 @@ export function castCameraRay(grid: FloorGrid, x: number, y: number, dx: number,
     if (distance >= max) break;
     const floor = !!grid.at(col, row);
     if (wasFloor && !floor) {
-      const wall = hit(distance, side);
+      const wall = hit(distance, side, grid.materialAt(col, row));
       // Classify the whole wall plane relative to the player, not each
       // column's depth: far walls stay solid even near screen edges.
       const foreground = focus

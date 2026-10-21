@@ -1621,13 +1621,15 @@ export class TacticsGame {
     const segmentLengthSquared = segmentX * segmentX + segmentY * segmentY;
     return EDITOR_DUNGEON.entities.some((entity) => {
       const isTree = entity.type === "dead-tree-1" || entity.type === "dead-tree-2" || entity.type === "dead-tree-3";
-      const isStatue = entity.type === "gargoyle" || entity.type === "angel-statue" || entity.type === "spider-statue" || entity.type === "spider-wall-statue";
+      const isSpiderStatue = entity.type === "spider-statue" || entity.type === "spider-wall-statue";
+      const isStatue = entity.type === "gargoyle" || entity.type === "angel-statue" || isSpiderStatue;
       const rockMatch = /^rock-([1-8])$/.exec(entity.type);
       const isRock = entity.type === "boulder" || rockMatch !== null;
       if (!isStatue && !isTree && !isRock) return false;
       const rockVariant = rockMatch ? Number(rockMatch[1]) : 8;
       const radius = isTree ? MIN_SEPARATION * 1.44
-        : isStatue ? MIN_SEPARATION * 1.25
+        : isSpiderStatue ? MIN_SEPARATION * 2.1
+          : isStatue ? MIN_SEPARATION * 1.25
           : rockVariant <= 4 ? MIN_SEPARATION * .58 : MIN_SEPARATION * .9;
       const centre = {
         x: ARENA_X + (entity.x + .5) * EDITOR_TILE_CELLS * TILE_PX,

@@ -18,7 +18,7 @@ const greyStone = (color: number, amount: number) => {
   return rgba(Math.min(255, luminance * .92), Math.min(255, luminance * .96), Math.min(255, luminance));
 };
 interface Pixels { width: number; height: number; data: Uint32Array; shades?: Uint32Array[]; bottomRows?: number[] }
-interface Billboard { x: number; y: number; z: number; span: number; image: string; direction: number; frame: number; depth?: number }
+interface Billboard { x: number; y: number; z: number; span: number; image: string; direction: number; frame: number; depth?: number; groundLift?: number }
 
 /** Entire play view is Canvas2D: no WebGL context, mesh, light, or animation mixer. */
 export class RaycastRenderer {
@@ -129,6 +129,7 @@ export class RaycastRenderer {
     const size = GRAPHICS_PRESETS[quality].textureSize;
     this.ready = Promise.all([
       this.load('wall', `/graphics/${quality === 'high' || quality === 'max' ? 'med' : quality}/textures/dungeon-wall-stone.png`, size),
+      this.load('forest-wall', '/textures/forest-wall.png', size),
       this.load('floor', `/graphics/${quality === 'high' || quality === 'max' ? 'med' : quality}/textures/dungeon-floor-stone.png`, size),
       this.load('gate', '/textures/gate-weathered-iron.png'),
       ...Object.keys(SPRITE_META).map(name => this.load(name, `/sprites/${name}.png`)),
@@ -183,8 +184,9 @@ export class RaycastRenderer {
   private topologyKey(level: EditorDungeonConfig): string {
     let hash = 2166136261;
     for (const tile of level.tiles) {
-      if (tile.type !== 'wall') continue;
+      if (tile.type !== 'wall' && tile.type !== 'forest-wall') continue;
       hash ^= tile.x + tile.y * level.width;
+      if (tile.type === 'forest-wall') hash ^= 0x6f726573;
       hash = Math.imul(hash, 16777619);
     }
     return `${level.width}x${level.height}:${hash >>> 0}`;
@@ -226,7 +228,7 @@ export class RaycastRenderer {
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     const data = new Uint32Array(ctx.getImageData(0, 0, canvas.width, canvas.height).data.buffer);
     const shades = size ? Array.from({ length: 24 }, (_, level) => data.map(pixel => shade(pixel, (level + 1) / 24))) : undefined;
-    const groundAnchored = key === 'boulder' || key === 'spider-wall-statue' || key.startsWith('dead-tree-');
+    const groundAnchored = key === 'boulder' || key === 'spider-pedestal' || key === 'spider-wall-statue' || key.startsWith('dead-tree-');
     const bottomRows = groundAnchored ? Array.from({ length: 8 }, (_, direction) => {
       const frame = canvas.width / 8;
       for (let y = frame - 1; y >= 0; y--) for (let x = 0; x < frame; x++)
@@ -633,6 +635,7 @@ export class RaycastRenderer {
     this.gateOverlays = [];
     const barrier = this.barrierFrames[Math.floor(now / 140) % 4]!;
     const texture = this.textures.get('wall');
+    const forestTexture = this.textures.get('forest-wall');
     const webTexture = this.textures.get('web');
     for (let x = 0; x < this.width; x++) {
       const plane = (2 * (x + .5) / this.width - 1) * FOV;
@@ -662,9 +665,10 @@ export class RaycastRenderer {
       const start = Math.max(0, Math.floor(top)), end = Math.min(this.height, Math.ceil(bottom));
       const along = hit.side ? hit.x : hit.y;
       const u = ((along / 90) % 1 + 1) % 1;
-      const tx = texture ? Math.min(texture.width - 1, Math.floor(u * texture.width)) : 0;
+      const wallTexture = hit.material === 3 ? forestTexture : texture;
+      const tx = wallTexture ? Math.min(wallTexture.width - 1, Math.floor(u * wallTexture.width)) : 0;
       const light = Math.max(.4, Math.min(1, 1.15 - Math.max(0, hit.distance - this.cameraDistance) / 5500)) * (hit.side ? .75 : 1);
-      const shaded = texture?.shades![Math.max(0, Math.min(23, Math.floor(light * 24) - 1))];
+      const shaded = wallTexture?.shades![Math.max(0, Math.min(23, Math.floor(light * 24) - 1))];
       const web = hit.material === 0 ? this.wallWebs.find(web => web.side === hit.side
         && Math.abs(web.plane - (hit.side ? hit.y : hit.x)) < 1
         && Math.abs(along - web.along) < web.width / 2) : undefined;
@@ -672,7 +676,12 @@ export class RaycastRenderer {
       for (let y = start; y < end; y++) {
         const v = (y - top) / (bottom - top);
         let color = rgba(99, 86, 67);
-        if (texture) { const ty = Math.max(0, Math.floor(v * WALL_HEIGHT / 90 * texture.height)) & (texture.height - 1); color = shaded![ty * texture.width + tx]!; }
+        if (wallTexture) {
+          const ty = hit.material === 3
+            ? Math.min(wallTexture.height - 1, Math.max(0, Math.floor(v * wallTexture.height)))
+            : Math.max(0, Math.floor(v * WALL_HEIGHT / 90 * wallTexture.height)) & (wallTexture.height - 1);
+          color = shaded![ty * wallTexture.width + tx]!;
+        }
         if (hit.material === 2) color = barrier[Math.min(BARRIER_HEIGHT - 1, Math.max(0, Math.floor(v * BARRIER_HEIGHT))) * BARRIER_WIDTH + Math.floor(u * BARRIER_WIDTH)]!;
         if (web && webTexture) {
           const worldHeight = WALL_HEIGHT * (1 - v);
@@ -686,7 +695,7 @@ export class RaycastRenderer {
           }
         }
         const litColor = hit.material === 2 ? shade(color, Math.max(.7, light))
-          : hit.material || !texture ? shade(color, light) : color;
+          : hit.material === 1 || !wallTexture ? shade(color, light) : color;
         this.pixels[y * this.width + x] = litColor;
       }
     }
@@ -727,9 +736,10 @@ export class RaycastRenderer {
     const barrier = this.barrierFrames[Math.floor(now / 140) % 4]!;
     const gateTexture = this.textures.get('gate');
     for (const { x, hit } of this.wallVeils) {
-      // Camera-side stone walls use a clean cutaway. The former translucent
-      // grey veil covered the player and made low camera angles unreadable.
-      if (hit.material === 0) continue;
+      // Camera-side solid walls use a clean cutaway. Only gates and the energy
+      // barrier are translucent overlays; treating a forest wall as the latter
+      // produced animated grey bars along its exposed sides.
+      if (hit.material === 0 || hit.material === 3) continue;
       const depth = Math.max(1, hit.distance);
       const top = this.horizon + (this.eye - WALL_HEIGHT) * this.focal / depth;
       const bottom = this.horizon + this.eye * this.focal / depth;
@@ -778,7 +788,7 @@ export class RaycastRenderer {
       const meta = SPRITE_META[name];
       const angle = Math.atan2(this.cameraY - actor.y, this.cameraX - actor.x) - Math.atan2(actor.heading?.y ?? 0, actor.heading?.x ?? actor.facing);
       const direction = ((Math.round(angle / (Math.PI / 4)) % 8) + 8) % 8;
-      const sprite = { x: actor.x, y: actor.y, z: meta.center * scale + (actor.altitude ?? 0) * 30, span: meta.span * scale, image: name as string, direction, frame: moving ? 1 + Math.floor(now / 130) % 3 : 0 };
+      const sprite: Billboard = { x: actor.x, y: actor.y, z: meta.center * scale + (actor.altitude ?? 0) * 30, span: meta.span * scale, image: name as string, direction, frame: moving ? 1 + Math.floor(now / 130) % 3 : 0 };
       sprites.push(sprite);
       return sprite;
     };
@@ -788,12 +798,16 @@ export class RaycastRenderer {
     for (const statue of this.angelStatues) if (nearPlayer(statue, 180)) addActor({
       ...statue, heading: { x: Math.cos(statue.facing), y: Math.sin(statue.facing) },
     }, 'angel', false, 1.5);
-    for (const statue of this.spiderStatues) if (nearPlayer(statue, 220)) addActor({
-      ...statue, heading: { x: Math.cos(statue.facing), y: Math.sin(statue.facing) },
-    }, 'spider-statue', false, 2);
-    for (const statue of this.spiderWallStatues) if (nearPlayer(statue, 220)) addActor({
-      ...statue, heading: { x: Math.cos(statue.facing), y: Math.sin(statue.facing) },
-    }, 'spider-wall-statue', false, 2);
+    const addSpiderStatue = (statue: { x: number; y: number; facing: number }, upright: boolean) => {
+      const actor = { ...statue, heading: { x: Math.cos(statue.facing), y: Math.sin(statue.facing) } };
+      addActor(actor, 'spider-pedestal', false);
+      const spider = addActor(actor, upright ? 'spider-wall-statue' : 'spider-statue', false, upright ? 2 : 3);
+      const pedestalHeight = 34.5;
+      if (upright) spider.groundLift = pedestalHeight;
+      else spider.z += pedestalHeight;
+    };
+    for (const statue of this.spiderStatues) if (nearPlayer(statue, 220)) addSpiderStatue(statue, false);
+    for (const statue of this.spiderWallStatues) if (nearPlayer(statue, 220)) addSpiderStatue(statue, true);
     for (const tree of this.deadTrees) if (nearPlayer(tree, 260)) addActor({
       ...tree, heading: { x: Math.cos(tree.facing), y: Math.sin(tree.facing) },
     }, tree.image, false, 2);
@@ -931,6 +945,7 @@ export class RaycastRenderer {
     // Ground shadows are flattened cached sprites; they do not cast extra rays.
     for (const sprite of sprites) if (sprite.image in SPRITE_META && !['angel', 'gem', 'spider-wall'].includes(sprite.image)
       && !sprite.image.startsWith('dead-tree-')
+      && sprite.image !== 'spider-statue' && sprite.image !== 'spider-wall-statue' && sprite.image !== 'spider-pedestal'
       && !(sprite.image.startsWith('player') && snap.dungeonPortal.fallProgress > 0))
       this.drawBillboard({ ...sprite, image: 'shadow', span: sprite.span * .6, z: 1, frame: 0, direction: 0 });
     for (const sprite of sprites) this.drawBillboard(sprite);
@@ -951,12 +966,14 @@ export class RaycastRenderer {
     // that variant slightly into the terrain.
     const visibleBottom = image.bottomRows?.[sprite.direction];
     const groundEmbed = sprite.image === 'boulder' ? 6 : sprite.image === 'dead-tree-2' ? 12 : 0;
+    const groundLift = sprite.groundLift ?? 0;
+    const liftedGroundY = groundY - groundLift * this.focal / depth;
     const top = visibleBottom !== undefined
-      ? groundY - visibleBottom / (image.width / 8) * size
+      ? liftedGroundY - visibleBottom / (image.width / 8) * size
         + groundEmbed * this.focal / depth
       : this.horizon + (this.eye - sprite.z) * this.focal / depth - size / 2;
     const x0 = Math.max(0, Math.floor(left)), x1 = Math.min(this.width, Math.ceil(left + size));
-    const y0 = Math.max(0, Math.floor(top)), y1 = Math.min(this.height, Math.ceil(top + size), visibleBottom !== undefined ? Math.ceil(groundY) : this.height);
+    const y0 = Math.max(0, Math.floor(top)), y1 = Math.min(this.height, Math.ceil(top + size), visibleBottom !== undefined ? Math.ceil(liftedGroundY) : this.height);
     const frameSize = sprite.image in SPRITE_META ? image.width / 8 : image.width;
     const spriteLight = Math.max(.45, Math.min(1.15, 1.2 - Math.max(0, depth - this.cameraDistance) / 5000));
     const actorReceivesRegionShadow = sprite.image.startsWith('player') || sprite.image.startsWith('hellhound')

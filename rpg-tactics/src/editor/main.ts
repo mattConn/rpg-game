@@ -1,7 +1,7 @@
 import { editorDungeonSeed } from "../shared/editor-seed.js";
 import { ARENA_X, ARENA_Y, EDITOR_TILE_CELLS, TILE_PX } from "../shared/tactics.js";
 
-type TileType = "void" | "floor" | "grass" | "wall" | "doorway";
+type TileType = "void" | "floor" | "grass" | "wall" | "forest-wall" | "doorway";
 type EntityType = "player" | "hellhound" | "bat" | "spider" | "gargoyle" | "snake"
   | "purple-gem" | "pressure-plate" | "portal-exit" | "torch" | "boulder" | "angel-statue" | "spider-statue" | "spider-wall-statue"
   | "gate" | "gate-button" | "rock-1" | "rock-2" | "rock-3" | "rock-4"
@@ -35,6 +35,7 @@ const tools: ToolDefinition[] = [
   { type: "floor", label: "Stone tile", icon: "◇", group: "tile" },
   { type: "grass", label: "Grass tile", icon: "♧", group: "tile" },
   { type: "wall", label: "Wall block", icon: "◆", group: "tile" },
+  { type: "forest-wall", label: "Forest wall", icon: "♠", group: "tile" },
   { type: "bucket", label: "Fill bucket", icon: "▰", group: "tile" },
   { type: "rain", label: "Rain region", icon: "☂", group: "tile" },
   { type: "shadow", label: "Shadow region", icon: "◩", group: "tile" },
@@ -85,11 +86,13 @@ const editorAssets = new Map<string, HTMLImageElement>();
 for (const [name, source] of Object.entries({
   floor: "/graphics/med/textures/dungeon-floor-stone.png",
   wall: "/graphics/med/textures/dungeon-wall-stone.png",
+  "forest-wall": "/textures/forest-wall.png",
   gate: "/textures/gate-weathered-iron.png",
   player: "/sprites/player.png",
   spider: "/sprites/spider.png",
   "spider-statue": "/sprites/spider-statue.png",
   "spider-wall-statue": "/sprites/spider-wall-statue.png",
+  "spider-pedestal": "/sprites/spider-pedestal.png",
   gargoyle: "/sprites/gargoyle.png",
   angel: "/sprites/angel.png",
   boulder: "/sprites/boulder.png",
@@ -284,7 +287,7 @@ function normalizeLevel(value: unknown): LevelData {
   if (!Array.isArray(raw.tiles) || !Array.isArray(raw.entities)) {
     throw new Error("Invalid level dimensions, tiles, or entities.");
   }
-  const validTiles = new Set<TileType>(["floor", "grass", "wall", "doorway"]);
+  const validTiles = new Set<TileType>(["floor", "grass", "wall", "forest-wall", "doorway"]);
   const nextTiles = raw.tiles.filter((tile): tile is LevelData["tiles"][number] =>
     !!tile && Number.isInteger(tile.x) && Number.isInteger(tile.y) && validTiles.has(tile.type));
   const nextEntities = raw.entities.filter((entity): entity is PlacedEntity =>
@@ -413,12 +416,12 @@ function spriteDirection(facing: number): number {
   const cameraBearing = Math.PI * .75 - viewRotation;
   return ((Math.round((cameraBearing - facing) / (Math.PI / 4)) % 8) + 8) % 8;
 }
-function drawSprite(name: "player" | "spider" | "spider-statue" | "spider-wall-statue" | "gargoyle" | "angel" | "boulder" | "dead-tree-1" | "dead-tree-2" | "dead-tree-3", centre: { x: number; y: number }, direction: number, scale = 1): boolean {
+function drawSprite(name: "player" | "spider" | "spider-statue" | "spider-wall-statue" | "spider-pedestal" | "gargoyle" | "angel" | "boulder" | "dead-tree-1" | "dead-tree-2" | "dead-tree-3", centre: { x: number; y: number }, direction: number, scale = 1, lift = 0): boolean {
   const image = loadedAsset(name); if (!image) return false;
   const frameSize = image.naturalWidth / 8;
   const size = tileWidth() * scale;
   context.drawImage(image, direction * frameSize, 0, frameSize, frameSize,
-    centre.x - size / 2, centre.y - size * .86, size, size);
+    centre.x - size / 2, centre.y - size * .86 - lift, size, size);
   return true;
 }
 function pointInPolygon(px: number, py: number, points: Array<{ x: number; y: number }>): boolean {
@@ -431,7 +434,7 @@ function pointInPolygon(px: number, py: number, points: Array<{ x: number; y: nu
 }
 function drawTile(x: number, y: number, type: TileType): void {
   const base = diamond(x, y);
-  if (type === "wall") {
+  if (type === "wall" || type === "forest-wall") {
     const top = diamond(x, y, wallHeight());
     const visibleEdges = [0, 1, 2, 3].sort((a, b) => {
       const aNext = (a + 1) % 4, bNext = (b + 1) % 4;
@@ -442,10 +445,12 @@ function drawTile(x: number, y: number, type: TileType): void {
       context.fillStyle = face ? "#343c48" : "#242a34";
       const side = [top[edge]!, top[next]!, base[next]!, base[edge]!];
       pathPolygon(side); context.fill();
-      const wall = loadedAsset("wall"); if (wall) drawMappedImage(wall, side, face ? "rgba(0,0,0,.2)" : "rgba(0,0,0,.38)");
+      const wall = loadedAsset(type === "forest-wall" ? "forest-wall" : "wall");
+      if (wall) drawMappedImage(wall, side, type === "forest-wall" ? (face ? "rgba(0,0,0,.08)" : "rgba(0,0,0,.2)") : (face ? "rgba(0,0,0,.2)" : "rgba(0,0,0,.38)"));
     }
     context.fillStyle = "#596372"; pathPolygon(top); context.fill();
-    const floor = loadedAsset("floor"); if (floor) drawMappedImage(floor, top, "rgba(255,255,255,.08)");
+    const floor = loadedAsset(type === "forest-wall" ? "forest-wall" : "floor");
+    if (floor) drawMappedImage(floor, top, type === "forest-wall" ? "rgba(0,0,0,.25)" : "rgba(255,255,255,.08)");
     context.strokeStyle = "#737f90"; pathPolygon(top); context.stroke();
     context.strokeStyle = "rgba(10,12,16,.72)";
     for (const side of [[top[3]!, base[3]!], [top[2]!, base[2]!], [top[1]!, base[1]!]] as const) {
@@ -533,11 +538,15 @@ function drawEntity(entity: PlacedEntity): void {
     context.restore(); return;
   }
   if (entity.type === "spider-statue") {
-    drawSprite("spider-statue", centre, spriteDirection(entity.facing), 3.4);
+    const direction = spriteDirection(entity.facing);
+    drawSprite("spider-pedestal", centre, direction, 1.65);
+    drawSprite("spider-statue", centre, direction, 5.1, cellSize * .38);
     return;
   }
   if (entity.type === "spider-wall-statue") {
-    drawSprite("spider-wall-statue", centre, spriteDirection(entity.facing), 3.4);
+    const direction = spriteDirection(entity.facing);
+    drawSprite("spider-pedestal", centre, direction, 1.65);
+    drawSprite("spider-wall-statue", centre, direction, 3.4, cellSize * .38);
     return;
   }
   if (entity.type === "gargoyle") {
@@ -639,7 +648,7 @@ function entityFromEvent(event: Pick<MouseEvent, "clientX" | "clientY">): Placed
   const pointerX = event.clientX - rect.left, pointerY = event.clientY - rect.top;
   const hitHeights: Partial<Record<EntityType, number>> = {
     gargoyle: 285, hellhound: 105, bat: 120, spider: 90, snake: 65, player: 130,
-    gate: 190, torch: 130, boulder: 100, "angel-statue": 285, "spider-statue": 180, "spider-wall-statue": 260,
+    gate: 190, torch: 130, boulder: 100, "angel-statue": 285, "spider-statue": 305, "spider-wall-statue": 295,
     "rock-1": 75, "rock-2": 75, "rock-3": 75, "rock-4": 75,
     "rock-5": 115, "rock-6": 115, "rock-7": 115, "rock-8": 115,
     "dead-tree-1": 490, "dead-tree-2": 490, "dead-tree-3": 490,
@@ -705,7 +714,7 @@ function floodFill(x: number, y: number, replacement: Exclude<TileType, "void" |
       visited[nextIndex] = 1; queueX[write] = nextX; queueY[write] = nextY; write++;
     }
   }
-  if (replacement === "wall") entities = entities.filter((entity) => !changed.has(tileIndex(entity.x, entity.y)));
+  if (replacement === "wall" || replacement === "forest-wall") entities = entities.filter((entity) => !changed.has(tileIndex(entity.x, entity.y)));
   return changed.size > 0;
 }
 
@@ -732,7 +741,7 @@ function placeTool(tool: ToolType, x: number, y: number): boolean {
   if (!entityTypes.has(tool as EntityType)) {
     if (tileAt(x, y) === tool) return false;
     tiles[tileIndex(x, y)] = tool as TileType;
-    if (tool === "void" || tool === "wall") entities = entities.filter((entity) => entity.x !== x || entity.y !== y);
+    if (tool === "void" || tool === "wall" || tool === "forest-wall") entities = entities.filter((entity) => entity.x !== x || entity.y !== y);
     return true;
   }
   const entityType = tool as EntityType;
@@ -755,7 +764,7 @@ function placeTool(tool: ToolType, x: number, y: number): boolean {
 }
 
 function selectTool(tool: ToolType): void {
-  if (tool === "floor" || tool === "grass" || tool === "wall") selectedFillTile = tool;
+  if (tool === "floor" || tool === "grass" || tool === "wall" || tool === "forest-wall") selectedFillTile = tool;
   if (tool === "rain") activeLayer = "rain";
   else if (tool === "shadow") activeLayer = "shadow";
   else if (tool !== "erase") activeLayer = "terrain";

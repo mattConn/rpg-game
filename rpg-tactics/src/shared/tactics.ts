@@ -145,7 +145,7 @@ export interface EditorDungeonConfig {
   name: string;
   width: number;
   height: number;
-  tiles: Array<{ x: number; y: number; type: "floor" | "grass" | "wall" | "doorway" }>;
+  tiles: Array<{ x: number; y: number; type: "floor" | "grass" | "wall" | "forest-wall" | "doorway" }>;
   rainRegions?: Array<{ x: number; y: number; width: number; height: number }>;
   shadowRegions?: Array<{ x: number; y: number; width: number; height: number }>;
   /** Legacy single rain rectangle, accepted when loading older saved rooms. */
@@ -477,7 +477,7 @@ export function configureDungeon(seed: number): void {
 export function configureEditorDungeon(config: EditorDungeonConfig): void {
   EDITOR_DUNGEON = config;
   DUNGEON_SEED = 1;
-  const wallKeys = new Set(config.tiles.filter((tile) => tile.type === "wall").map((tile) => `${tile.x},${tile.y}`));
+  const wallKeys = new Set(config.tiles.filter((tile) => tile.type === "wall" || tile.type === "forest-wall").map((tile) => `${tile.x},${tile.y}`));
   const walkable = Array.from({ length: config.width * config.height }, (_, index) => ({
     x: index % config.width, y: Math.floor(index / config.width),
   })).filter((tile) => !wallKeys.has(`${tile.x},${tile.y}`));

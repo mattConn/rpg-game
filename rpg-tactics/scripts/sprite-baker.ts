@@ -15,9 +15,10 @@ const light = new THREE.DirectionalLight(0xffffff, 2.8); light.position.set(3, 5
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, .01, 100);
 const result: Record<string, { png: string; span: number; center: number }> = {};
 
-async function bake(name: string, rig: any, dead = false, bite = false, eat = false, stone = false) {
+async function bake(name: string, rig: any, dead = false, bite = false, eat = false, stone = false, resolution = W) {
   const model: THREE.Group = rig.model;
   scene.add(model);
+  renderer.setSize(resolution, resolution);
   model.updateMatrixWorld(true);
   const bounds = new THREE.Box3().setFromObject(model);
   const center = bounds.getCenter(new THREE.Vector3());
@@ -25,7 +26,7 @@ async function bake(name: string, rig: any, dead = false, bite = false, eat = fa
   const span = Math.max(size.x, size.y, size.z) * 1.3;
   const overhead = name === 'spider-wall';
   const frames = overhead ? 9 : bite || eat ? 8 : FRAMES;
-  const atlas = document.createElement('canvas'); atlas.width = W * DIRECTIONS; atlas.height = W * frames;
+  const atlas = document.createElement('canvas'); atlas.width = resolution * DIRECTIONS; atlas.height = resolution * frames;
   const ctx = atlas.getContext('2d')!;
   rig.mixer?.stopAllAction();
   const action = dead ? rig.deathAction
@@ -55,7 +56,7 @@ async function bake(name: string, rig: any, dead = false, bite = false, eat = fa
       }
       camera.lookAt(center);
       renderer.render(scene, camera);
-      ctx.drawImage(renderer.domElement, d * W, f * W);
+      ctx.drawImage(renderer.domElement, d * resolution, f * resolution);
     }
   }
   if (stone) {
@@ -151,7 +152,10 @@ async function run() {
     if (name === 'spider') {
       rig.mixer?.stopAllAction();
       await bake('spider-wall', rig);
-      await bake('spider-statue', rig, false, false, false, true);
+      // The floor statue displays at three times enemy scale. Bake three times
+      // as many pixels per frame so that enlargement does not magnify the
+      // standard 192px enemy atlas.
+      await bake('spider-statue', rig, false, false, false, true, W * 3);
       const position = rig.model.position.clone();
       const rotation = rig.model.rotation.clone();
       // Stand the authored +X-facing spider on its head. The regular orbiting
@@ -237,6 +241,44 @@ async function run() {
     model.position.set(-center.x, -bounds.min.y, -center.z);
     await bake(name!, { model });
   }
+  // A squat stone block shared by both spider statues. The seeded mottling is
+  // baked into the atlas, so it remains crisp and stable at every quality.
+  const pedestalTexture = document.createElement('canvas');
+  pedestalTexture.width = pedestalTexture.height = 96;
+  const pedestalContext = pedestalTexture.getContext('2d')!;
+  const pedestalPixels = pedestalContext.createImageData(96, 96);
+  let pedestalSeed = 0x51a7c3;
+  const pedestalRandom = () => {
+    pedestalSeed ^= pedestalSeed << 13; pedestalSeed ^= pedestalSeed >>> 17; pedestalSeed ^= pedestalSeed << 5;
+    return (pedestalSeed >>> 0) / 4294967296;
+  };
+  for (let index = 0; index < pedestalPixels.data.length; index += 4) {
+    const grain = Math.round((pedestalRandom() - .5) * 34);
+    const broad = Math.sin((index / 4 % 96) * .17) * 8 + Math.sin(Math.floor(index / 4 / 96) * .13) * 7;
+    const value = Math.max(74, Math.min(188, Math.round(128 + grain + broad)));
+    pedestalPixels.data[index] = Math.round(value * .96);
+    pedestalPixels.data[index + 1] = value;
+    pedestalPixels.data[index + 2] = Math.min(255, Math.round(value * 1.03));
+    pedestalPixels.data[index + 3] = 255;
+  }
+  pedestalContext.putImageData(pedestalPixels, 0, 0);
+  for (let blotch = 0; blotch < 42; blotch++) {
+    const light = pedestalRandom() > .48;
+    pedestalContext.fillStyle = light ? 'rgba(225,228,230,.17)' : 'rgba(44,49,53,.2)';
+    pedestalContext.beginPath();
+    pedestalContext.ellipse(pedestalRandom() * 96, pedestalRandom() * 96,
+      3 + pedestalRandom() * 12, 2 + pedestalRandom() * 8, pedestalRandom() * Math.PI, 0, Math.PI * 2);
+    pedestalContext.fill();
+  }
+  const pedestalMap = new THREE.CanvasTexture(pedestalTexture);
+  pedestalMap.colorSpace = THREE.SRGBColorSpace;
+  pedestalMap.wrapS = pedestalMap.wrapT = THREE.RepeatWrapping;
+  pedestalMap.repeat.set(2.5, 1.25);
+  const pedestalMaterial = new THREE.MeshStandardMaterial({ map: pedestalMap, color: 0xc3c6c9, roughness: .96, metalness: 0 });
+  const pedestal = new THREE.Mesh(new THREE.BoxGeometry(6.2, 1.15, 4.8), pedestalMaterial);
+  pedestal.position.y = .575;
+  const pedestalModel = new THREE.Group(); pedestalModel.add(pedestal);
+  await bake('spider-pedestal', { model: pedestalModel });
   (window as any).spriteBake = result;
 }
 run().catch(error => { (window as any).spriteError = String(error.stack ?? error); });

@@ -48,6 +48,10 @@ export const SPRITE_META = {
     "span": 252.28125000000009,
     "center": 97.03125000000003
   },
+  "spider-pedestal": {
+    "span": 241.79999256134036,
+    "center": 17.25
+  },
   "spider-dead": {
     "span": 252.28125000000003,
     "center": 22.083171773509097
