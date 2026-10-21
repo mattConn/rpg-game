@@ -7,3 +7,7 @@ public/game.js.map
 # Editor / OS cruft
 .DS_Store
 *.log
+
+# Native editor save recovery files
+/rpg-tactics/data/*.json.bak
+/rpg-tactics/data/*.json.tmp

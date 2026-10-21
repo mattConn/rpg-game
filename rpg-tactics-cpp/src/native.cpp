@@ -336,7 +336,7 @@ struct Renderer {
                    bool player = false, bool anchored = false) {
       Point d = pos - camera;
       double depth = d.x * forward.x + d.y * forward.y;
-      if (depth > 0 && length(pos - game.player) < 3000)
+      if (depth > 0 && length(pos - (camera + forward * distance)) < 3000)
         list.push_back({pos, std::move(image), scale, altitude, facing, depth,
                         animation, player, anchored});
     };
@@ -462,7 +462,7 @@ struct Renderer {
       return;
     auto it = labels.find(label);
     if (it == labels.end()) {
-      if (labels.size() > 64) {
+      if (labels.size() > 512) {
         for (auto &[key, cached] : labels)
           SDL_DestroyTexture(cached.texture);
         labels.clear();
@@ -508,11 +508,12 @@ struct Renderer {
         }
     }
   }
-  void render(const Game &game) {
+  void render(const Game &game, bool editor = false, Point focus = {},
+              bool present = true) {
     auto start = std::chrono::steady_clock::now();
     forward = {-std::sin(yaw), -std::cos(yaw)};
     right = {std::cos(yaw), -std::sin(yaw)};
-    camera = game.player - forward * distance;
+    camera = (editor ? focus : game.player) - forward * distance;
     eye = distance * std::tan(angle) + 25;
     focal = width / (2 * fov);
     horizon = height * .58 - std::tan(angle) * focal;
@@ -529,6 +530,8 @@ struct Renderer {
     SDL_RenderCopy(output, frame, nullptr, nullptr);
     if (scanlines)
       SDL_RenderCopy(output, scanlineTexture, nullptr, nullptr);
+    if (editor)
+      return;
     SDL_SetRenderDrawColor(output, 22, 20, 17, 255);
     SDL_Rect hud{12, 12, 220, 28};
     SDL_RenderFillRect(output, &hud);
@@ -555,6 +558,15 @@ struct Renderer {
     renderMs = std::chrono::duration<double, std::milli>(
                    std::chrono::steady_clock::now() - start)
                    .count();
+    if (present)
+      presentFrame();
+  }
+  std::string capturePath;
+  void presentFrame() {
+    if (!capturePath.empty()) {
+      screenshot(capturePath);
+      capturePath.clear();
+    }
     SDL_RenderPresent(output);
   }
   void screenshot(const std::string &path) {
@@ -574,6 +586,8 @@ struct Renderer {
     SDL_FreeSurface(surface);
   }
 };
+
+#include "native_editor.hpp"
 
 void selfTest() {
   Json room = {{"width", 8},
@@ -740,7 +754,9 @@ int main(int argc, char **argv) {
     fs::path assets = fs::path("../rpg-tactics/public"),
              project = fs::path("../rpg-tactics/data/editor-project.json");
     std::string room, screenshot;
-    bool hidden = false, benchmark = false;
+    bool hidden = false, benchmark = false, editorTest = false;
+    bool editor =
+        fs::path(argv[0]).stem().string().find("editor") != std::string::npos;
     int frames = 0;
     for (int i = 1; i < argc; ++i) {
       std::string arg = argv[i];
@@ -749,7 +765,17 @@ int main(int argc, char **argv) {
           throw std::runtime_error("Missing argument for " + arg);
         return std::string(argv[++i]);
       };
-      if (arg == "--self-test") {
+      if (arg == "--editor") {
+        editor = true;
+      } else if (arg == "--editor-ui-test") {
+        editor = true;
+        editorTest = true;
+        hidden = true;
+        frames = 3;
+      } else if (arg == "--editor-self-test") {
+        editorSelfTest();
+        return 0;
+      } else if (arg == "--self-test") {
         selfTest();
         return 0;
       } else if (arg == "--assets")
@@ -773,7 +799,8 @@ int main(int argc, char **argv) {
         throw std::runtime_error("Unknown argument: " + arg);
     }
     Game game;
-    game.load(project.string(), room);
+    if (!editor)
+      game.load(project.string(), room);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0)
       throw std::runtime_error(SDL_GetError());
     if (!(IMG_Init(IMG_INIT_PNG) & IMG_INIT_PNG) || TTF_Init() != 0)
@@ -786,110 +813,118 @@ int main(int argc, char **argv) {
       throw std::runtime_error(SDL_GetError());
     {
       Renderer renderer(window, assets);
-      if (benchmark)
-        SDL_RenderSetVSync(renderer.output, 0);
-      bool running = true, drag = false, moved = false;
-      int count = 0, fpsCount = 0;
-      double fpsSeconds = 0, renderTotal = 0;
-      uint64_t last = SDL_GetPerformanceCounter(), started = last;
-      while (running) {
-        uint64_t now = SDL_GetPerformanceCounter();
-        double dt =
-            std::min(.05, double(now - last) / SDL_GetPerformanceFrequency());
-        last = now;
-        SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-          if (event.type == SDL_QUIT)
-            running = false;
-          else if (event.type == SDL_KEYDOWN && !event.key.repeat) {
-            switch (event.key.keysym.sym) {
-            case SDLK_ESCAPE:
-              running = false;
-              break;
-            case SDLK_e:
-              game.eat();
-              break;
-            case SDLK_SPACE:
-              game.attack();
-              break;
-            case SDLK_r:
-              game.restart();
-              break;
-            case SDLK_F2:
-              renderer.scanlines = !renderer.scanlines;
-              break;
-            case SDLK_F3:
-              renderer.width = renderer.width == 640   ? 960
-                               : renderer.width == 960 ? 320
-                               : renderer.width == 320 ? 480
-                                                       : 640;
-              renderer.resize(renderer.windowW, renderer.windowH);
-              break;
-            default:
-              break;
-            }
-          } else if (event.type == SDL_WINDOWEVENT &&
-                     event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
-            renderer.resize(event.window.data1, event.window.data2);
-          else if (event.type == SDL_MOUSEBUTTONDOWN) {
-            if (event.button.y < 48 &&
-                event.button.x > renderer.windowW - 210) {
-              renderer.scanlines = !renderer.scanlines;
-            } else {
-              drag = true;
-              moved = false;
-            }
-          } else if (event.type == SDL_MOUSEMOTION && drag) {
-            moved |=
-                std::abs(event.motion.xrel) + std::abs(event.motion.yrel) > 1;
-            renderer.yaw -= event.motion.xrel * .006;
-            renderer.angle =
-                std::clamp(renderer.angle + event.motion.yrel * .003,
-                           5 * pi / 180, pi / 4);
-          } else if (event.type == SDL_MOUSEBUTTONUP) {
-            if (drag && !moved && event.button.button == SDL_BUTTON_LEFT)
-              game.attack();
-            drag = false;
-          } else if (event.type == SDL_MOUSEWHEEL)
-            renderer.distance =
-                std::clamp(renderer.distance * std::exp(-event.wheel.y * .1),
-                           260.0, 1400.0);
-        }
-        const Uint8 *keys = SDL_GetKeyboardState(nullptr);
-        Point f{-std::sin(renderer.yaw), -std::cos(renderer.yaw)},
-            r{std::cos(renderer.yaw), -std::sin(renderer.yaw)};
-        Point input =
-            f * (int(keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) -
-                 int(keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN])) +
-            r * (int(keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) -
-                 int(keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]));
-        if (!(SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) && !hidden)
-          input = {};
+      if (editor) {
+        runEditor(window, renderer, project, room, frames, screenshot,
+                  editorTest);
+      } else {
         if (benchmark)
-          input = r * (count % 120 < 60 ? 1 : -1);
-        game.update(benchmark ? 1.0 / 60 : dt, input,
-                    keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT]);
-        renderer.render(game);
-        renderTotal += renderer.renderMs;
-        ++count;
-        ++fpsCount;
-        fpsSeconds += dt;
-        if (fpsSeconds >= .5) {
-          renderer.fps = fpsCount / fpsSeconds;
-          fpsCount = 0;
-          fpsSeconds = 0;
+          SDL_RenderSetVSync(renderer.output, 0);
+        bool running = true, drag = false, moved = false;
+        int count = 0, fpsCount = 0;
+        double fpsSeconds = 0, renderTotal = 0;
+        uint64_t last = SDL_GetPerformanceCounter(), started = last;
+        while (running) {
+          uint64_t now = SDL_GetPerformanceCounter();
+          double dt =
+              std::min(.05, double(now - last) / SDL_GetPerformanceFrequency());
+          last = now;
+          SDL_Event event;
+          while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT)
+              running = false;
+            else if (event.type == SDL_KEYDOWN && !event.key.repeat) {
+              switch (event.key.keysym.sym) {
+              case SDLK_ESCAPE:
+                running = false;
+                break;
+              case SDLK_e:
+                game.eat();
+                break;
+              case SDLK_SPACE:
+                game.attack();
+                break;
+              case SDLK_r:
+                game.restart();
+                break;
+              case SDLK_F2:
+                renderer.scanlines = !renderer.scanlines;
+                break;
+              case SDLK_F3:
+                renderer.width = renderer.width == 640   ? 960
+                                 : renderer.width == 960 ? 320
+                                 : renderer.width == 320 ? 480
+                                                         : 640;
+                renderer.resize(renderer.windowW, renderer.windowH);
+                break;
+              default:
+                break;
+              }
+            } else if (event.type == SDL_WINDOWEVENT &&
+                       event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+              renderer.resize(event.window.data1, event.window.data2);
+            else if (event.type == SDL_MOUSEBUTTONDOWN) {
+              if (event.button.y < 48 &&
+                  event.button.x > renderer.windowW - 210) {
+                renderer.scanlines = !renderer.scanlines;
+              } else {
+                drag = true;
+                moved = false;
+              }
+            } else if (event.type == SDL_MOUSEMOTION && drag) {
+              moved |=
+                  std::abs(event.motion.xrel) + std::abs(event.motion.yrel) > 1;
+              renderer.yaw -= event.motion.xrel * .006;
+              renderer.angle =
+                  std::clamp(renderer.angle + event.motion.yrel * .003,
+                             5 * pi / 180, pi / 4);
+            } else if (event.type == SDL_MOUSEBUTTONUP) {
+              if (drag && !moved && event.button.button == SDL_BUTTON_LEFT)
+                game.attack();
+              drag = false;
+            } else if (event.type == SDL_MOUSEWHEEL)
+              renderer.distance =
+                  std::clamp(renderer.distance * std::exp(-event.wheel.y * .1),
+                             260.0, 1400.0);
+          }
+          const Uint8 *keys = SDL_GetKeyboardState(nullptr);
+          Point f{-std::sin(renderer.yaw), -std::cos(renderer.yaw)},
+              r{std::cos(renderer.yaw), -std::sin(renderer.yaw)};
+          Point input =
+              f * (int(keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) -
+                   int(keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN])) +
+              r * (int(keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) -
+                   int(keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]));
+          if (!(SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) && !hidden)
+            input = {};
+          if (benchmark)
+            input = r * (count % 120 < 60 ? 1 : -1);
+          game.update(benchmark ? 1.0 / 60 : dt, input,
+                      keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT]);
+          renderer.render(game);
+          renderTotal += renderer.renderMs;
+          ++count;
+          ++fpsCount;
+          fpsSeconds += dt;
+          if (fpsSeconds >= .5) {
+            renderer.fps = fpsCount / fpsSeconds;
+            fpsCount = 0;
+            fpsSeconds = 0;
+          }
+          if (frames && count >= frames)
+            running = false;
         }
-        if (frames && count >= frames)
-          running = false;
+        if (!screenshot.empty()) {
+          renderer.capturePath = screenshot;
+          renderer.render(game);
+        }
+        double seconds = double(SDL_GetPerformanceCounter() - started) /
+                         SDL_GetPerformanceFrequency();
+        std::cout << "Frames: " << count
+                  << "; measured FPS: " << count / seconds
+                  << "; average render: " << renderTotal / std::max(1, count)
+                  << " ms; room: " << game.roomName
+                  << "; health: " << game.health << '\n';
       }
-      if (!screenshot.empty())
-        renderer.screenshot(screenshot);
-      double seconds = double(SDL_GetPerformanceCounter() - started) /
-                       SDL_GetPerformanceFrequency();
-      std::cout << "Frames: " << count << "; measured FPS: " << count / seconds
-                << "; average render: " << renderTotal / std::max(1, count)
-                << " ms; room: " << game.roomName << "; health: " << game.health
-                << '\n';
     }
     SDL_DestroyWindow(window);
     TTF_Quit();

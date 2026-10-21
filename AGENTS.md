@@ -1,11 +1,13 @@
 # Repository guidance
 
-## Main game: native C++
+## Main game and level editor: native C++
 
 **`rpg-tactics-cpp/` is the main game and the default destination for all new
 gameplay, rendering, UI, bug-fix, and performance work.** The project direction
 changed to native C++ on October 21, 2026. When the user says "the game," assume
 this Windows-native version unless they explicitly name another project.
+The native C++ level editor is also the primary editor; launch `editor.cmd`
+or `./editor.ps1` for level-authoring tasks.
 
 This guidance supersedes historical descriptions in `CLAUDE.md` and older
 READMEs that call the browser game the active project. The native port is still
@@ -17,6 +19,11 @@ being developed; making it the main game does not imply complete feature parity.
   C++ raycaster, sprite rendering, HUD, scanlines, blood rendering, and self-tests.
 - `rpg-tactics-cpp/src/native_game.hpp`: project/room loading, simulation,
   movement/collision, enemies, combat, bat patrols, blood particles, gates, and exits.
+- `rpg-tactics-cpp/src/native_editor.hpp`: native SDL editor UI, map/3D views,
+  input, in-process Play mode, and UI tests.
+- `rpg-tactics-cpp/src/native_editor_document.hpp`: authored JSON, editing,
+  room links, undo/redo, validation, and atomic saves with `.json.bak` backups.
+- `rpg-tactics-cpp/editor.ps1` / `editor.cmd`: native level editor launchers.
 - `rpg-tactics-cpp/build.ps1`: active Windows C++20 release build (`-O3`).
 - `rpg-tactics-cpp/run.ps1` / `run.cmd`: active launchers; configure the SDL DLL path.
 - `rpg-tactics-cpp/build/rpg-tactics-native.exe`: generated executable.
@@ -45,6 +52,8 @@ cd rpg-tactics-cpp
 ./run.ps1 --self-test
 ./run.ps1 --smoke-test
 ./run.ps1
+./build.ps1 -Target editor
+./editor.ps1
 ```
 
 The installed toolchain is MSYS2 MinGW64 at `C:/msys64/mingw64`. Dependencies
@@ -66,6 +75,42 @@ Other supported options: `--room B`, `--project PATH`, `--assets PATH`,
 `--benchmark`, and `--frames N`. See `rpg-tactics-cpp/README.md` for details.
 Run `git diff --check` before handing off changes. Put temporary test maps,
 screenshots, logs, and benchmark artifacts under the ignored `work/` directory.
+
+The editor is also native C++ and is the default for level-authoring work.
+Build it with `-Target editor`; `-Target staged` builds `rpg-tactics-next.exe`
+for verification without replacing a running executable. The editor and game
+share one source entry point; the editor executable name or `--editor` selects
+editor mode. Run `--editor-self-test` and `--editor-ui-test` for editor changes,
+as well as the gameplay tests when changing shared code. UI tests use temporary
+maps under `work/` and capture map, 3D, and Play screenshots there.
+Never point automated save tests at the user's authored project. Preserve
+unknown JSON fields and legacy rain formats; Play must use a separate simulation
+copy. Saving requires an explicit user action inside the editor.
+
+## Native editor controls and behavior
+
+- Tab switches between the 3D game-renderer preview and top-down map.
+- In 3D, **Shift + right mouse drag rotates the camera**. Right/middle drag
+  pans, and the mouse wheel zooms. Camera rotation does not change the map.
+- The **Rotate map** button changes the authored room: terrain, entities,
+  facings, and regions rotate 90 degrees. It is undoable; do not confuse it
+  with freely orbiting the editor camera.
+- Left drag paints; Select/move selects or moves an entity. Q rotates entity
+  facing, and Delete removes the selected entity. Scroll over the Objects
+  palette to reveal additional objects.
+- F5 starts Play using unsaved changes. Escape/F5 or the return banner returns
+  to the authored map without applying simulation changes. In Play, right drag
+  orbits, and normal native movement/combat controls apply.
+- Ctrl+S saves, Ctrl+O opens/imports, Ctrl+Z undoes, and Ctrl+Y redoes. Export
+  writes a copy. Saves keep the previous file as `.json.bak`; backups and
+  temporary save files are local artifacts, not project source.
+- Room renaming updates incoming exits. Rain/shadow regions can be authored;
+  rainfall rendering and procedural seed editing still need porting.
+
+Keep the running editor open during unrelated work. It can contain unsaved
+user edits, so do not stop it to replace a build without preserving that work.
+Editor document tests and mouse-driven UI tests passed for the initial port;
+rerun them when changing editing, persistence, input, or preview behavior.
 
 Windows locks running executables. When replacing a live build, compile and
 verify a separate executable first, stop only this game's process, wait for it
@@ -92,11 +137,12 @@ isolated benchmark result.
 
 ## Browser projects and remaining port work
 
-`rpg-tactics/` remains the existing browser level editor, asset pipeline, and
-legacy/reference game. Use its editor at `http://localhost:3300/editor.html`
-when editor work is requested (`cd rpg-tactics; npm start`). Save there and
-restart the native game to read the updated project. Do not port the editor or
-mirror native gameplay changes into TypeScript unless the task requires it.
+`rpg-tactics/` remains the shared asset pipeline and legacy/reference browser
+game/editor. Use the native editor in `rpg-tactics-cpp/` by default. Both editors
+use the same authored JSON; avoid editing the same project in both at once.
+Save in the native editor, then restart the standalone native game to read
+changes, or use the editor's Play mode to test unsaved changes immediately.
+Do not mirror native gameplay/editor changes into TypeScript unless requested.
 The root browser app and `rpg-3d/` are also legacy/reference projects.
 
 Remaining parity work includes procedural dungeon generation, advanced

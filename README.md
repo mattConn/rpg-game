@@ -11,8 +11,10 @@ cd rpg-tactics-cpp
 ```
 
 You can also double-click `rpg-tactics-cpp/run.cmd`. The native game loads the
-existing sprite assets and saved editor maps. The browser level editor remains
-available in `rpg-tactics/`; the game itself needs no browser or Node server.
+existing sprite assets and saved editor maps. Double-click
+`rpg-tactics-cpp/editor.cmd` for the **native C++ level editor** (or build with
+`./build.ps1 -Target editor` and run `./editor.ps1`). Both game and editor run
+without a browser or Node server. The browser version remains as a reference.
 
 ## Legacy root browser game
 
